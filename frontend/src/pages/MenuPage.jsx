@@ -1,8 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Section, Cell, Badge, Button, Spinner, Title } from '@telegram-apps/telegram-ui';
+import { Section, Cell, Button, Spinner, Title } from '@telegram-apps/telegram-ui';
+import {
+  setMainButtonParams, onMainButtonClick, offMainButtonClick,
+  mountMainButton, unmountMainButton,
+  hideBackButton,
+  hapticFeedbackImpactOccurred,
+} from '@telegram-apps/sdk-react';
 import { getMenu } from '../services/api';
 import { useCartStore } from '../stores/cartStore';
+import logo from '../assets/logo.png';
 
 export default function MenuPage() {
   const [menu, setMenu] = useState(null);
@@ -11,6 +18,38 @@ export default function MenuPage() {
   const itemCount = useCartStore((s) => s.getItemCount());
   const navigate = useNavigate();
 
+  // Hide back button on menu (root page)
+  useEffect(() => {
+    try { hideBackButton(); } catch {}
+  }, []);
+
+  // Main Button → Cart
+  const goToCart = useCallback(() => navigate('/cart'), [navigate]);
+
+  useEffect(() => {
+    try {
+      mountMainButton();
+      if (itemCount > 0) {
+        setMainButtonParams({
+          text: `Cart (${itemCount})`,
+          is_visible: true,
+          is_active: true,
+        });
+        onMainButtonClick(goToCart);
+      } else {
+        setMainButtonParams({ is_visible: false });
+      }
+    } catch {}
+
+    return () => {
+      try {
+        offMainButtonClick(goToCart);
+        setMainButtonParams({ is_visible: false });
+        unmountMainButton();
+      } catch {}
+    };
+  }, [itemCount, goToCart]);
+
   useEffect(() => {
     getMenu()
       .then((res) => setMenu(res.data.data))
@@ -18,9 +57,15 @@ export default function MenuPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  const handleAddItem = (product) => {
+    addItem(product);
+    try { hapticFeedbackImpactOccurred('light'); } catch {}
+  };
+
   if (loading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 60, minHeight: '80vh' }}>
+        <img src={logo} alt="Mr.Pub" style={{ width: 80, height: 80, borderRadius: 16, marginBottom: 16 }} />
         <Spinner size="l" />
       </div>
     );
@@ -29,7 +74,6 @@ export default function MenuPage() {
   const categories = menu?.categories || [];
   const items = menu?.items || [];
 
-  // Group items by category
   const grouped = categories
     .sort((a, b) => a.sortOrder - b.sortOrder)
     .map((cat) => ({
@@ -42,59 +86,42 @@ export default function MenuPage() {
 
   return (
     <div style={{ paddingBottom: 80 }}>
-      <div style={{ textAlign: 'center', padding: '16px 0 8px' }}>
-        <Title weight="1" style={{ fontSize: 22 }}>
-          Mr.Pub
-        </Title>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <img src={logo} alt="Mr.Pub" style={{ width: 36, height: 36, borderRadius: 8 }} />
+          <Title weight="1" style={{ fontSize: 20 }}>Mr.Pub</Title>
+        </div>
+        <Button size="s" mode="bezeled" onClick={() => navigate('/profile')}>
+          Profile
+        </Button>
       </div>
 
       {grouped.map((category) => (
         <Section key={category.id} header={category.name}>
-          {category.products.map((product) => (
-            <Cell
-              key={product.id}
-              subtitle={`${product.price.toLocaleString()} сум`}
-              after={
-                <Button
-                  size="s"
-                  mode="bezeled"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    addItem(product);
-                  }}
-                >
-                  +
-                </Button>
-              }
-              description={product.description || undefined}
-            >
-              {product.name}
-            </Cell>
-          ))}
+          {category.products.map((product) => {
+            const imgUrl = product.images?.[0]?.url;
+            return (
+              <Cell
+                key={product.id}
+                subtitle={`${product.price.toLocaleString()} сум`}
+                before={
+                  imgUrl ? (
+                    <img src={imgUrl} alt={product.name} style={{ width: 48, height: 48, borderRadius: 8, objectFit: 'cover' }} />
+                  ) : undefined
+                }
+                after={
+                  <Button size="s" mode="bezeled" onClick={(e) => { e.stopPropagation(); handleAddItem(product); }}>
+                    +
+                  </Button>
+                }
+                description={product.description || undefined}
+              >
+                {product.name}
+              </Cell>
+            );
+          })}
         </Section>
       ))}
-
-      {itemCount > 0 && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            padding: 16,
-            background: 'var(--tg-theme-bg-color, #fff)',
-            borderTop: '1px solid var(--tg-theme-hint-color, #ccc)',
-          }}
-        >
-          <Button
-            size="l"
-            stretched
-            onClick={() => navigate('/cart')}
-          >
-            Cart ({itemCount})
-          </Button>
-        </div>
-      )}
     </div>
   );
 }

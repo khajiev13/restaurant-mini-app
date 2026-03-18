@@ -1,7 +1,11 @@
 import axios from 'axios';
 
+// When accessed via Telegram (through Cloudflare tunnel), use the backend tunnel URL.
+// In local dev with Docker proxy, use '/api'.
+const BACKEND_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: BACKEND_URL,
   headers: { 'Content-Type': 'application/json' },
 });
 

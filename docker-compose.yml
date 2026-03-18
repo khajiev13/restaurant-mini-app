@@ -31,11 +31,16 @@ services:
         condition: service_healthy
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     container_name: restaurant_frontend
     restart: unless-stopped
     ports:
       - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-}
     depends_on:
       - backend
 

@@ -1,7 +1,12 @@
-import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useEffect, useState, useCallback } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { Section, Cell, Spinner, Title } from '@telegram-apps/telegram-ui';
+import {
+  showBackButton, hideBackButton, onBackButtonClick, offBackButtonClick,
+  hapticFeedbackNotificationOccurred,
+} from '@telegram-apps/sdk-react';
 import { getOrderStatus, getOrder } from '../services/api';
+import logo from '../assets/logo.png';
 
 const STATUS_LABELS = {
   NEW: 'Order Placed',
@@ -16,6 +21,24 @@ export default function OrderStatusPage() {
   const [order, setOrder] = useState(null);
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [prevStatus, setPrevStatus] = useState(null);
+  const navigate = useNavigate();
+
+  // Native back button
+  const goHome = useCallback(() => navigate('/'), [navigate]);
+
+  useEffect(() => {
+    try {
+      showBackButton();
+      onBackButtonClick(goHome);
+    } catch {}
+    return () => {
+      try {
+        offBackButtonClick(goHome);
+        hideBackButton();
+      } catch {}
+    };
+  }, [goHome]);
 
   useEffect(() => {
     getOrder(orderId)
@@ -28,18 +51,32 @@ export default function OrderStatusPage() {
   useEffect(() => {
     const poll = () => {
       getOrderStatus(orderId)
-        .then((res) => setStatus(res.data.data))
+        .then((res) => {
+          const newStatus = res.data.data?.status;
+          setStatus(res.data.data);
+          if (prevStatus && newStatus !== prevStatus) {
+            try {
+              if (newStatus === 'CANCELED') {
+                hapticFeedbackNotificationOccurred('error');
+              } else {
+                hapticFeedbackNotificationOccurred('success');
+              }
+            } catch {}
+          }
+          setPrevStatus(newStatus);
+        })
         .catch(console.error);
     };
 
     poll();
     const interval = setInterval(poll, 15000);
     return () => clearInterval(interval);
-  }, [orderId]);
+  }, [orderId, prevStatus]);
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 60, minHeight: '80vh' }}>
+        <img src={logo} alt="Mr.Pub" style={{ width: 64, height: 64, borderRadius: 16, marginBottom: 16 }} />
         <Spinner size="l" />
       </div>
     );
@@ -51,6 +88,7 @@ export default function OrderStatusPage() {
   return (
     <div style={{ padding: 16 }}>
       <div style={{ textAlign: 'center', marginBottom: 24 }}>
+        <img src={logo} alt="Mr.Pub" style={{ width: 64, height: 64, borderRadius: 16, marginBottom: 8 }} />
         <Title weight="1" style={{ fontSize: 22, marginBottom: 8 }}>
           Mr.Pub
         </Title>

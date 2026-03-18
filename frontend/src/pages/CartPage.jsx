@@ -1,13 +1,32 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Section, Cell, Button, Input, Title } from '@telegram-apps/telegram-ui';
+import {
+  showBackButton, hideBackButton, onBackButtonClick, offBackButtonClick,
+  setMainButtonParams, onMainButtonClick, offMainButtonClick,
+  mountMainButton, unmountMainButton,
+  requestContact,
+  hapticFeedbackNotificationOccurred, hapticFeedbackImpactOccurred,
+} from '@telegram-apps/sdk-react';
 import { useCartStore } from '../stores/cartStore';
 import { createOrder } from '../services/api';
+
+// Use native Telegram popups; fall back to browser for non-TG environments
+const tgAlert = (msg) => {
+  const tg = window.Telegram?.WebApp;
+  if (tg) tg.showAlert(msg);
+  else alert(msg);
+};
+
+const tgConfirm = (msg, cb) => {
+  const tg = window.Telegram?.WebApp;
+  if (tg) tg.showConfirm(msg, cb);
+  else cb(window.confirm(msg));
+};
 
 export default function CartPage() {
   const items = useCartStore((s) => s.items);
   const updateQuantity = useCartStore((s) => s.updateQuantity);
-  const removeItem = useCartStore((s) => s.removeItem);
   const clearCart = useCartStore((s) => s.clearCart);
   const total = useCartStore((s) => s.getTotal());
   const navigate = useNavigate();
@@ -17,17 +36,62 @@ export default function CartPage() {
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const handlePlaceOrder = async () => {
+  // Native back button
+  const goBack = useCallback(() => navigate('/'), [navigate]);
+
+  useEffect(() => {
+    try {
+      showBackButton();
+      onBackButtonClick(goBack);
+    } catch {}
+    return () => {
+      try {
+        offBackButtonClick(goBack);
+        hideBackButton();
+      } catch {}
+    };
+  }, [goBack]);
+
+  // Warn user before closing Telegram when cart has items
+  useEffect(() => {
+    const tg = window.Telegram?.WebApp;
+    if (!tg) return;
+    if (items.length > 0) {
+      tg.enableClosingConfirmation();
+    }
+    return () => tg.disableClosingConfirmation();
+  }, [items.length]);
+
+  // Request phone from Telegram
+  const handleRequestPhone = async () => {
+    try {
+      const result = await requestContact();
+      setPhone(result.contact.phoneNumber);
+      try { hapticFeedbackNotificationOccurred('success'); } catch {}
+    } catch {
+      tgAlert('Could not retrieve your phone number. Please enter it manually below.');
+    }
+  };
+
+  // Show popup helper — kept for complex multi-button dialogs
+  const showAlert = tgAlert;
+
+  // Place order logic
+  const handlePlaceOrder = useCallback(async () => {
     if (!phone) {
-      alert('Please enter your phone number');
+      showAlert('Please share your phone number to place an order.');
       return;
     }
     if (!address) {
-      alert('Please enter a delivery address');
+      showAlert('Please enter a delivery address.');
       return;
     }
 
     setSubmitting(true);
+    try {
+      setMainButtonParams({ is_progress_visible: true, is_active: false });
+    } catch {}
+
     try {
       const res = await createOrder({
         items: items.map((item) => ({
@@ -45,14 +109,39 @@ export default function CartPage() {
 
       const orderId = res.data.data.id;
       clearCart();
+      try { hapticFeedbackNotificationOccurred('success'); } catch {}
       navigate(`/order/${orderId}`);
     } catch (err) {
       console.error('Order failed:', err);
-      alert('Failed to place order. Please try again.');
+      tgAlert('Something went wrong. Please try again.');
+      try { hapticFeedbackNotificationOccurred('error'); } catch {}
     } finally {
       setSubmitting(false);
+      try { setMainButtonParams({ is_progress_visible: false, is_active: true }); } catch {}
     }
-  };
+  }, [phone, address, comment, items, clearCart, navigate]);
+
+  // Main Button → Place Order
+  useEffect(() => {
+    if (items.length === 0) return;
+    try {
+      mountMainButton();
+      setMainButtonParams({
+        text: `Place Order — ${total.toLocaleString()} сум`,
+        is_visible: true,
+        is_active: !submitting,
+      });
+      onMainButtonClick(handlePlaceOrder);
+    } catch {}
+
+    return () => {
+      try {
+        offMainButtonClick(handlePlaceOrder);
+        setMainButtonParams({ is_visible: false });
+        unmountMainButton();
+      } catch {}
+    };
+  }, [items.length, total, submitting, handlePlaceOrder]);
 
   if (items.length === 0) {
     return (
@@ -68,7 +157,7 @@ export default function CartPage() {
   }
 
   return (
-    <div style={{ paddingBottom: 100 }}>
+    <div style={{ paddingBottom: 80 }}>
       <Section header="Your Order">
         {items.map((item) => (
           <Cell
@@ -79,7 +168,10 @@ export default function CartPage() {
                 <Button
                   size="s"
                   mode="bezeled"
-                  onClick={() => updateQuantity(item.id, item.quantity - 1)}
+                  onClick={() => {
+                    updateQuantity(item.id, item.quantity - 1);
+                    try { hapticFeedbackImpactOccurred('light'); } catch {}
+                  }}
                 >
                   −
                 </Button>
@@ -87,7 +179,10 @@ export default function CartPage() {
                 <Button
                   size="s"
                   mode="bezeled"
-                  onClick={() => updateQuantity(item.id, item.quantity + 1)}
+                  onClick={() => {
+                    updateQuantity(item.id, item.quantity + 1);
+                    try { hapticFeedbackImpactOccurred('light'); } catch {}
+                  }}
                 >
                   +
                 </Button>
@@ -99,13 +194,25 @@ export default function CartPage() {
         ))}
       </Section>
 
-      <Section header="Delivery Details">
+      <Section header="Phone Number">
+        <Cell
+          after={
+            <Button size="s" mode="bezeled" onClick={handleRequestPhone}>
+              Share via Telegram
+            </Button>
+          }
+          subtitle={phone || 'Not provided'}
+        >
+          Phone
+        </Cell>
         <Input
-          header="Phone Number"
           placeholder="+998 90 123 45 67"
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
         />
+      </Section>
+
+      <Section header="Delivery Details">
         <Input
           header="Delivery Address"
           placeholder="Street, building, apartment"
@@ -119,29 +226,6 @@ export default function CartPage() {
           onChange={(e) => setComment(e.target.value)}
         />
       </Section>
-
-      <div
-        style={{
-          position: 'fixed',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          padding: 16,
-          background: 'var(--tg-theme-bg-color, #fff)',
-          borderTop: '1px solid var(--tg-theme-hint-color, #ccc)',
-        }}
-      >
-        <Button
-          size="l"
-          stretched
-          onClick={handlePlaceOrder}
-          disabled={submitting}
-        >
-          {submitting
-            ? 'Placing Order...'
-            : `Place Order — ${total.toLocaleString()} сум`}
-        </Button>
-      </div>
     </div>
   );
 }

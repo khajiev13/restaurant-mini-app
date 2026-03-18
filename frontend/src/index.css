@@ -8,4 +8,11 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background-color: var(--tg-theme-bg-color, #ffffff);
   color: var(--tg-theme-text-color, #000000);
+  /* Fill the Telegram viewport, not the browser's 100vh */
+  min-height: var(--tg-viewport-stable-height, 100vh);
+  /* Respect device safe areas (notch, home indicator, etc.) */
+  padding-top: var(--tg-content-safe-area-inset-top, 0px);
+  padding-bottom: var(--tg-safe-area-inset-bottom, 0px);
+  padding-left: var(--tg-safe-area-inset-left, 0px);
+  padding-right: var(--tg-safe-area-inset-right, 0px);
 }
