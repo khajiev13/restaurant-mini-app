@@ -1,27 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Section, Cell, Button, Input, Title } from '@telegram-apps/telegram-ui';
-import {
-  showBackButton, hideBackButton, onBackButtonClick, offBackButtonClick,
-  setMainButtonParams, onMainButtonClick, offMainButtonClick,
-  mountMainButton, unmountMainButton,
-  requestContact,
-  hapticFeedbackNotificationOccurred, hapticFeedbackImpactOccurred,
-} from '@telegram-apps/sdk-react';
+import { requestContact } from '@telegram-apps/sdk-react';
 import { useCartStore } from '../stores/cartStore';
 import { createOrder } from '../services/api';
 
-// Use native Telegram popups; fall back to browser for non-TG environments
 const tgAlert = (msg) => {
   const tg = window.Telegram?.WebApp;
   if (tg) tg.showAlert(msg);
   else alert(msg);
-};
-
-const tgConfirm = (msg, cb) => {
-  const tg = window.Telegram?.WebApp;
-  if (tg) tg.showConfirm(msg, cb);
-  else cb(window.confirm(msg));
 };
 
 export default function CartPage() {
@@ -40,57 +27,44 @@ export default function CartPage() {
   const goBack = useCallback(() => navigate('/'), [navigate]);
 
   useEffect(() => {
-    try {
-      showBackButton();
-      onBackButtonClick(goBack);
-    } catch {}
+    const BackButton = window.Telegram?.WebApp?.BackButton;
+    if (!BackButton) return;
+    BackButton.offClick(goBack);
+    BackButton.onClick(goBack);
+    BackButton.show();
     return () => {
-      try {
-        offBackButtonClick(goBack);
-        hideBackButton();
-      } catch {}
+      BackButton.offClick(goBack);
+      BackButton.hide();
     };
   }, [goBack]);
 
-  // Warn user before closing Telegram when cart has items
+  // Warn before closing Telegram when cart has items
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
     if (!tg) return;
-    if (items.length > 0) {
-      tg.enableClosingConfirmation();
-    }
+    if (items.length > 0) tg.enableClosingConfirmation();
     return () => tg.disableClosingConfirmation();
   }, [items.length]);
 
-  // Request phone from Telegram
+  // Request phone number via native Telegram dialog
   const handleRequestPhone = async () => {
     try {
       const result = await requestContact();
       setPhone(result.contact.phoneNumber);
-      try { hapticFeedbackNotificationOccurred('success'); } catch {}
+      window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
     } catch {
       tgAlert('Could not retrieve your phone number. Please enter it manually below.');
     }
   };
 
-  // Show popup helper — kept for complex multi-button dialogs
-  const showAlert = tgAlert;
-
-  // Place order logic
+  // Place order
   const handlePlaceOrder = useCallback(async () => {
-    if (!phone) {
-      showAlert('Please share your phone number to place an order.');
-      return;
-    }
-    if (!address) {
-      showAlert('Please enter a delivery address.');
-      return;
-    }
+    if (!phone) { tgAlert('Please share your phone number to place an order.'); return; }
+    if (!address) { tgAlert('Please enter a delivery address.'); return; }
 
+    const MainButton = window.Telegram?.WebApp?.MainButton;
     setSubmitting(true);
-    try {
-      setMainButtonParams({ is_progress_visible: true, is_active: false });
-    } catch {}
+    if (MainButton) { MainButton.showProgress(false); MainButton.disable(); }
 
     try {
       const res = await createOrder({
@@ -106,52 +80,43 @@ export default function CartPage() {
         payment_method: 'cash',
         discriminator: 'delivery',
       });
-
-      const orderId = res.data.data.id;
       clearCart();
-      try { hapticFeedbackNotificationOccurred('success'); } catch {}
-      navigate(`/order/${orderId}`);
+      window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
+      navigate(`/order/${res.data.data.id}`);
     } catch (err) {
       console.error('Order failed:', err);
       tgAlert('Something went wrong. Please try again.');
-      try { hapticFeedbackNotificationOccurred('error'); } catch {}
+      window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred('error');
     } finally {
       setSubmitting(false);
-      try { setMainButtonParams({ is_progress_visible: false, is_active: true }); } catch {}
+      if (MainButton) { MainButton.hideProgress(); MainButton.enable(); }
     }
   }, [phone, address, comment, items, clearCart, navigate]);
 
-  // Main Button → Place Order
+  // Native Main Button → Place Order
   useEffect(() => {
-    if (items.length === 0) return;
-    try {
-      mountMainButton();
-      setMainButtonParams({
-        text: `Place Order — ${total.toLocaleString()} сум`,
-        is_visible: true,
-        is_active: !submitting,
-      });
-      onMainButtonClick(handlePlaceOrder);
-    } catch {}
+    const MainButton = window.Telegram?.WebApp?.MainButton;
+    if (!MainButton || items.length === 0) return;
+
+    MainButton.offClick(handlePlaceOrder);
+    MainButton.setParams({
+      text: `Place Order — ${total.toLocaleString()} сум`,
+      is_active: !submitting,
+      is_visible: true,
+    });
+    MainButton.onClick(handlePlaceOrder);
 
     return () => {
-      try {
-        offMainButtonClick(handlePlaceOrder);
-        setMainButtonParams({ is_visible: false });
-        unmountMainButton();
-      } catch {}
+      MainButton.offClick(handlePlaceOrder);
+      MainButton.setParams({ is_visible: false });
     };
   }, [items.length, total, submitting, handlePlaceOrder]);
 
   if (items.length === 0) {
     return (
       <div style={{ textAlign: 'center', padding: 40 }}>
-        <Title weight="2" style={{ marginBottom: 16 }}>
-          Your cart is empty
-        </Title>
-        <Button size="l" onClick={() => navigate('/')}>
-          Browse Menu
-        </Button>
+        <Title weight="2" style={{ marginBottom: 16 }}>Your cart is empty</Title>
+        <Button size="l" onClick={() => navigate('/')}>Browse Menu</Button>
       </div>
     );
   }
@@ -165,27 +130,15 @@ export default function CartPage() {
             subtitle={`${item.price.toLocaleString()} × ${item.quantity} = ${(item.price * item.quantity).toLocaleString()} сум`}
             after={
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <Button
-                  size="s"
-                  mode="bezeled"
-                  onClick={() => {
-                    updateQuantity(item.id, item.quantity - 1);
-                    try { hapticFeedbackImpactOccurred('light'); } catch {}
-                  }}
-                >
-                  −
-                </Button>
+                <Button size="s" mode="bezeled" onClick={() => {
+                  updateQuantity(item.id, item.quantity - 1);
+                  window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light');
+                }}>−</Button>
                 <span>{item.quantity}</span>
-                <Button
-                  size="s"
-                  mode="bezeled"
-                  onClick={() => {
-                    updateQuantity(item.id, item.quantity + 1);
-                    try { hapticFeedbackImpactOccurred('light'); } catch {}
-                  }}
-                >
-                  +
-                </Button>
+                <Button size="s" mode="bezeled" onClick={() => {
+                  updateQuantity(item.id, item.quantity + 1);
+                  window.Telegram?.WebApp?.HapticFeedback?.impactOccurred('light');
+                }}>+</Button>
               </div>
             }
           >
@@ -196,11 +149,7 @@ export default function CartPage() {
 
       <Section header="Phone Number">
         <Cell
-          after={
-            <Button size="s" mode="bezeled" onClick={handleRequestPhone}>
-              Share via Telegram
-            </Button>
-          }
+          after={<Button size="s" mode="bezeled" onClick={handleRequestPhone}>Share via Telegram</Button>}
           subtitle={phone || 'Not provided'}
         >
           Phone
@@ -229,3 +178,4 @@ export default function CartPage() {
     </div>
   );
 }
+

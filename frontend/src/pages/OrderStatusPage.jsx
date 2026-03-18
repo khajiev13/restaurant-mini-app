@@ -1,10 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Section, Cell, Spinner, Title } from '@telegram-apps/telegram-ui';
-import {
-  showBackButton, hideBackButton, onBackButtonClick, offBackButtonClick,
-  hapticFeedbackNotificationOccurred,
-} from '@telegram-apps/sdk-react';
 import { getOrderStatus, getOrder } from '../services/api';
 import logo from '../assets/logo.png';
 
@@ -28,15 +24,14 @@ export default function OrderStatusPage() {
   const goHome = useCallback(() => navigate('/'), [navigate]);
 
   useEffect(() => {
-    try {
-      showBackButton();
-      onBackButtonClick(goHome);
-    } catch {}
+    const BackButton = window.Telegram?.WebApp?.BackButton;
+    if (!BackButton) return;
+    BackButton.offClick(goHome);
+    BackButton.onClick(goHome);
+    BackButton.show();
     return () => {
-      try {
-        offBackButtonClick(goHome);
-        hideBackButton();
-      } catch {}
+      BackButton.offClick(goHome);
+      BackButton.hide();
     };
   }, [goHome]);
 
@@ -55,13 +50,12 @@ export default function OrderStatusPage() {
           const newStatus = res.data.data?.status;
           setStatus(res.data.data);
           if (prevStatus && newStatus !== prevStatus) {
-            try {
-              if (newStatus === 'CANCELED') {
-                hapticFeedbackNotificationOccurred('error');
-              } else {
-                hapticFeedbackNotificationOccurred('success');
-              }
-            } catch {}
+            const haptic = window.Telegram?.WebApp?.HapticFeedback;
+            if (newStatus === 'CANCELED') {
+              haptic?.notificationOccurred('error');
+            } else {
+              haptic?.notificationOccurred('success');
+            }
           }
           setPrevStatus(newStatus);
         })
@@ -76,7 +70,7 @@ export default function OrderStatusPage() {
   if (loading) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 60, minHeight: '80vh' }}>
-        <img src={logo} alt="Mr.Pub" style={{ width: 64, height: 64, borderRadius: 16, marginBottom: 16 }} />
+        <img src={logo} alt="OLOT SOMSA" style={{ width: 64, height: 64, borderRadius: 16, marginBottom: 16 }} />
         <Spinner size="l" />
       </div>
     );
@@ -88,9 +82,9 @@ export default function OrderStatusPage() {
   return (
     <div style={{ padding: 16 }}>
       <div style={{ textAlign: 'center', marginBottom: 24 }}>
-        <img src={logo} alt="Mr.Pub" style={{ width: 64, height: 64, borderRadius: 16, marginBottom: 8 }} />
+        <img src={logo} alt="OLOT SOMSA" style={{ width: 64, height: 64, borderRadius: 16, marginBottom: 8 }} />
         <Title weight="1" style={{ fontSize: 22, marginBottom: 8 }}>
-          Mr.Pub
+          OLOT SOMSA
         </Title>
         <Title weight="2" style={{ fontSize: 28, marginBottom: 4 }}>
           {STATUS_LABELS[currentStatus] || currentStatus}

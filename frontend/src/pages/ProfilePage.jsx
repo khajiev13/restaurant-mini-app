@@ -1,11 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Section, Cell, Spinner, Title, Button } from '@telegram-apps/telegram-ui';
-import {
-  showBackButton, hideBackButton, onBackButtonClick, offBackButtonClick,
-  requestContact,
-  hapticFeedbackNotificationOccurred,
-} from '@telegram-apps/sdk-react';
+import { requestContact } from '@telegram-apps/sdk-react';
 import { getMe, getOrders, updateMe } from '../services/api';
 
 const STATUS_LABELS = {
@@ -26,15 +22,14 @@ export default function ProfilePage() {
   const goHome = useCallback(() => navigate('/'), [navigate]);
 
   useEffect(() => {
-    try {
-      showBackButton();
-      onBackButtonClick(goHome);
-    } catch {}
+    const BackButton = window.Telegram?.WebApp?.BackButton;
+    if (!BackButton) return;
+    BackButton.offClick(goHome);
+    BackButton.onClick(goHome);
+    BackButton.show();
     return () => {
-      try {
-        offBackButtonClick(goHome);
-        hideBackButton();
-      } catch {}
+      BackButton.offClick(goHome);
+      BackButton.hide();
     };
   }, [goHome]);
 
@@ -54,7 +49,7 @@ export default function ProfilePage() {
       const phone = result.contact.phoneNumber;
       await updateMe({ phone_number: phone });
       setUser((prev) => ({ ...prev, phone_number: phone }));
-      try { hapticFeedbackNotificationOccurred('success'); } catch {}
+      window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred('success');
     } catch {
       // User denied or not available
     }
