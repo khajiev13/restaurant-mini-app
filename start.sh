@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# start.sh — Start Docker containers + Cloudflare tunnels for local development
+# start.sh — Start Docker containers + jprq tunnels
 # Usage: ./start.sh [--rebuild]
 
 set -euo pipefail
 
 BACKEND_PORT=8001
 FRONTEND_PORT=3001
-CF_BACKEND_LOG=/tmp/cf_backend.log
-CF_FRONTEND_LOG=/tmp/cf_frontend.log
+BACKEND_SUBDOMAIN=olot-somsa-api
+FRONTEND_SUBDOMAIN=olot-somsa
+BACKEND_URL="https://${BACKEND_SUBDOMAIN}.jprq.live"
+FRONTEND_URL="https://${FRONTEND_SUBDOMAIN}.jprq.live"
+JPRQ_BACKEND_LOG=/tmp/jprq_backend.log
+JPRQ_FRONTEND_LOG=/tmp/jprq_frontend.log
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -20,7 +24,7 @@ die()     { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # ── Preflight ───────────────────────────────────────────────────────────────
 command -v docker   >/dev/null 2>&1 || die "docker not found. Install Docker Desktop."
-command -v cloudflared >/dev/null 2>&1 || die "cloudflared not found. Run: brew install cloudflared"
+command -v jprq >/dev/null 2>&1 || die "jprq not found. See https://jprq.io"
 [ -f .env ] || die ".env file not found. Copy .env.example → .env and fill in your values."
 
 # ── Docker ──────────────────────────────────────────────────────────────────
@@ -47,46 +51,35 @@ done
 info "Containers running."
 
 # ── Kill stale tunnels ───────────────────────────────────────────────────────
-pkill -f "cloudflared tunnel" 2>/dev/null || true
+pkill -f "jprq http" 2>/dev/null || true
 sleep 1
 
 # ── Backend tunnel ───────────────────────────────────────────────────────────
-info "Starting backend tunnel (localhost:${BACKEND_PORT})..."
-> "$CF_BACKEND_LOG"
-cloudflared tunnel --url "http://localhost:${BACKEND_PORT}" --no-autoupdate 2>&1 | tee "$CF_BACKEND_LOG" &
-
-BACKEND_URL=""
-for i in $(seq 1 20); do
-  BACKEND_URL=$(grep -o 'https://[^ ]*trycloudflare\.com' "$CF_BACKEND_LOG" 2>/dev/null | head -1 || true)
-  [ -n "$BACKEND_URL" ] && break
-  sleep 1
-done
-[ -n "$BACKEND_URL" ] || die "Backend tunnel failed to start. Check $CF_BACKEND_LOG"
+info "Starting backend tunnel → ${BACKEND_URL}"
+> "$JPRQ_BACKEND_LOG"
+jprq http ${BACKEND_PORT} -s ${BACKEND_SUBDOMAIN} 2>&1 | tee "$JPRQ_BACKEND_LOG" &
 
 # ── Frontend tunnel ──────────────────────────────────────────────────────────
-info "Starting frontend tunnel (localhost:${FRONTEND_PORT})..."
-> "$CF_FRONTEND_LOG"
-cloudflared tunnel --url "http://localhost:${FRONTEND_PORT}" --no-autoupdate 2>&1 | tee "$CF_FRONTEND_LOG" &
+info "Starting frontend tunnel → ${FRONTEND_URL}"
+> "$JPRQ_FRONTEND_LOG"
+jprq http ${FRONTEND_PORT} -s ${FRONTEND_SUBDOMAIN} 2>&1 | tee "$JPRQ_FRONTEND_LOG" &
 
-FRONTEND_URL=""
-for i in $(seq 1 20); do
-  FRONTEND_URL=$(grep -o 'https://[^ ]*trycloudflare\.com' "$CF_FRONTEND_LOG" 2>/dev/null | head -1 || true)
-  [ -n "$FRONTEND_URL" ] && break
-  sleep 1
-done
-[ -n "$FRONTEND_URL" ] || die "Frontend tunnel failed to start. Check $CF_FRONTEND_LOG"
+sleep 3
 
-# ── Update .env with new backend URL ────────────────────────────────────────
-info "Updating VITE_API_BASE_URL in .env → ${BACKEND_URL}"
-if grep -q "^VITE_API_BASE_URL=" .env; then
-  sed -i '' "s|^VITE_API_BASE_URL=.*|VITE_API_BASE_URL=${BACKEND_URL}|" .env
+# ── Update .env with backend URL (only if changed) ───────────────────────────
+CURRENT_URL=$(grep "^VITE_API_BASE_URL=" .env | cut -d= -f2- || true)
+if [ "$CURRENT_URL" != "$BACKEND_URL" ]; then
+  info "Setting VITE_API_BASE_URL=${BACKEND_URL} in .env"
+  if grep -q "^VITE_API_BASE_URL=" .env; then
+    sed -i '' "s|^VITE_API_BASE_URL=.*|VITE_API_BASE_URL=${BACKEND_URL}|" .env
+  else
+    echo "VITE_API_BASE_URL=${BACKEND_URL}" >> .env
+  fi
+  info "Rebuilding frontend container with new API URL..."
+  docker compose up -d --build --no-deps frontend >/dev/null 2>&1
 else
-  echo "VITE_API_BASE_URL=${BACKEND_URL}" >> .env
+  info "VITE_API_BASE_URL unchanged, skipping frontend rebuild."
 fi
-
-# ── Rebuild frontend with new backend URL ────────────────────────────────────
-info "Rebuilding frontend container with new API URL..."
-docker compose up -d --build --no-deps frontend >/dev/null 2>&1
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
@@ -100,9 +93,9 @@ echo ""
 echo -e "  📱  Set this URL in BotFather:"
 echo -e "      ${GREEN}${FRONTEND_URL}${NC}"
 echo ""
-echo -e "  📋  BotFather commands:"
+echo -e "  📋  BotFather commands (one-time setup):"
 echo -e "      /setmenubutton → choose your bot → ${FRONTEND_URL}"
 echo -e "      or: /newapp → choose bot → set Web App URL to above"
 echo ""
-echo -e "${YELLOW}  ⚠  Tunnel URLs change every restart — update BotFather each time.${NC}"
+echo -e "${GREEN}  ✅  URLs are permanent — no need to update BotFather again!${NC}"
 echo ""
