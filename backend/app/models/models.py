@@ -19,11 +19,11 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(255))
     phone_number: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime.datetime] = mapped_column(
-        default=datetime.datetime.now(datetime.UTC)
+        default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
-        default=datetime.datetime.now(datetime.UTC),
-        onupdate=datetime.datetime.now(datetime.UTC),
+        default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+        onupdate=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
     )
 
     addresses: Mapped[list["Address"]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -41,7 +41,7 @@ class Address(Base):
     longitude: Mapped[str | None] = mapped_column(String(30))
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
-        default=datetime.datetime.now(datetime.UTC)
+        default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     )
 
     user: Mapped["User"] = relationship(back_populates="addresses")
@@ -69,11 +69,11 @@ class Order(Base):
     order_number: Mapped[str | None] = mapped_column(String(50))
     status_updated_at: Mapped[datetime.datetime | None] = mapped_column()
     created_at: Mapped[datetime.datetime] = mapped_column(
-        default=datetime.datetime.now(datetime.UTC)
+        default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
-        default=datetime.datetime.now(datetime.UTC),
-        onupdate=datetime.datetime.now(datetime.UTC),
+        default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+        onupdate=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
     )
 
     user: Mapped["User"] = relationship(back_populates="orders")
@@ -92,6 +92,6 @@ class Stoplist(Base):
     restaurant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     count: Mapped[int] = mapped_column(default=-1)
     updated_at: Mapped[datetime.datetime] = mapped_column(
-        default=datetime.datetime.now(datetime.UTC),
-        onupdate=datetime.datetime.now(datetime.UTC),
+        default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+        onupdate=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
     )

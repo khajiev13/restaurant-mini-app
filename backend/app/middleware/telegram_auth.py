@@ -89,10 +89,15 @@ def decode_jwt(token: str) -> int:
 
 
 async def get_current_user(
-    authorization: Annotated[str, Header()],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    authorization: Annotated[str | None, Header()] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
 ) -> User:
     """Extract and validate JWT from Authorization header, return User."""
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authorization header",
+        )
     if not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
