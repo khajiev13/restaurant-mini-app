@@ -1,0 +1,52 @@
+/* Artisan Design System - OLOT SOMSA */
+/* Fonts loaded from Google Fonts in index.html */
+
+:root {
+  --art-primary: #a33800;
+  --art-primary-dim: #8f3000;
+  --art-primary-container: #ff7941;
+  --art-on-primary: #ffefeb;
+  --art-on-primary-container: #431200;
+  --art-secondary: #5c5b5b;
+  --art-secondary-container: #e5e2e1;
+  --art-on-secondary: #f5f2f1;
+  --art-surface: #f6f6f6;
+  --art-surface-container-lowest: #ffffff;
+  --art-surface-container-low: #f0f1f1;
+  --art-surface-container: #e7e8e8;
+  --art-surface-container-high: #e1e3e3;
+  --art-surface-container-highest: #dbdddd;
+  --art-on-surface: #2d2f2f;
+  --art-on-surface-variant: #5a5c5c;
+  --art-outline: #767777;
+  --art-outline-variant: #acadad;
+  --art-error: #b31b25;
+  --art-tertiary: #833e9a;
+  --art-inverse-primary: #fc5b00;
+
+  font-family: 'Manrope', sans-serif;
+  background-color: var(--art-surface);
+  color: var(--art-on-surface);
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+.art-gradient {
+  background: linear-gradient(135deg, #a33800 0%, #ff7941 100%);
+}
+
+.art-glass {
+  background-color: rgba(246, 246, 246, 0.8);
+  backdrop-filter: blur(12px);
+}
+
+.art-hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.art-hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
