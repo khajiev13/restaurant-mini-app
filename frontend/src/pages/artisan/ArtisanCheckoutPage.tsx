@@ -219,7 +219,7 @@ export default function ArtisanCheckoutPage() {
   return (
     <ArtisanLayout showBack backTitle={t('checkout.title', 'Checkout')} hideBottomNav>
       {toast && (
-        <div style={{ position: 'fixed', top: 72, left: 16, right: 16, zIndex: 100, background: '#1c1c1e', color: '#fff', borderRadius: 12, padding: '12px 16px', fontSize: 14, boxShadow: '0 4px 16px rgba(0,0,0,0.3)', textAlign: 'center' }}>
+        <div style={{ position: 'fixed', top: 72, left: 16, right: 16, zIndex: 100, background: '#b31b25', color: '#fff', borderRadius: 12, padding: '12px 16px', fontSize: 14, fontWeight: 500, boxShadow: '0 4px 20px rgba(179,27,37,0.35)', textAlign: 'center' }}>
           {toast}
         </div>
       )}

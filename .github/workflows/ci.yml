@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
+      TELEGRAM_BOT_TOKEN: test_token
+      JWT_SECRET: test_secret
+      ALIPOS_API_URL: https://mock.alipos.test
+      ALIPOS_LOGIN: test
+      ALIPOS_PASSWORD: test
+      ALIPOS_RESTAURANT_ID: test-id
+      MULTICARD_API_URL: https://mock.multicard.test
+      MULTICARD_MERCHANT_ID: test
+      MULTICARD_SECRET_KEY: test
+      CLOUDFLARE_TUNNEL_TOKEN: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run database migrations
+        run: |
+          python -c "
+          import asyncio
+          from sqlalchemy.ext.asyncio import create_async_engine
+          from app.models.models import Base
+          import os
+
+          async def main():
+              engine = create_async_engine(os.environ['DATABASE_URL'])
+              async with engine.begin() as conn:
+                  await conn.run_sync(Base.metadata.create_all)
+              await engine.dispose()
+
+          asyncio.run(main())
+          "
+
+      - name: Run tests
+        run: pytest -v
+
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm run test
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd ~/apps/restaurant-mini-app
+            git pull
+            docker compose up -d --build
