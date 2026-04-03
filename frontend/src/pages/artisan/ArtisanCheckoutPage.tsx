@@ -28,7 +28,7 @@ const EMPTY_FORM: AddressFormState = {
   floor: '', doorCode: '', instructions: '', lat: null, lng: null,
 };
 
-const tgAlert = (msg: string) => { if (tg?.showAlert) tg.showAlert(msg); else alert(msg); };
+const tgAlert = (msg: string, setToast: (m: string) => void) => { setToast(msg); haptic?.notificationOccurred('error'); };
 
 function InputField({ label, placeholder, value, onChange, required, type = 'text' }: {
   label: string; placeholder?: string; value: string;
@@ -71,6 +71,9 @@ export default function ArtisanCheckoutPage() {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<AddressFormState>(EMPTY_FORM);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>('cash');
+  const [toast, setToast] = useState('');
+  const showToast = (msg: string) => showToast(msg, setToast);
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
 
   const stateRef = useRef({ phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod });
   stateRef.current = { phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod };
@@ -112,9 +115,9 @@ export default function ArtisanCheckoutPage() {
   const handlePlaceOrder = async () => {
     const s = stateRef.current;
     if (s.submitting) return;
-    if (!s.phone) { tgAlert(t('checkout.error_phone')); return; }
+    if (!s.phone) { showToast(t('checkout.error_phone')); return; }
     const addr = s.addresses.find((a) => a.id === s.selectedAddressId);
-    if (!addr) { tgAlert(t('checkout.error_address')); return; }
+    if (!addr) { showToast(t('checkout.error_address')); return; }
 
     setSubmitting(true);
     try {
@@ -143,13 +146,13 @@ export default function ArtisanCheckoutPage() {
       }
     } catch (err) {
       console.error('Order failed:', err);
-      tgAlert(t('checkout.error_general'));
+      showToast(t('checkout.error_general'));
       haptic?.notificationOccurred('error');
     } finally { setSubmitting(false); }
   };
 
   const handleSaveAddress = async () => {
-    if (!form.address.trim()) { tgAlert(t('checkout.error_enter_address')); return; }
+    if (!form.address.trim()) { showToast(t('checkout.error_enter_address')); return; }
     if (saving) return;
     setSaving(true);
     try {
@@ -165,7 +168,7 @@ export default function ArtisanCheckoutPage() {
       setSelectedAddressId(saved.id);
       setShowAddForm(false); setForm(EMPTY_FORM);
       haptic?.notificationOccurred('success');
-    } catch { tgAlert(t('checkout.error_save_address')); }
+    } catch { showToast(t('checkout.error_save_address')); }
     finally { setSaving(false); }
   };
 
@@ -215,6 +218,11 @@ export default function ArtisanCheckoutPage() {
 
   return (
     <ArtisanLayout showBack backTitle={t('checkout.title', 'Checkout')} hideBottomNav>
+      {toast && (
+        <div style={{ position: 'fixed', top: 72, left: 16, right: 16, zIndex: 100, background: '#1c1c1e', color: '#fff', borderRadius: 12, padding: '12px 16px', fontSize: 14, boxShadow: '0 4px 16px rgba(0,0,0,0.3)', textAlign: 'center' }}>
+          {toast}
+        </div>
+      )}
       <main style={{ paddingTop: 80, paddingBottom: 160, paddingLeft: 16, paddingRight: 16, maxWidth: 672, margin: '0 auto' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
           {/* Phone */}
