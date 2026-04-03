@@ -106,7 +106,7 @@
   "payment_methods": {
     "cash": "Naqd pul",
     "card": "Karta (online)",
-    "rahmat": "Rahmat"
+    "rahmat": "Karta (online)"
   },
   "discriminator": {
     "delivery": "Yetkazib berish",

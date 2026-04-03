@@ -106,7 +106,7 @@
   "payment_methods": {
     "cash": "Наличные",
     "card": "Карта (онлайн)",
-    "rahmat": "Рахмат"
+    "rahmat": "Карта (онлайн)"
   },
   "discriminator": {
     "delivery": "Доставка",

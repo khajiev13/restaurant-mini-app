@@ -106,7 +106,7 @@
   "payment_methods": {
     "cash": "Cash",
     "card": "Karta (online)",
-    "rahmat": "Rahmat"
+    "rahmat": "Karta (online)"
   },
   "discriminator": {
     "delivery": "Delivery",

@@ -13,7 +13,7 @@ const haptic = tg?.HapticFeedback;
 
 const PAYMENT_METHODS = [
   { key: 'cash', icon: 'payments', color: '#047857' },
-  { key: 'card', icon: 'credit_card', color: '#0369a1' },
+  { key: 'rahmat', icon: 'credit_card', color: '#0369a1' },
 ] as const;
 
 type PaymentMethodKey = typeof PAYMENT_METHODS[number]['key'];
