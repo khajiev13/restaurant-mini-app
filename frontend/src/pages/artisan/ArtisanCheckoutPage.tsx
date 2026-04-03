@@ -28,7 +28,6 @@ const EMPTY_FORM: AddressFormState = {
   floor: '', doorCode: '', instructions: '', lat: null, lng: null,
 };
 
-const tgAlert = (msg: string, setToast: (m: string) => void) => { setToast(msg); haptic?.notificationOccurred('error'); };
 
 function InputField({ label, placeholder, value, onChange, required, type = 'text' }: {
   label: string; placeholder?: string; value: string;
@@ -72,7 +71,7 @@ export default function ArtisanCheckoutPage() {
   const [form, setForm] = useState<AddressFormState>(EMPTY_FORM);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>('cash');
   const [toast, setToast] = useState('');
-  const showToast = (msg: string) => showToast(msg, setToast);
+  const showToast = (msg: string): void => { setToast(msg); haptic?.notificationOccurred('error'); };
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
 
   const stateRef = useRef({ phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod });
