@@ -100,7 +100,7 @@ services:
       - tunnel
       - --no-autoupdate
       - --protocol
-      - http2
+      - quic
       - run
       - --token
       - ${CLOUDFLARE_TUNNEL_TOKEN}
@@ -116,7 +116,7 @@ services:
       - tunnel
       - --no-autoupdate
       - --protocol
-      - http2
+      - quic
       - --label
       - replica=secondary
       - run
