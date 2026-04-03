@@ -111,5 +111,11 @@
   "discriminator": {
     "delivery": "Доставка",
     "inplace": "На месте"
+  },
+  "nav": {
+    "menu": "Меню",
+    "orders": "Заказы",
+    "cart": "Корзина",
+    "profile": "Профиль"
   }
 }

@@ -111,5 +111,11 @@
   "discriminator": {
     "delivery": "Delivery",
     "inplace": "In-place"
+  },
+  "nav": {
+    "menu": "Menu",
+    "orders": "Orders",
+    "cart": "Cart",
+    "profile": "Profile"
   }
 }

@@ -111,5 +111,11 @@
   "discriminator": {
     "delivery": "Yetkazib berish",
     "inplace": "O'rinda"
+  },
+  "nav": {
+    "menu": "Menyu",
+    "orders": "Buyurtmalar",
+    "cart": "Savat",
+    "profile": "Profil"
   }
 }
