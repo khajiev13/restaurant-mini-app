@@ -25,6 +25,8 @@ async def update_me(
     """Update current user's profile."""
     if body.phone_number is not None:
         current_user.phone_number = body.phone_number
+    if body.language is not None:
+        current_user.language = body.language
     await db.commit()
     await db.refresh(current_user)
     return ApiResponse(

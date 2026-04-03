@@ -1,15 +1,18 @@
 import i18n from '../i18n';
 
 export function formatPrice(amount: number, language: string = i18n.language): string {
-  const currencyKey = `common.currency_${language}`;
+  // Normalize locale codes like "en-US" → "en", "ru-RU" → "ru"
+  const lang = language.split('-')[0];
+
+  const currencyKey = `common.currency_${lang}`;
   const currency = i18n.t(currencyKey);
-  
+
   // Format based on language
   let formatted: string;
-  if (language === 'ru') {
+  if (lang === 'ru') {
     // Russian: 15 000 сум (space as thousand separator)
     formatted = new Intl.NumberFormat('ru-RU').format(amount);
-  } else if (language === 'uz') {
+  } else if (lang === 'uz') {
     // Uzbek: 15,000 so'm
     formatted = new Intl.NumberFormat('uz-UZ').format(amount);
   } else {

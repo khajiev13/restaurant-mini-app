@@ -128,7 +128,20 @@ export default function ArtisanCheckoutPage() {
       const res = await createOrder(payload);
       s.clearCart();
       haptic?.notificationOccurred('success');
-      s.navigate(`/order/${res.data.data.id}`);
+
+      const orderData = res.data.data;
+
+      if (s.paymentMethod === 'rahmat' && orderData.multicard_checkout_url) {
+        // Open payment URL first — before navigation so the openLink call is not lost on re-render
+        if (tg?.openLink) {
+          tg.openLink(orderData.multicard_checkout_url);
+        } else {
+          window.open(orderData.multicard_checkout_url, '_blank');
+        }
+        s.navigate(`/order/${orderData.id}`);
+      } else {
+        s.navigate(`/order/${orderData.id}`);
+      }
     } catch (err) {
       console.error('Order failed:', err);
       tgAlert(t('checkout.error_general'));

@@ -20,6 +20,9 @@ const STEPS = [
   { key: 'TAKEN_BY_COURIER', icon: 'moped', label: 'On the Way' },
 ];
 
+// Check if we're running inside Telegram Mini App
+const isInsideTelegram = !!tg?.initData;
+
 export default function ArtisanOrderStatusPage() {
   const { t, i18n } = useTranslation();
   const { orderId } = useParams<{ orderId: string }>();
@@ -59,6 +62,42 @@ export default function ArtisanOrderStatusPage() {
     return () => window.clearInterval(interval);
   }, [orderId]);
 
+  // No Telegram context — show a safe "open in Telegram" prompt
+  if (!isInsideTelegram) {
+    return (
+      <div style={{
+        minHeight: '100vh', display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
+        backgroundColor: COLORS.surface, padding: '40px 24px', textAlign: 'center',
+      }}>
+        <Icon name="smartphone" fill size={64} style={{ color: COLORS.primary, marginBottom: 24 }} />
+        <h2 style={{ fontFamily: FONTS.headline, fontSize: 24, fontWeight: 800, color: COLORS.onSurface, margin: '0 0 12px 0' }}>
+          Open in Telegram
+        </h2>
+        <p style={{ fontFamily: FONTS.body, fontSize: 16, color: COLORS.secondary, margin: '0 0 32px 0', lineHeight: 1.6 }}>
+          This page is part of the OLOT SOMSA Telegram Mini App.<br />
+          Please open it inside Telegram to view your order.
+        </p>
+        <a
+          href="https://t.me/olotsomsa_zakaz_bot"
+          style={{
+            display: 'inline-block',
+            backgroundColor: COLORS.primary,
+            color: '#fff',
+            padding: '16px 32px',
+            borderRadius: 16,
+            fontFamily: FONTS.headline,
+            fontWeight: 700,
+            fontSize: 16,
+            textDecoration: 'none',
+          }}
+        >
+          Open in Telegram
+        </a>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <ArtisanLayout>
@@ -70,10 +109,16 @@ export default function ArtisanOrderStatusPage() {
     );
   }
 
+  const paymentStatus = status?.payment_status ?? order?.payment_status ?? null;
   const currentStatus = status?.status || order?.status || 'NEW';
   const currentStep = STATUS_STEP[currentStatus] || 1;
-  const isCanceled = currentStatus === 'CANCELED';
+  const isCanceled = currentStatus === 'CANCELED' || currentStatus === 'CANCELLED';
+  const isPendingPayment = paymentStatus === 'pending';
+  const isPaymentExpired = paymentStatus === 'expired';
+  const isPaymentPaid = paymentStatus === 'paid';
   const terminated = isCanceled || currentStatus === 'TAKEN_BY_COURIER';
+  const receiptUrl = status?.multicard_receipt_url ?? order?.multicard_receipt_url ?? null;
+  const checkoutUrl = order?.multicard_checkout_url ?? null;
 
   const statusLabels: Record<string, string> = {
     NEW: t('status.placed'),
@@ -81,6 +126,7 @@ export default function ArtisanOrderStatusPage() {
     READY: t('status.ready'),
     TAKEN_BY_COURIER: t('status.on_the_way'),
     CANCELED: t('status.cancelled'),
+    CANCELLED: t('status.cancelled'),
   };
 
   const statusIcon: Record<string, string> = {
@@ -89,6 +135,7 @@ export default function ArtisanOrderStatusPage() {
     READY: 'local_dining',
     TAKEN_BY_COURIER: 'moped',
     CANCELED: 'cancel',
+    CANCELLED: 'cancel',
   };
 
   return (
@@ -116,8 +163,81 @@ export default function ArtisanOrderStatusPage() {
             </p>
           </section>
 
-          {/* Progress Stepper */}
-          {!isCanceled && (
+          {/* Payment Status Banner */}
+          {order?.payment_method === 'rahmat' && (
+            <section style={{
+              borderRadius: 16,
+              backgroundColor: COLORS.surfaceContainerLowest,
+              border: `1px solid ${isPaymentExpired ? COLORS.error : COLORS.outlineVariant}`,
+              overflow: 'hidden',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+            }}>
+              {/* Status row */}
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
+                borderBottom: (isPendingPayment && checkoutUrl) || (isPaymentPaid && receiptUrl)
+                  ? `1px solid ${COLORS.surfaceContainer}` : 'none',
+              }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  backgroundColor: isPaymentExpired
+                    ? 'rgba(179,27,37,0.08)'
+                    : isPaymentPaid
+                      ? 'rgba(163,56,0,0.08)'
+                      : COLORS.surfaceContainerLow,
+                }}>
+                  <Icon
+                    name={isPaymentPaid ? 'check_circle' : isPaymentExpired ? 'cancel' : 'schedule'}
+                    fill size={20}
+                    style={{ color: isPaymentExpired ? COLORS.error : COLORS.primary }}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontFamily: FONTS.headline, fontWeight: 700, fontSize: 14, color: COLORS.onSurface }}>
+                    {isPaymentPaid ? t('payment.confirmed', 'Payment confirmed') : isPaymentExpired ? t('payment.expired', 'Payment expired') : t('payment.awaiting', 'Awaiting payment')}
+                  </div>
+                  <div style={{ fontFamily: FONTS.body, fontSize: 12, color: COLORS.secondary, marginTop: 1 }}>
+                    {isPaymentPaid ? t('payment.confirmed_desc', 'Your order is being prepared') : isPaymentExpired ? t('payment.expired_desc', 'This payment link has expired') : t('payment.awaiting_desc', 'Complete payment to confirm your order')}
+                  </div>
+                </div>
+              </div>
+
+              {isPendingPayment && checkoutUrl && (
+                <button
+                  onClick={() => { if (tg?.openLink) tg.openLink(checkoutUrl); else window.open(checkoutUrl, '_blank'); }}
+                  style={{
+                    width: '100%', padding: '14px 16px', border: 'none', cursor: 'pointer',
+                    background: `linear-gradient(135deg, ${COLORS.primary} 0%, ${COLORS.primaryContainer} 100%)`,
+                    color: COLORS.onPrimary,
+                    fontFamily: FONTS.headline, fontWeight: 700, fontSize: 15,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  }}
+                >
+                  <Icon name="favorite" fill size={18} style={{ color: COLORS.onPrimary }} />
+                  {t('payment.pay_with_rahmat', 'Pay with Rahmat')}
+                </button>
+              )}
+
+              {isPaymentPaid && receiptUrl && (
+                <button
+                  onClick={() => { if (tg?.openLink) tg.openLink(receiptUrl); else window.open(receiptUrl, '_blank'); }}
+                  style={{
+                    width: '100%', padding: '14px 16px', border: 'none', cursor: 'pointer',
+                    backgroundColor: COLORS.surfaceContainerLow, color: COLORS.primary,
+                    fontFamily: FONTS.headline, fontWeight: 700, fontSize: 15,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  }}
+                >
+                  <Icon name="receipt_long" fill size={18} style={{ color: COLORS.primary }} />
+                  {t('payment.view_receipt', 'View receipt')}
+                </button>
+              )}
+            </section>
+          )}
+
+          {/* Progress Stepper — only show when payment is done (or not Rahmat) */}
+          {!isCanceled && (!isPendingPayment) && (
             <section style={{ backgroundColor: COLORS.surfaceContainerLow, borderRadius: 12, padding: 24 }}>
               <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                 {/* Background line */}
@@ -226,7 +346,7 @@ export default function ArtisanOrderStatusPage() {
           )}
 
           {/* Auto-updating notice */}
-          {!terminated && (
+          {!terminated && !isPendingPayment && (
             <div style={{ textAlign: 'center', opacity: 0.5, fontSize: 14, paddingTop: 8 }}>
               {t('order.updating')}
             </div>

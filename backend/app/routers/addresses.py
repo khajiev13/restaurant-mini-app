@@ -31,6 +31,21 @@ async def create_address(
     db: DbDep,
 ) -> ApiResponse:
     """Add a new delivery address."""
+    # Check for duplicate address (same user, label, and full_address)
+    existing = await db.execute(
+        select(Address).where(
+            Address.user_id == current_user.telegram_id,
+            Address.label == body.label,
+            Address.full_address == body.full_address,
+        )
+    )
+    duplicate = existing.scalar_one_or_none()
+    if duplicate:
+        return ApiResponse(
+            success=True,
+            data=AddressResponse.model_validate(duplicate).model_dump(),
+        )
+
     # If this is marked as default, unset other defaults
     if body.is_default:
         result = await db.execute(
@@ -48,9 +63,52 @@ async def create_address(
         full_address=body.full_address,
         latitude=body.latitude,
         longitude=body.longitude,
+        entrance=body.entrance,
+        apartment=body.apartment,
+        floor=body.floor,
+        door_code=body.door_code,
+        courier_instructions=body.courier_instructions,
         is_default=body.is_default,
     )
     db.add(address)
+    await db.commit()
+    await db.refresh(address)
+    return ApiResponse(
+        success=True,
+        data=AddressResponse.model_validate(address).model_dump(),
+    )
+
+
+@router.put("/{address_id}")
+async def update_address(
+    address_id: uuid.UUID,
+    body: AddressCreate,
+    current_user: CurrentUserDep,
+    db: DbDep,
+) -> ApiResponse:
+    """Update a saved address."""
+    result = await db.execute(
+        select(Address).where(
+            Address.id == address_id,
+            Address.user_id == current_user.telegram_id,
+        )
+    )
+    address = result.scalar_one_or_none()
+    if not address:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Address not found",
+        )
+    address.label = body.label
+    address.full_address = body.full_address
+    address.latitude = body.latitude
+    address.longitude = body.longitude
+    address.entrance = body.entrance
+    address.apartment = body.apartment
+    address.floor = body.floor
+    address.door_code = body.door_code
+    address.courier_instructions = body.courier_instructions
+    address.is_default = body.is_default
     await db.commit()
     await db.refresh(address)
     return ApiResponse(

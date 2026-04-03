@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>OLOT SOMSA - Profile</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;family=Manrope:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "error-dim": "#9f0519",
+                        "on-error": "#ffefee",
+                        "tertiary": "#833e9a",
+                        "on-secondary-fixed": "#403f3f",
+                        "on-tertiary-container": "#570f70",
+                        "primary": "#a33800",
+                        "inverse-on-surface": "#9c9d9d",
+                        "secondary": "#5c5b5b",
+                        "tertiary-fixed-dim": "#d78cee",
+                        "error-container": "#fb5151",
+                        "primary-fixed-dim": "#ff5e07",
+                        "on-secondary-container": "#525151",
+                        "secondary-fixed-dim": "#d6d4d3",
+                        "background": "#f6f6f6",
+                        "inverse-surface": "#0c0f0f",
+                        "secondary-container": "#e5e2e1",
+                        "surface-variant": "#dbdddd",
+                        "tertiary-fixed": "#e699fd",
+                        "surface-container-low": "#f0f1f1",
+                        "on-surface-variant": "#5a5c5c",
+                        "on-tertiary-fixed-variant": "#611b79",
+                        "on-tertiary": "#ffedfe",
+                        "surface-container-lowest": "#ffffff",
+                        "surface-container": "#e7e8e8",
+                        "outline": "#767777",
+                        "on-primary-fixed": "#000000",
+                        "error": "#b31b25",
+                        "primary-container": "#ff7941",
+                        "on-secondary-fixed-variant": "#5c5b5b",
+                        "surface": "#f6f6f6",
+                        "on-primary-container": "#431200",
+                        "tertiary-dim": "#75318d",
+                        "on-surface": "#2d2f2f",
+                        "on-secondary": "#f5f2f1",
+                        "secondary-dim": "#504f4f",
+                        "surface-dim": "#d3d5d5",
+                        "on-primary-fixed-variant": "#531900",
+                        "surface-tint": "#a33800",
+                        "secondary-fixed": "#e5e2e1",
+                        "inverse-primary": "#fc5b00",
+                        "on-error-container": "#570008",
+                        "primary-dim": "#8f3000",
+                        "tertiary-container": "#e699fd",
+                        "on-background": "#2d2f2f",
+                        "surface-container-highest": "#dbdddd",
+                        "surface-bright": "#f6f6f6",
+                        "surface-container-high": "#e1e3e3",
+                        "on-tertiary-fixed": "#360049",
+                        "primary-fixed": "#ff7941",
+                        "on-primary": "#ffefeb",
+                        "outline-variant": "#acadad"
+                    },
+                    fontFamily: {
+                        "headline": ["Plus Jakarta Sans"],
+                        "body": ["Manrope"],
+                        "label": ["Manrope"]
+                    },
+                    borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .primary-gradient {
+            background: linear-gradient(135deg, #a33800 0%, #ff7941 100%);
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-surface text-on-surface font-body selection:bg-primary-container selection:text-on-primary-container">
+<!-- TopAppBar -->
+<nav class="fixed top-0 w-full z-50 bg-stone-50/80 dark:bg-stone-900/80 backdrop-blur-md flex justify-between items-center px-6 h-16 w-full no-border bg-stone-100 dark:bg-stone-800 flat no shadows">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-orange-900 dark:text-orange-500">restaurant</span>
+<span class="text-xl font-extrabold text-orange-900 dark:text-orange-500 font-['Plus_Jakarta_Sans'] tracking-tight">OLOT SOMSA</span>
+</div>
+<div class="w-10 h-10 rounded-full bg-primary-container flex items-center justify-center text-on-primary-container font-bold border-2 border-surface-container-lowest">
+            A
+        </div>
+</nav>
+<main class="pt-20 pb-24 px-4 max-w-2xl mx-auto space-y-8">
+<!-- Profile Header Section -->
+<section class="flex flex-col items-center text-center py-6 space-y-4">
+<div class="relative">
+<div class="w-24 h-24 rounded-full primary-gradient flex items-center justify-center text-on-primary text-4xl font-headline font-bold shadow-xl">
+                    A
+                </div>
+<button class="absolute bottom-0 right-0 p-2 bg-surface-container-lowest rounded-full shadow-md text-primary">
+<span class="material-symbols-outlined text-sm" style="font-variation-settings: 'FILL' 1;">edit</span>
+</button>
+</div>
+<div>
+<h1 class="text-2xl font-headline font-bold tracking-tight text-on-surface">Azizbek K.</h1>
+<p class="text-secondary font-medium">@azizbek_uz</p>
+</div>
+<div class="w-full flex justify-center">
+<button class="flex items-center gap-3 px-6 py-3 bg-surface-container-low rounded-xl text-on-surface font-semibold hover:bg-surface-container transition-colors duration-200">
+<span class="material-symbols-outlined text-primary">phone_iphone</span>
+<span>+998 90 123 45 67</span>
+</button>
+</div>
+</section>
+<!-- Saved Addresses Section -->
+<section class="space-y-4">
+<div class="flex items-center justify-between">
+<h2 class="text-lg font-headline font-bold">Saved Addresses</h2>
+<button class="text-primary text-sm font-bold uppercase tracking-wider flex items-center gap-1">
+<span class="material-symbols-outlined text-lg">add</span>
+                    Add Address
+                </button>
+</div>
+<div class="grid gap-3">
+<!-- Address Card 1 -->
+<div class="bg-surface-container-lowest p-4 rounded-xl flex items-center justify-between group transition-all duration-200">
+<div class="flex items-start gap-4">
+<div class="p-2 bg-surface-container rounded-lg text-primary">
+<span class="material-symbols-outlined">home</span>
+</div>
+<div>
+<h3 class="font-bold text-on-surface">Home</h3>
+<p class="text-sm text-secondary">Tashkent city, Chilanzar 5, building 12, apt 45</p>
+</div>
+</div>
+<button class="text-outline hover:text-error transition-colors p-2">
+<span class="material-symbols-outlined">delete</span>
+</button>
+</div>
+<!-- Address Card 2 -->
+<div class="bg-surface-container-lowest p-4 rounded-xl flex items-center justify-between group transition-all duration-200">
+<div class="flex items-start gap-4">
+<div class="p-2 bg-surface-container rounded-lg text-primary">
+<span class="material-symbols-outlined">work</span>
+</div>
+<div>
+<h3 class="font-bold text-on-surface">Office</h3>
+<p class="text-sm text-secondary">Amir Temur Ave 107B, International Business Center</p>
+</div>
+</div>
+<button class="text-outline hover:text-error transition-colors p-2">
+<span class="material-symbols-outlined">delete</span>
+</button>
+</div>
+</div>
+</section>
+<!-- Settings Section -->
+<section class="space-y-4">
+<h2 class="text-lg font-headline font-bold">Settings</h2>
+<div class="bg-surface-container-low p-2 rounded-2xl flex flex-col gap-1">
+<label class="flex items-center justify-between p-3 rounded-xl bg-surface-container-lowest cursor-pointer">
+<div class="flex items-center gap-3">
+<span class="text-xl">🇺🇿</span>
+<span class="font-medium">O'zbekcha</span>
+</div>
+<input checked="" class="w-5 h-5 text-primary border-outline focus:ring-primary/20" name="lang" type="radio"/>
+</label>
+<label class="flex items-center justify-between p-3 rounded-xl hover:bg-surface-container cursor-pointer transition-colors">
+<div class="flex items-center gap-3">
+<span class="text-xl">🇷🇺</span>
+<span class="font-medium">Русский</span>
+</div>
+<input class="w-5 h-5 text-primary border-outline focus:ring-primary/20" name="lang" type="radio"/>
+</label>
+<label class="flex items-center justify-between p-3 rounded-xl hover:bg-surface-container cursor-pointer transition-colors">
+<div class="flex items-center gap-3">
+<span class="text-xl">🇬🇧</span>
+<span class="font-medium">English</span>
+</div>
+<input class="w-5 h-5 text-primary border-outline focus:ring-primary/20" name="lang" type="radio"/>
+</label>
+</div>
+</section>
+<!-- Order History Section -->
+<section class="space-y-4 pb-12">
+<h2 class="text-lg font-headline font-bold">Order History</h2>
+<div class="space-y-3">
+<!-- Order Item 1 -->
+<div class="bg-surface-container-lowest p-4 rounded-2xl flex flex-col gap-3">
+<div class="flex justify-between items-start">
+<div>
+<span class="text-[10px] font-bold uppercase tracking-widest text-outline">Oct 12, 2023</span>
+<h4 class="font-headline font-bold text-on-surface">#A7-310</h4>
+</div>
+<div class="flex items-center gap-1.5 px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-bold">
+<span class="w-1.5 h-1.5 bg-green-600 rounded-full"></span>
+                            Delivered
+                        </div>
+</div>
+<div class="flex justify-between items-center pt-2 border-t border-surface-container">
+<p class="text-sm text-secondary">3x Olot Somsa, 1x Tea</p>
+<p class="font-bold text-primary text-lg font-headline">45,000 UZS</p>
+</div>
+</div>
+<!-- Order Item 2 -->
+<div class="bg-surface-container-lowest p-4 rounded-2xl flex flex-col gap-3">
+<div class="flex justify-between items-start">
+<div>
+<span class="text-[10px] font-bold uppercase tracking-widest text-outline">Sep 28, 2023</span>
+<h4 class="font-headline font-bold text-on-surface">#A6-892</h4>
+</div>
+<div class="flex items-center gap-1.5 px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-bold">
+<span class="w-1.5 h-1.5 bg-green-600 rounded-full"></span>
+                            Delivered
+                        </div>
+</div>
+<div class="flex justify-between items-center pt-2 border-t border-surface-container">
+<p class="text-sm text-secondary">5x Meat Lovers Somsa</p>
+<p class="font-bold text-primary text-lg font-headline">75,000 UZS</p>
+</div>
+</div>
+<!-- Optional Empty State Logic (Visual Only) -->
+<!-- 
+                <div class="flex flex-col items-center justify-center py-12 space-y-4">
+                    <div class="w-20 h-20 bg-surface-container rounded-full flex items-center justify-center">
+                        <span class="material-symbols-outlined text-outline text-4xl">receipt_long</span>
+                    </div>
+                    <div class="text-center">
+                        <h3 class="font-bold text-lg">No orders yet</h3>
+                        <p class="text-secondary text-sm">Delicious somsa is just a few taps away.</p>
+                    </div>
+                    <button class="primary-gradient text-on-primary px-8 py-3 rounded-xl font-bold uppercase tracking-wider text-sm shadow-lg active:scale-95 transition-transform">
+                        Browse Menu
+                    </button>
+                </div>
+                -->
+</div>
+</section>
+</main>
+<!-- BottomNavBar -->
+<nav class="fixed bottom-0 w-full z-50 bg-stone-50/80 dark:bg-stone-900/80 backdrop-blur-md rounded-t-2xl no-border shadow-[0_-1px_0_0_rgba(0,0,0,0.05)] shadow-2xl dark:shadow-none flex justify-around items-center pt-2 pb-6 px-4 w-full">
+<button class="flex flex-col items-center justify-center text-stone-400 dark:text-stone-500 hover:text-orange-800 dark:hover:text-orange-300 transition-opacity active:scale-90 duration-200">
+<span class="material-symbols-outlined" data-icon="menu_book">menu_book</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Menu</span>
+</button>
+<button class="flex flex-col items-center justify-center text-stone-400 dark:text-stone-500 hover:text-orange-800 dark:hover:text-orange-300 transition-opacity active:scale-90 duration-200">
+<span class="material-symbols-outlined" data-icon="local_shipping">local_shipping</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Orders</span>
+</button>
+<button class="flex flex-col items-center justify-center text-orange-700 dark:text-orange-400 bg-orange-100/50 dark:bg-orange-900/30 rounded-xl px-3 py-1 transition-opacity active:scale-90 duration-200">
+<span class="material-symbols-outlined" data-icon="person" style="font-variation-settings: 'FILL' 1;">person</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Profile</span>
+</button>
+<button class="flex flex-col items-center justify-center text-stone-400 dark:text-stone-500 hover:text-orange-800 dark:hover:text-orange-300 transition-opacity active:scale-90 duration-200">
+<span class="material-symbols-outlined" data-icon="shopping_bag">shopping_bag</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Cart</span>
+</button>
+</nav>
+<!-- Visual Polish: Hero background element -->
+<div class="fixed top-0 left-0 w-full h-48 -z-10 opacity-10 pointer-events-none overflow-hidden">
+<img class="w-full h-full object-cover" data-alt="abstract close-up of textured traditional clay oven wall with warm orange glowing light and subtle soot marks" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCTOolvazc6YCY0EJmxUUW0L1oA_HYzXcXop8XiWOlfSdjUzGXEI3WhhzmutBnMMWljLnKU7sGA9s7gtvu1YuytxqVuRXUlzyTbLc9XdtF-KFHDM7f4HjgLyEjfge3G6I8wsB6CVYVW0eLPGIvEZ5BUuANwtDxXRsIwPDXCvap581cbGsGUuMlLz2FImzasDkGPpg6D1Oge16RLE_IIt4q15h5kua5m58T3n-m7bNwbTgOCRBBX-8WscTkVvOcu-Yn8SmVIjFvwGQw"/>
+</div>
+</body></html>

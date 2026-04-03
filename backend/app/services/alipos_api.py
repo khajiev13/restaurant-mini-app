@@ -1,12 +1,35 @@
+import asyncio
+import logging
 import time
 
 import httpx
 
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 # Module-level token cache
 _token: str | None = None
 _token_expires_at: float = 0
+
+
+def _format_alipos_error(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = response.text.strip()
+
+    if isinstance(payload, dict):
+        for key in ("message", "detail", "title", "error"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+        return str(payload)
+
+    if isinstance(payload, list):
+        return str(payload)
+
+    return payload or response.reason_phrase
 
 
 async def _get_token() -> str:
@@ -36,22 +59,54 @@ async def _get_token() -> str:
 
 
 async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
-    """Make an authenticated request to the AliPOS API."""
+    """Make an authenticated request to the AliPOS API with retry."""
     token = await _get_token()
-    async with httpx.AsyncClient() as client:
-        resp = await client.request(
-            method,
-            f"{settings.alipos_api_base_url}{path}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-            },
-            timeout=30,
-            follow_redirects=True,
-            **kwargs,
-        )
-        resp.raise_for_status()
-        return resp
+    max_retries = 3
+    last_exc: BaseException | None = None
+
+    for attempt in range(max_retries):
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.request(
+                    method,
+                    f"{settings.alipos_api_base_url}{path}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    },
+                    timeout=30,
+                    follow_redirects=True,
+                    **kwargs,
+                )
+                resp.raise_for_status()
+                return resp
+            except httpx.HTTPStatusError as exc:
+                detail = _format_alipos_error(exc.response)
+                logger.warning(
+                    "AliPOS API returned HTTP error: %s %s -> %s (%s)",
+                    method,
+                    path,
+                    exc.response.status_code,
+                    detail,
+                )
+                raise RuntimeError(
+                    f"AliPOS returned {exc.response.status_code}: {detail}"
+                ) from exc
+            except httpx.RequestError as exc:
+                last_exc = exc
+                logger.warning(
+                    "AliPOS request failed (attempt %d/%d): %s %s -> %s",
+                    attempt + 1,
+                    max_retries,
+                    method,
+                    path,
+                    exc,
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+
+    raise RuntimeError(f"AliPOS request failed after {max_retries} attempts: {last_exc}") from last_exc
 
 
 async def get_menu() -> dict:

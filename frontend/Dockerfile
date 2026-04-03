@@ -3,7 +3,7 @@ FROM node:22-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install --legacy-peer-deps
+RUN npm ci --legacy-peer-deps
 
 COPY . .
 

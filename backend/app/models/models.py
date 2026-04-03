@@ -18,6 +18,7 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(String(255))
     username: Mapped[str | None] = mapped_column(String(255))
     phone_number: Mapped[str | None] = mapped_column(String(50))
+    language: Mapped[str] = mapped_column(String(5), default="uz")
     created_at: Mapped[datetime.datetime] = mapped_column(
         default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     )
@@ -39,6 +40,11 @@ class Address(Base):
     full_address: Mapped[str] = mapped_column(Text)
     latitude: Mapped[str | None] = mapped_column(String(30))
     longitude: Mapped[str | None] = mapped_column(String(30))
+    entrance: Mapped[str | None] = mapped_column(String(50))
+    apartment: Mapped[str | None] = mapped_column(String(50))
+    floor: Mapped[str | None] = mapped_column(String(20))
+    door_code: Mapped[str | None] = mapped_column(String(50))
+    courier_instructions: Mapped[str | None] = mapped_column(Text)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
@@ -62,9 +68,22 @@ class Order(Base):
     delivery_fee: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     comment: Mapped[str | None] = mapped_column(Text)
     payment_method: Mapped[str] = mapped_column(String(100), default="cash")
+    payment_provider: Mapped[str | None] = mapped_column(String(50))
+    payment_status: Mapped[str | None] = mapped_column(String(50))
+    payment_expires_at: Mapped[datetime.datetime | None] = mapped_column()
+    payment_paid_at: Mapped[datetime.datetime | None] = mapped_column()
+    payment_error: Mapped[str | None] = mapped_column(Text)
+    payment_card_pan: Mapped[str | None] = mapped_column(String(32))
+    payment_ps: Mapped[str | None] = mapped_column(String(50))
     discriminator: Mapped[str] = mapped_column(String(20), default="delivery")
     alipos_order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     alipos_eats_id: Mapped[str | None] = mapped_column(String(255))
+    multicard_invoice_uuid: Mapped[str | None] = mapped_column(String(64))
+    multicard_checkout_url: Mapped[str | None] = mapped_column(Text)
+    multicard_receipt_url: Mapped[str | None] = mapped_column(Text)
+    multicard_payment_uuid: Mapped[str | None] = mapped_column(String(64))
+    alipos_cancel_status: Mapped[str | None] = mapped_column(String(50))
+    alipos_cancel_error: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(50), default="NEW")
     order_number: Mapped[str | None] = mapped_column(String(50))
     status_updated_at: Mapped[datetime.datetime | None] = mapped_column()
@@ -82,6 +101,9 @@ class Order(Base):
         Index("idx_orders_user_id", "user_id"),
         Index("idx_orders_alipos_order_id", "alipos_order_id"),
         Index("idx_orders_alipos_eats_id", "alipos_eats_id"),
+        Index("idx_orders_payment_status", "payment_status"),
+        Index("idx_orders_payment_expires_at", "payment_expires_at"),
+        Index("idx_orders_multicard_payment_uuid", "multicard_payment_uuid"),
     )
 
 

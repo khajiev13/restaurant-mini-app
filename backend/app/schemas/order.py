@@ -37,6 +37,11 @@ class OrderResponse(BaseModel):
     delivery_fee: float
     comment: str | None = None
     payment_method: str
+    payment_provider: str | None = None
+    payment_status: str | None = None
+    payment_expires_at: datetime.datetime | None = None
+    multicard_checkout_url: str | None = None
+    multicard_receipt_url: str | None = None
     discriminator: str
     alipos_order_id: uuid.UUID | None = None
     alipos_eats_id: str | None = None
@@ -52,3 +57,6 @@ class OrderStatusResponse(BaseModel):
     status: str
     order_number: str | None = None
     alipos_order_id: uuid.UUID | None = None
+    payment_status: str | None = None
+    payment_expires_at: datetime.datetime | None = None
+    multicard_receipt_url: str | None = None

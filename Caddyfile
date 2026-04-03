@@ -1,0 +1,28 @@
+{
+	admin off
+	auto_https off
+}
+
+# Accepts any hostname coming from Cloudflare Tunnel and routes traffic inside the stack.
+http:// {
+	encode zstd gzip
+
+	header {
+		-Server
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Content-Type-Options nosniff
+	}
+
+	respond /healthz "ok" 200
+	respond /readyz "ok" 200
+
+	# All /api/* requests go to the FastAPI backend
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# Everything else goes to the React frontend (nginx serving static files)
+	handle {
+		reverse_proxy frontend:80
+	}
+}

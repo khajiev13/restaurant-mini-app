@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Route, Routes } from 'react-router-dom';
+import { Route, Routes, useNavigate } from 'react-router-dom';
 import ArtisanMenuPage from './pages/artisan/ArtisanMenuPage';
 import ArtisanCheckoutPage from './pages/artisan/ArtisanCheckoutPage';
 import ArtisanProfilePage from './pages/artisan/ArtisanProfilePage';
@@ -9,6 +9,7 @@ import { useAuthStore } from './stores/authStore';
 
 export default function App() {
   const authenticate = useAuthStore((state) => state.authenticate);
+  const navigate = useNavigate();
 
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
@@ -26,7 +27,17 @@ export default function App() {
     if (tg.isVersionAtLeast('7.7')) {
       tg.disableVerticalSwipes();
     }
-  }, []);
+
+    // Handle deep link return from Multicard payment
+    // Bot deep link: https://t.me/olotsomsa_zakaz_bot?startapp=order_<uuid>
+    const startParam = tg.initDataUnsafe?.start_param;
+    if (startParam?.startsWith('order_')) {
+      const orderId = startParam.slice('order_'.length);
+      if (orderId) {
+        navigate(`/order/${orderId}`, { replace: true });
+      }
+    }
+  }, [navigate]);
 
   useEffect(() => {
     if (!localStorage.getItem('manual_logout')) {

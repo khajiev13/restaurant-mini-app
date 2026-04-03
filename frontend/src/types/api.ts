@@ -87,6 +87,11 @@ export interface Order {
   comment: string | null;
   delivery_address?: string | null;
   payment_method: string;
+  payment_provider: string | null;
+  payment_status: string | null;
+  payment_expires_at: string | null;
+  multicard_checkout_url: string | null;
+  multicard_receipt_url: string | null;
   alipos_order_id: string | null;
 }
 
@@ -94,6 +99,9 @@ export interface OrderStatus {
   status: string;
   order_number: string | null;
   alipos_order_id: string | null;
+  payment_status: string | null;
+  payment_expires_at: string | null;
+  multicard_receipt_url: string | null;
 }
 
 export interface CartItem extends MenuItem {

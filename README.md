@@ -5,7 +5,7 @@ A Telegram Mini App for ordering food from the OLOT SOMSA restaurant, built with
 - **Frontend**: React 18 + Vite + `@telegram-apps/telegram-ui`
 - **Backend**: FastAPI + SQLAlchemy (async) + PostgreSQL 16
 - **POS Integration**: AliPOS
-- **Infrastructure**: Docker Compose + Cloudflare Tunnels
+- **Infrastructure**: Docker Compose + Caddy + Cloudflare Tunnel
 
 ---
 
@@ -14,7 +14,6 @@ A Telegram Mini App for ordering food from the OLOT SOMSA restaurant, built with
 | Tool | Install |
 |---|---|
 | [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Required |
-| [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) | `brew install cloudflared` |
 | A Telegram Bot | Create with [@BotFather](https://t.me/BotFather) |
 
 ---
@@ -55,6 +54,16 @@ JWT_SECRET=your-64-char-hex-string
 
 # Set automatically by start.sh — leave blank initially
 VITE_API_BASE_URL=
+
+# Set automatically by start.sh — leave blank initially
+PUBLIC_APP_URL=
+
+# Used when registering the Telegram webhook
+TELEGRAM_WEBHOOK_SECRET=your-webhook-secret
+
+# Optional hardening overrides (comma-separated)
+CORS_ALLOWED_ORIGINS=
+TRUSTED_HOSTS=
 ```
 
 Generate a JWT secret:
@@ -79,26 +88,23 @@ Run this every time you want to start the app:
 ```
 
 This will:
-1. Start all Docker containers (PostgreSQL, backend, frontend)
-2. Kill any stale Cloudflare tunnels
-3. Create a new public HTTPS tunnel for the backend
-4. Create a new public HTTPS tunnel for the frontend
-5. Update `VITE_API_BASE_URL` in `.env` with the new backend URL
-6. Rebuild the frontend container with the new URL
-7. Print all URLs and BotFather instructions
+1. Start all Docker containers
+2. Keep the origin private behind `127.0.0.1:8080` locally via Caddy
+3. Create a public Cloudflare Tunnel URL for the whole app
+4. Verify `/healthz` and `/api/health` locally and publicly
+5. Update `PUBLIC_APP_URL` in `.env`
+6. Set the Telegram webhook automatically
+7. Set the Telegram menu button automatically
 
 Output looks like:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ✅  All services running!
+  ✅  App exposed through Cloudflare Quick Tunnel
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  🖥  Frontend  →  https://xxxx-xxxx.trycloudflare.com
-  🔧  Backend   →  https://yyyy-yyyy.trycloudflare.com
-
-  📱  Set this URL in BotFather:
-      https://xxxx-xxxx.trycloudflare.com
+  🌍  Public app     →  https://xxxx-xxxx.trycloudflare.com/
+  🔗  Webhook        →  https://xxxx-xxxx.trycloudflare.com/api/webhooks/bot
 ```
 
 To force a full image rebuild (e.g. after pulling new code):
@@ -109,22 +115,36 @@ To force a full image rebuild (e.g. after pulling new code):
 
 ---
 
-## After Starting — Update BotFather
+## Stable Domain Mode
 
-> **Cloudflare quick tunnels get a new URL every restart.** You must update your bot in BotFather after each `./start.sh`.
+If you want a stable hostname like `https://restaurant.labtutor.app`, create a named Cloudflare Tunnel and then set:
 
-In Telegram, message [@BotFather](https://t.me/BotFather):
+```env
+PUBLIC_APP_URL=https://restaurant.labtutor.app
+CLOUDFLARE_TUNNEL_TOKEN=your-cloudflare-tunnel-token
+```
+
+`start.sh` will detect that token and switch from Quick Tunnel mode to stable named-tunnel mode automatically.
+
+Quick Tunnel mode is convenient for testing, but it is not production-ready because the hostname changes whenever the tunnel restarts. For production, use a named tunnel with a stable domain.
+
+## After Starting
+
+`start.sh` updates the webhook and the bot menu button automatically.
+
+Useful local checks:
+
+```bash
+curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/api/health
+```
+
+The only manual Telegram step left is BotFather's main Mini App URL if you use the profile launch button:
 
 ```
-/setmenubutton
-```
-→ Select your bot → Enter the **Frontend URL** printed by `start.sh`.
-
-Or to set a Web App:
-```
-/newapp  (if first time)
 /editapp (to update URL)
 ```
+→ Set it to the **Public app URL** printed by `start.sh`.
 
 ---
 
@@ -133,7 +153,7 @@ Or to set a Web App:
 ```bash
 cd restaurant-mini-app
 docker compose down
-pkill -f "cloudflared tunnel"
+docker rm -f restaurant_cloudflared restaurant_cloudflared_named >/dev/null 2>&1 || true
 ```
 
 ---
@@ -142,9 +162,8 @@ pkill -f "cloudflared tunnel"
 
 | Service | Host Port | Container Port |
 |---|---|---|
-| PostgreSQL | `5432` | `5432` |
-| Backend (FastAPI) | `8001` | `8000` |
-| Frontend (Vite) | `3001` | `5173` |
+| Local Caddy origin | `127.0.0.1:8080` | `80` |
+| Public app (via tunnel) | random `https://*.trycloudflare.com` | `caddy:80` |
 
 ---
 
@@ -202,22 +221,25 @@ restaurant-mini-app/
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/auth/telegram` | — | Validate Telegram initData, return JWT |
-| `GET` | `/menu` | — | Fetch full menu from AliPOS |
-| `GET` | `/users/me` | JWT | Get current user profile |
-| `PUT` | `/users/me` | JWT | Update phone number |
-| `POST` | `/orders` | JWT | Place an order via AliPOS |
-| `GET` | `/orders` | JWT | List user's orders |
-| `GET` | `/orders/{id}` | JWT | Get order details |
-| `GET` | `/orders/{id}/status` | JWT | Get live order status |
-| `POST` | `/webhooks/alipos` | — | Receive AliPOS status updates |
+| `GET` | `/api/health` | — | Health check for the API |
+| `POST` | `/api/auth/telegram` | — | Validate Telegram initData, return JWT |
+| `GET` | `/api/menu` | — | Fetch full menu from AliPOS |
+| `GET` | `/api/users/me` | JWT | Get current user profile |
+| `PUT` | `/api/users/me` | JWT | Update phone number |
+| `POST` | `/api/orders` | JWT | Place an order via AliPOS |
+| `GET` | `/api/orders` | JWT | List user's orders |
+| `GET` | `/api/orders/{id}` | JWT | Get order details |
+| `GET` | `/api/orders/{id}/status` | JWT | Get live order status |
+| `POST` | `/api/webhooks/order-status` | — | Receive AliPOS status updates |
+| `POST` | `/api/webhooks/bot` | — | Receive Telegram bot updates |
+| `POST` | `/api/webhooks/multicard/callback` | — | Receive Multicard payment callbacks |
 
 ---
 
 ## How Authentication Works
 
 1. Telegram injects `window.Telegram.WebApp.initData` into the Mini App
-2. Frontend POSTs it to `POST /auth/telegram`
+2. Frontend POSTs it to `POST /api/auth/telegram`
 3. Backend validates the HMAC-SHA256 signature using the bot token
 4. Backend creates/updates the user in PostgreSQL and returns a JWT
 5. All subsequent requests use `Authorization: Bearer <token>`
@@ -227,16 +249,16 @@ restaurant-mini-app/
 ## Troubleshooting
 
 **"530 The origin has been unregistered"**
-→ Tunnel died. Run `./start.sh` again and update BotFather URL.
+→ The quick tunnel died or restarted. Run `./start.sh` again.
 
 **"422 Unprocessable Entity" on /users/me or /orders**
 → Auth hasn't completed yet (race condition on first load). Reload the Mini App.
 
 **Frontend shows blank / won't load**
-→ Check `VITE_API_BASE_URL` in `.env` — must be the current backend tunnel URL. Run `./start.sh` to auto-fix.
+→ Run `./start.sh` again and use the newly printed `trycloudflare.com` URL.
 
 **Docker port already in use**
-→ Check what's using a port: `lsof -i :3001` then kill it or change ports in `docker-compose.yml`.
+→ Check what's using the local Caddy port: `lsof -i :8080` then kill it or change the Caddy port in `docker-compose.yml`.
 
 **Backend crash on first user login**
 → Was a datetime timezone bug — fixed in `models.py` (all timestamps use naive UTC).

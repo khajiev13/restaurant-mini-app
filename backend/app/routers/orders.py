@@ -1,4 +1,5 @@
 import datetime
+import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
@@ -6,10 +7,13 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.middleware.telegram_auth import CurrentUserDep, DbDep
-from app.models.models import Order
+from app.models.models import Address, Order
 from app.schemas.common import ApiResponse
 from app.schemas.order import OrderCreate, OrderResponse, OrderStatusResponse
 from app.services import alipos_api
+from app.services import multicard_api
+
+logger = logging.getLogger(__name__)
 
 # Payment method IDs (hardcoded across all AliPOS restaurants)
 PAYMENT_IDS = {
@@ -27,7 +31,46 @@ async def create_order(
     current_user: CurrentUserDep,
     db: DbDep,
 ) -> ApiResponse:
-    """Place an order: save to DB, send to AliPOS, return confirmation."""
+    """Place an order: save to DB, send to AliPOS, optionally create Multicard invoice."""
+    selected_address = None
+    delivery_address = body.delivery_address
+    latitude = body.latitude
+    longitude = body.longitude
+
+    if body.discriminator == "delivery":
+        if body.address_id:
+            result = await db.execute(
+                select(Address).where(
+                    Address.id == body.address_id,
+                    Address.user_id == current_user.telegram_id,
+                )
+            )
+            selected_address = result.scalar_one_or_none()
+            if not selected_address:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Delivery address not found",
+                )
+
+            delivery_address = selected_address.full_address
+            latitude = selected_address.latitude or latitude
+            longitude = selected_address.longitude or longitude
+
+        if not delivery_address:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Delivery address is required",
+            )
+
+        if not latitude or not longitude:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Selected delivery address is missing map coordinates. "
+                    "Edit the address and use your location before placing the order."
+                ),
+            )
+
     # Calculate total
     total = sum(
         item.price * item.quantity
@@ -35,6 +78,8 @@ async def create_order(
         for item in body.items
     )
 
+    # Pre-generate order UUID so we can use it as Multicard invoice_id before DB insert
+    order_id = uuid.uuid4()
     eats_id = f"mrpub-{uuid.uuid4().hex[:12]}"
     payment_id = PAYMENT_IDS.get(body.payment_method, PAYMENT_IDS["cash"])
 
@@ -70,19 +115,33 @@ async def create_order(
     }
 
     # Add delivery address for delivery orders
-    if body.discriminator == "delivery" and body.delivery_address:
+    if body.discriminator == "delivery" and delivery_address:
         alipos_payload["deliveryInfo"]["deliveryAddress"] = {
-            "full": body.delivery_address,
-            "latitude": body.latitude or "",
-            "longitude": body.longitude or "",
+            "full": delivery_address,
+            "latitude": latitude,
+            "longitude": longitude,
         }
 
     # TODO: inplace orders — add tableId when supported
 
     # Send to AliPOS
+    logger.info(
+        "Creating AliPOS order: user=%s items=%s total=%s discriminator=%s payment=%s",
+        current_user.telegram_id,
+        len(body.items),
+        total,
+        body.discriminator,
+        body.payment_method,
+    )
     try:
         alipos_resp = await alipos_api.create_order(alipos_payload)
     except Exception as exc:
+        logger.exception(
+            "AliPOS order creation failed for user=%s eats_id=%s: %s",
+            current_user.telegram_id,
+            eats_id,
+            exc,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to create order in AliPOS: {exc}",
@@ -90,15 +149,65 @@ async def create_order(
 
     alipos_order_id = alipos_resp.get("orderId")
 
+    # Multicard / Rahmat: create invoice and set payment metadata
+    multicard_invoice_uuid = None
+    multicard_checkout_url = None
+    payment_provider = None
+    payment_status = None
+    payment_expires_at = None
+
+    if body.payment_method == "rahmat":
+        # Amounts in tiyin (1 UZS = 100 tiyin)
+        amount_tiyin = int(total * 100)
+        return_url = settings.telegram_order_deep_link(str(order_id))
+
+        logger.info(
+            "Creating Multicard invoice: order=%s amount_tiyin=%s",
+            order_id,
+            amount_tiyin,
+        )
+        try:
+            invoice_data = await multicard_api.create_invoice(
+                amount_tiyin=amount_tiyin,
+                invoice_id=str(order_id),
+                return_url=return_url,
+                ttl=settings.rahmat_payment_timeout_seconds,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Multicard invoice creation failed for order=%s: %s",
+                order_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to create Multicard invoice: {exc}",
+            ) from exc
+
+        multicard_invoice_uuid = invoice_data["uuid"]
+        multicard_checkout_url = invoice_data["checkout_url"]
+        payment_provider = "multicard"
+        payment_status = "pending"
+        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        payment_expires_at = now + datetime.timedelta(
+            seconds=settings.rahmat_payment_timeout_seconds
+        )
+
     # Save to DB
     order = Order(
+        id=order_id,
         user_id=current_user.telegram_id,
-        address_id=body.address_id,
+        address_id=selected_address.id if selected_address else body.address_id,
         items=[item.model_dump() for item in body.items],
         total_amount=total,
         delivery_fee=0,
         comment=body.comment,
         payment_method=body.payment_method,
+        payment_provider=payment_provider,
+        payment_status=payment_status,
+        payment_expires_at=payment_expires_at,
+        multicard_invoice_uuid=multicard_invoice_uuid,
+        multicard_checkout_url=multicard_checkout_url,
         discriminator=body.discriminator,
         alipos_order_id=alipos_order_id,
         alipos_eats_id=eats_id,
@@ -184,7 +293,7 @@ async def get_order_status(
             if new_status != order.status or order_number != order.order_number:
                 order.status = new_status
                 order.order_number = order_number
-                order.status_updated_at = datetime.datetime.now(datetime.UTC)
+                order.status_updated_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
                 await db.commit()
         except Exception:
             pass  # Return cached status if AliPOS is unreachable
@@ -195,5 +304,8 @@ async def get_order_status(
             status=order.status,
             order_number=order.order_number,
             alipos_order_id=order.alipos_order_id,
+            payment_status=order.payment_status,
+            payment_expires_at=order.payment_expires_at,
+            multicard_receipt_url=order.multicard_receipt_url,
         ).model_dump(mode="json"),
     )

@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>OLOT SOMSA - Menu</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;family=Manrope:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "error-dim": "#9f0519",
+              "on-error": "#ffefee",
+              "tertiary": "#833e9a",
+              "on-secondary-fixed": "#403f3f",
+              "on-tertiary-container": "#570f70",
+              "primary": "#a33800",
+              "inverse-on-surface": "#9c9d9d",
+              "secondary": "#5c5b5b",
+              "tertiary-fixed-dim": "#d78cee",
+              "error-container": "#fb5151",
+              "primary-fixed-dim": "#ff5e07",
+              "on-secondary-container": "#525151",
+              "secondary-fixed-dim": "#d6d4d3",
+              "background": "#f6f6f6",
+              "inverse-surface": "#0c0f0f",
+              "secondary-container": "#e5e2e1",
+              "surface-variant": "#dbdddd",
+              "tertiary-fixed": "#e699fd",
+              "surface-container-low": "#f0f1f1",
+              "on-surface-variant": "#5a5c5c",
+              "on-tertiary-fixed-variant": "#611b79",
+              "on-tertiary": "#ffedfe",
+              "surface-container-lowest": "#ffffff",
+              "surface-container": "#e7e8e8",
+              "outline": "#767777",
+              "on-primary-fixed": "#000000",
+              "error": "#b31b25",
+              "primary-container": "#ff7941",
+              "on-secondary-fixed-variant": "#5c5b5b",
+              "surface": "#f6f6f6",
+              "on-primary-container": "#431200",
+              "tertiary-dim": "#75318d",
+              "on-surface": "#2d2f2f",
+              "on-secondary": "#f5f2f1",
+              "secondary-dim": "#504f4f",
+              "surface-dim": "#d3d5d5",
+              "on-primary-fixed-variant": "#531900",
+              "surface-tint": "#a33800",
+              "secondary-fixed": "#e5e2e1",
+              "inverse-primary": "#fc5b00",
+              "on-error-container": "#570008",
+              "primary-dim": "#8f3000",
+              "tertiary-container": "#e699fd",
+              "on-background": "#2d2f2f",
+              "surface-container-highest": "#dbdddd",
+              "surface-bright": "#f6f6f6",
+              "surface-container-high": "#e1e3e3",
+              "on-tertiary-fixed": "#360049",
+              "primary-fixed": "#ff7941",
+              "on-primary": "#ffefeb",
+              "outline-variant": "#acadad"
+            },
+            fontFamily: {
+              "headline": ["Plus Jakarta Sans"],
+              "body": ["Manrope"],
+              "label": ["Manrope"]
+            },
+            borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-surface font-body text-on-surface selection:bg-primary-container/30">
+<!-- TopAppBar -->
+<header class="fixed top-0 w-full z-50 bg-stone-50/80 dark:bg-stone-900/80 backdrop-blur-md flex justify-between items-center px-6 h-16 w-full">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 bg-primary rounded-xl flex items-center justify-center overflow-hidden">
+<span class="material-symbols-outlined text-white" data-icon="restaurant">restaurant</span>
+</div>
+<h1 class="font-['Plus_Jakarta_Sans'] font-bold tracking-tight text-xl font-extrabold text-orange-900 dark:text-orange-500">OLOT SOMSA</h1>
+</div>
+<div class="flex items-center gap-4">
+<div class="relative active:scale-95 transition-transform duration-150">
+<div class="w-10 h-10 rounded-full bg-surface-container-high overflow-hidden border border-outline-variant/20">
+<img alt="User Profile" class="w-full h-full object-cover" data-alt="close-up portrait of a friendly male customer with soft studio lighting and a clean minimalist background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAoicxPbOOk3nNBjAKmrVL_-bDZth3ftyPHPFPIGfvjyhlm2KuLxstfUubX0CKPZkJgdka3zia1kUNghs_fe93Vhptek_T0sOBdTtPzaKNpsPsgbkPPyH03mZE5OKvxU2ddu4BjtBMiYW8L25LGTTux3rfIuuF1vsoSYBOrUU1HgyO9ju41rLTLJN0hEKjOuayVrjcOIApfDt0o2P1P_4VEOBrr2WmVvXFHx0ZF1yiGa3njpO8qC_vbllUg9VWMzoqhVgxL_ATzpNs"/>
+</div>
+<span class="absolute -top-1 -right-1 bg-primary text-on-primary text-[10px] font-bold w-5 h-5 flex items-center justify-center rounded-full border-2 border-surface">2</span>
+</div>
+</div>
+</header>
+<main class="flex h-screen pt-16 pb-20 overflow-hidden">
+<!-- Sidebar Navigation (NavigationDrawer Context) -->
+<aside class="w-20 md:w-24 bg-stone-50 dark:bg-stone-950 flex flex-col py-8 gap-6 items-center border-r border-outline-variant/10">
+<!-- Active State: Classic Somsa -->
+<button class="flex flex-col items-center gap-1 group w-full relative">
+<div class="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full"></div>
+<div class="w-12 h-12 flex items-center justify-center bg-orange-600 text-white rounded-xl shadow-lg shadow-orange-900/20">
+<span class="material-symbols-outlined" data-icon="bakery_dining" style="font-variation-settings: 'FILL' 1;">bakery_dining</span>
+</div>
+<span class="font-['Plus_Jakarta_Sans'] font-semibold text-[10px] text-primary">Somsa</span>
+</button>
+<button class="flex flex-col items-center gap-1 group w-full text-stone-500 hover:text-stone-800 transition-colors">
+<div class="w-12 h-12 flex items-center justify-center bg-surface-container rounded-xl group-hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined" data-icon="kebab_dining">kebab_dining</span>
+</div>
+<span class="font-['Plus_Jakarta_Sans'] font-medium text-[10px]">Soups</span>
+</button>
+<button class="flex flex-col items-center gap-1 group w-full text-stone-500 hover:text-stone-800 transition-colors">
+<div class="w-12 h-12 flex items-center justify-center bg-surface-container rounded-xl group-hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined" data-icon="local_cafe">local_cafe</span>
+</div>
+<span class="font-['Plus_Jakarta_Sans'] font-medium text-[10px]">Drinks</span>
+</button>
+<button class="flex flex-col items-center gap-1 group w-full text-stone-500 hover:text-stone-800 transition-colors">
+<div class="w-12 h-12 flex items-center justify-center bg-surface-container rounded-xl group-hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined" data-icon="icecream">icecream</span>
+</div>
+<span class="font-['Plus_Jakarta_Sans'] font-medium text-[10px]">Desserts</span>
+</button>
+<button class="flex flex-col items-center gap-1 group w-full text-stone-500 hover:text-stone-800 transition-colors">
+<div class="w-12 h-12 flex items-center justify-center bg-surface-container rounded-xl group-hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined" data-icon="local_bar">local_bar</span>
+</div>
+<span class="font-['Plus_Jakarta_Sans'] font-medium text-[10px]">Bar</span>
+</button>
+</aside>
+<!-- Right Side Scrollable Content -->
+<section class="flex-1 overflow-y-auto hide-scrollbar bg-surface px-4 py-6">
+<!-- Category Header -->
+<div class="flex items-center gap-2 mb-6">
+<span class="material-symbols-outlined text-primary text-2xl" data-icon="stars" style="font-variation-settings: 'FILL' 1;">stars</span>
+<h2 class="font-headline text-xl font-bold tracking-tight text-on-surface">Popular Somsa</h2>
+</div>
+<div class="space-y-4">
+<!-- Menu Item Card 1 (Active/Added) -->
+<div class="bg-surface-container-lowest rounded-xl p-3 flex gap-4 shadow-sm border border-outline-variant/5">
+<div class="w-24 h-24 rounded-lg overflow-hidden flex-shrink-0">
+<img class="w-full h-full object-cover" data-alt="close-up of golden brown flaky somsa pastry on a wooden platter with sesame seeds and steam rising" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBq3acmda28cgIcDc6po0V-8lzEoY8rCaQ0nqorwajS07b_ud8oGV5_IesjxQe-D37dVoW7MGYyOA-SppUmbOFcfbWtg5O0emGgQgd_xQ-ShHTWzI5EQnASDRx4nTdBpB7xhPPQBypnPsMHGaZ9RKwTAz8KJUlCfAObjmIAnKmD1yqSK1uwM61pv_70U58ToQ7HZkKCZ-lCSPbljmBxxSzp6CcYEMdrMiumxA29AI4toOnXnvHyJqwSMAy67KrZFPs1XRXSfa6VoY4"/>
+</div>
+<div class="flex flex-col flex-1 justify-between py-0.5">
+<div>
+<h3 class="font-headline font-bold text-on-surface text-base">Premium Meat Somsa</h3>
+<p class="font-body text-xs text-on-surface-variant line-clamp-2 mt-1 leading-relaxed">
+                                Hand-chopped tender beef, caramelized onions, and traditional spices in flaky pastry.
+                            </p>
+</div>
+<div class="flex items-end justify-between">
+<span class="font-headline font-bold text-primary text-sm">12,000 UZS</span>
+<!-- Quantity Stepper -->
+<div class="flex items-center bg-primary-container/20 rounded-full px-1 py-1">
+<button class="w-7 h-7 flex items-center justify-center bg-white rounded-full text-primary shadow-sm active:scale-90 transition-transform">
+<span class="material-symbols-outlined text-sm" data-icon="remove">remove</span>
+</button>
+<span class="px-3 font-headline font-bold text-sm text-on-primary-container">1</span>
+<button class="w-7 h-7 flex items-center justify-center bg-primary rounded-full text-white shadow-md active:scale-90 transition-transform">
+<span class="material-symbols-outlined text-sm" data-icon="add">add</span>
+</button>
+</div>
+</div>
+</div>
+</div>
+<!-- Menu Item Card 2 -->
+<div class="bg-surface-container-lowest rounded-xl p-3 flex gap-4 shadow-sm border border-outline-variant/5">
+<div class="w-24 h-24 rounded-lg overflow-hidden flex-shrink-0">
+<img class="w-full h-full object-cover" data-alt="traditional tandoor oven baked lamb somsa with visible layers of dough and black cumin seeds" src="https://lh3.googleusercontent.com/aida-public/AB6AXuChlFl_DhPhZS0jUYiHle_-SB7PKafYDim7hoEP8cvJcpwesQHhredk9X4NMwloF5qfWo8Tjt7L3KtjashjrC6HV7Qm1UsZXWNrLKwQSMR6LB2co1i8gx8Hf-2H-VvS3WMldvYbJBKI67rTt0A-s2XhhKWgfahmSmv9TwZqnGGrFabs7BKTUfJHoYOvboiNVjWiUmCVBEmXlM2ZVZU72e6eYRiNfjwDfSwWBmh7SCdOnEw9kWMv6FuvZAt-FqYVXoJl5H8dHm_Qfe4"/>
+</div>
+<div class="flex flex-col flex-1 justify-between py-0.5">
+<div>
+<h3 class="font-headline font-bold text-on-surface text-base">Classic Lamb Somsa</h3>
+<p class="font-body text-xs text-on-surface-variant line-clamp-2 mt-1 leading-relaxed">
+                                Authentic recipe from Olot with juicy lamb chunks and aromatic black cumin seeds.
+                            </p>
+</div>
+<div class="flex items-end justify-between">
+<span class="font-headline font-bold text-primary text-sm">14,000 UZS</span>
+<button class="w-9 h-9 flex items-center justify-center bg-primary rounded-full text-white shadow-lg shadow-primary/20 active:scale-90 transition-transform">
+<span class="material-symbols-outlined" data-icon="add">add</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Menu Item Card 3 -->
+<div class="bg-surface-container-lowest rounded-xl p-3 flex gap-4 shadow-sm border border-outline-variant/5">
+<div class="w-24 h-24 rounded-lg overflow-hidden flex-shrink-0">
+<img class="w-full h-full object-cover" data-alt="vibrant vegetarian somsa filled with mashed pumpkin and greens served on a decorative ceramic tile" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCtN-Sc7okNdVXjNATzLIYxc73-6nyQlAjxAKOzRG3DvmHODCsGQ0VpvocdbFRFoRtkkVplOf5ZefHG4ftrhaZp9uIMztM2u_wCWChCvBGqK_HAFlJ3VJ5X7AZ77RNPNpaM8YJj_6xosaI113rpZLVfFOmejtB2VCcR4AgN4ulZYiLEuIE7tePVv1Y9SP1t1MrmVA5o3vg5navaQ2gtYnQAfLfOUIWR58DiiUyh7NSYMmtvialXYPuY_HeR8hFAoaemOwpiHI9wAs0"/>
+</div>
+<div class="flex flex-col flex-1 justify-between py-0.5">
+<div>
+<h3 class="font-headline font-bold text-on-surface text-base">Savory Pumpkin Somsa</h3>
+<p class="font-body text-xs text-on-surface-variant line-clamp-2 mt-1 leading-relaxed">
+                                Seasonal sweet pumpkin filling with a hint of red pepper and mild spices.
+                            </p>
+</div>
+<div class="flex items-end justify-between">
+<span class="font-headline font-bold text-primary text-sm">9,000 UZS</span>
+<button class="w-9 h-9 flex items-center justify-center bg-primary rounded-full text-white shadow-lg shadow-primary/20 active:scale-90 transition-transform">
+<span class="material-symbols-outlined" data-icon="add">add</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Category Header 2 -->
+<div class="flex items-center gap-2 mt-8 mb-6">
+<span class="material-symbols-outlined text-primary text-2xl" data-icon="soup_kitchen">soup_kitchen</span>
+<h2 class="font-headline text-xl font-bold tracking-tight text-on-surface">Hot Soups</h2>
+</div>
+<!-- Menu Item Card 4 -->
+<div class="bg-surface-container-lowest rounded-xl p-3 flex gap-4 shadow-sm border border-outline-variant/5">
+<div class="w-24 h-24 rounded-lg overflow-hidden flex-shrink-0">
+<img class="w-full h-full object-cover" data-alt="steaming bowl of uzbek shurpa soup with large pieces of meat and vegetables in a clear broth" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDKYjxAZjvPBfA2HTX4jKxj7ffg8o2f8xxbYG_pYgGbzZGfbiPBGR-wRNBATSbuMJ_--2AoZaX-6zoY1zcLmwUnkQALS5pQf06TABG7jq4epGNgt_A_ginoE0RWFT6ZnT-D5dQd0ovX3E9qZZpI-Hoe4xeStRPoa7co0HEBEM6hRwFuWXgWvLBxnGr1KR02Ff5CDL2qVuGO6oNNI7UdDoHZkq1fA8mL6W66sBpm8CsCipcsXS9cm_e8R_fx__63EYTIUIJn6X_W6eY"/>
+</div>
+<div class="flex flex-col flex-1 justify-between py-0.5">
+<div>
+<h3 class="font-headline font-bold text-on-surface text-base">Olot Shurpa</h3>
+<p class="font-body text-xs text-on-surface-variant line-clamp-2 mt-1 leading-relaxed">
+                                Rich, clear beef broth with slow-cooked vegetables and fresh mountain herbs.
+                            </p>
+</div>
+<div class="flex items-end justify-between">
+<span class="font-headline font-bold text-primary text-sm">22,000 UZS</span>
+<button class="w-9 h-9 flex items-center justify-center bg-primary rounded-full text-white shadow-lg shadow-primary/20 active:scale-90 transition-transform">
+<span class="material-symbols-outlined" data-icon="add">add</span>
+</button>
+</div>
+</div>
+</div>
+</div>
+<!-- Extra space for the sticky cart -->
+<div class="h-12"></div>
+</section>
+</main>
+<!-- Sticky Cart Bar -->
+<div class="fixed bottom-0 w-full z-50 px-4 pb-6 pt-2">
+<div class="bg-orange-900/90 dark:bg-orange-800/95 backdrop-blur-xl rounded-2xl p-4 flex items-center justify-between shadow-2xl active:scale-[0.98] transition-all duration-200">
+<div class="flex items-center gap-4">
+<div class="relative">
+<div class="w-12 h-12 rounded-full bg-primary-container flex items-center justify-center text-on-primary-container">
+<span class="material-symbols-outlined text-2xl" data-icon="shopping_bag" style="font-variation-settings: 'FILL' 1;">shopping_bag</span>
+</div>
+<span class="absolute -top-1 -right-1 bg-white text-primary text-[10px] font-extrabold w-5 h-5 flex items-center justify-center rounded-full border-2 border-primary-container">2</span>
+</div>
+<div>
+<div class="font-headline font-extrabold text-white text-lg">24,000 UZS</div>
+<div class="font-body text-[11px] text-white/70 uppercase tracking-widest font-bold">Tap to view cart</div>
+</div>
+</div>
+<span class="material-symbols-outlined text-white/50 text-3xl" data-icon="chevron_right">chevron_right</span>
+</div>
+</div>
+<!-- Bottom Navigation (Mobile Visibility Only) -->
+<nav class="md:hidden hidden fixed bottom-0 w-full z-50 rounded-t-2xl bg-stone-50/80 dark:bg-stone-900/80 backdrop-blur-md flex justify-around items-center pt-2 pb-safe px-4 shadow-2xl dark:shadow-none">
+<div class="flex flex-col items-center justify-center text-orange-700 dark:text-orange-400 bg-orange-100/50 dark:bg-orange-900/30 rounded-xl px-3 py-1">
+<span class="material-symbols-outlined" data-icon="menu_book" style="font-variation-settings: 'FILL' 1;">menu_book</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Menu</span>
+</div>
+<div class="flex flex-col items-center justify-center text-stone-400 dark:text-stone-500">
+<span class="material-symbols-outlined" data-icon="local_shipping">local_shipping</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Orders</span>
+</div>
+<div class="flex flex-col items-center justify-center text-stone-400 dark:text-stone-500">
+<span class="material-symbols-outlined" data-icon="person">person</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Profile</span>
+</div>
+<div class="flex flex-col items-center justify-center text-stone-400 dark:text-stone-500">
+<span class="material-symbols-outlined" data-icon="shopping_bag">shopping_bag</span>
+<span class="font-['Manrope'] text-[10px] font-semibold uppercase tracking-wider">Cart</span>
+</div>
+</nav>
+</body></html>

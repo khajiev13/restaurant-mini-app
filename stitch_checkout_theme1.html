@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>OLOT SOMSA - Checkout</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;family=Manrope:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "error-dim": "#9f0519",
+                        "on-error": "#ffefee",
+                        "tertiary": "#833e9a",
+                        "on-secondary-fixed": "#403f3f",
+                        "on-tertiary-container": "#570f70",
+                        "primary": "#a33800",
+                        "inverse-on-surface": "#9c9d9d",
+                        "secondary": "#5c5b5b",
+                        "tertiary-fixed-dim": "#d78cee",
+                        "error-container": "#fb5151",
+                        "primary-fixed-dim": "#ff5e07",
+                        "on-secondary-container": "#525151",
+                        "secondary-fixed-dim": "#d6d4d3",
+                        "background": "#f6f6f6",
+                        "inverse-surface": "#0c0f0f",
+                        "secondary-container": "#e5e2e1",
+                        "surface-variant": "#dbdddd",
+                        "tertiary-fixed": "#e699fd",
+                        "surface-container-low": "#f0f1f1",
+                        "on-surface-variant": "#5a5c5c",
+                        "on-tertiary-fixed-variant": "#611b79",
+                        "on-tertiary": "#ffedfe",
+                        "surface-container-lowest": "#ffffff",
+                        "surface-container": "#e7e8e8",
+                        "outline": "#767777",
+                        "on-primary-fixed": "#000000",
+                        "error": "#b31b25",
+                        "primary-container": "#ff7941",
+                        "on-secondary-fixed-variant": "#5c5b5b",
+                        "surface": "#f6f6f6",
+                        "on-primary-container": "#431200",
+                        "tertiary-dim": "#75318d",
+                        "on-surface": "#2d2f2f",
+                        "on-secondary": "#f5f2f1",
+                        "secondary-dim": "#504f4f",
+                        "surface-dim": "#d3d5d5",
+                        "on-primary-fixed-variant": "#531900",
+                        "surface-tint": "#a33800",
+                        "secondary-fixed": "#e5e2e1",
+                        "inverse-primary": "#fc5b00",
+                        "on-error-container": "#570008",
+                        "primary-dim": "#8f3000",
+                        "tertiary-container": "#e699fd",
+                        "on-background": "#2d2f2f",
+                        "surface-container-highest": "#dbdddd",
+                        "surface-bright": "#f6f6f6",
+                        "surface-container-high": "#e1e3e3",
+                        "on-tertiary-fixed": "#360049",
+                        "primary-fixed": "#ff7941",
+                        "on-primary": "#ffefeb",
+                        "outline-variant": "#acadad"
+                    },
+                    fontFamily: {
+                        "headline": ["Plus Jakarta Sans"],
+                        "body": ["Manrope"],
+                        "label": ["Manrope"]
+                    },
+                    borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .primary-gradient {
+            background: linear-gradient(135deg, #a33800 0%, #ff7941 100%);
+        }
+        .glass-header {
+            background-color: rgba(246, 246, 246, 0.8);
+            backdrop-filter: blur(12px);
+        }
+        body {
+            font-family: 'Manrope', sans-serif;
+            background-color: #f6f6f6;
+            color: #2d2f2f;
+        }
+        h1, h2, h3 {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="min-h-screen pb-32">
+<!-- Top AppBar (Back Navigation Only) -->
+<header class="fixed top-0 w-full z-50 glass-header flex items-center px-4 h-16">
+<button class="w-10 h-10 flex items-center justify-center rounded-full hover:bg-surface-container transition-colors duration-200">
+<span class="material-symbols-outlined text-on-surface">chevron_left</span>
+</button>
+<h1 class="ml-4 text-lg font-bold tracking-tight text-on-surface uppercase font-headline">Checkout</h1>
+</header>
+<main class="pt-20 px-4 space-y-6 max-w-2xl mx-auto">
+<!-- Section: Phone Number -->
+<section class="space-y-3">
+<div class="flex items-center justify-between px-1">
+<h2 class="text-sm font-bold uppercase tracking-widest text-secondary font-headline">Phone Number</h2>
+<span class="material-symbols-outlined text-primary text-sm">verified_user</span>
+</div>
+<div class="bg-surface-container-lowest p-4 rounded-xl shadow-sm border border-outline-variant/10 flex items-center justify-between">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary-container">phone_iphone</span>
+<span class="font-semibold text-on-surface">+998 90 123 45 67</span>
+</div>
+<button class="text-xs font-bold text-primary uppercase tracking-wider">Change</button>
+</div>
+</section>
+<!-- Section: Delivery Address -->
+<section class="space-y-4">
+<div class="flex items-center justify-between px-1">
+<h2 class="text-sm font-bold uppercase tracking-widest text-secondary font-headline">Delivery Address</h2>
+</div>
+<div class="space-y-3">
+<!-- Address Card 1: Home -->
+<label class="relative flex items-start p-4 bg-surface-container-lowest rounded-xl border-2 border-primary cursor-pointer ring-4 ring-primary/5 transition-all">
+<input checked="" class="hidden" name="address" type="radio"/>
+<div class="flex-1">
+<div class="flex items-center gap-2 mb-1">
+<span class="material-symbols-outlined text-primary text-lg">home</span>
+<span class="font-bold text-on-surface">Home</span>
+</div>
+<p class="text-sm text-secondary leading-relaxed">12 Silk Road St., Tashkent, Uzbekistan</p>
+</div>
+<div class="w-5 h-5 rounded-full border-4 border-primary bg-white flex items-center justify-center"></div>
+</label>
+<!-- Address Card 2: Office -->
+<label class="relative flex items-start p-4 bg-surface-container-lowest rounded-xl border border-outline-variant/30 cursor-pointer hover:bg-surface-container-low transition-all">
+<input class="hidden" name="address" type="radio"/>
+<div class="flex-1">
+<div class="flex items-center gap-2 mb-1">
+<span class="material-symbols-outlined text-secondary text-lg">work</span>
+<span class="font-bold text-on-surface">Office</span>
+</div>
+<p class="text-sm text-secondary leading-relaxed">5 Tashkent Ave., Business District</p>
+</div>
+<div class="w-5 h-5 rounded-full border border-outline bg-white"></div>
+</label>
+</div>
+<!-- Inline Form: Add New Address -->
+<div class="bg-surface-container-low p-5 rounded-xl border border-outline-variant/20 space-y-4 mt-6">
+<div class="flex items-center justify-between">
+<h3 class="font-bold text-on-surface">Add New Address</h3>
+<button class="flex items-center gap-1 text-xs font-bold text-primary uppercase tracking-tighter">
+<span class="material-symbols-outlined text-sm">my_location</span> Use My Location
+                    </button>
+</div>
+<div class="grid grid-cols-2 gap-3">
+<div class="col-span-2">
+<label class="block text-[10px] font-bold text-secondary uppercase tracking-widest mb-1 ml-1">Label (e.g. Gym, Mom's)</label>
+<input class="w-full bg-surface-container-lowest border-none rounded-lg p-3 text-sm focus:ring-1 focus:ring-primary/40 placeholder:text-outline/50" placeholder="e.g. Home" type="text"/>
+</div>
+<div class="col-span-2">
+<label class="block text-[10px] font-bold text-secondary uppercase tracking-widest mb-1 ml-1">Street &amp; Building *</label>
+<input class="w-full bg-surface-container-lowest border-none rounded-lg p-3 text-sm focus:ring-1 focus:ring-primary/40 placeholder:text-outline/50" placeholder="Street name and number" required="" type="text"/>
+</div>
+<div>
+<label class="block text-[10px] font-bold text-secondary uppercase tracking-widest mb-1 ml-1">Entrance</label>
+<input class="w-full bg-surface-container-lowest border-none rounded-lg p-3 text-sm focus:ring-1 focus:ring-primary/40" type="text"/>
+</div>
+<div>
+<label class="block text-[10px] font-bold text-secondary uppercase tracking-widest mb-1 ml-1">Floor</label>
+<input class="w-full bg-surface-container-lowest border-none rounded-lg p-3 text-sm focus:ring-1 focus:ring-primary/40" type="text"/>
+</div>
+<div>
+<label class="block text-[10px] font-bold text-secondary uppercase tracking-widest mb-1 ml-1">Apartment</label>
+<input class="w-full bg-surface-container-lowest border-none rounded-lg p-3 text-sm focus:ring-1 focus:ring-primary/40" type="text"/>
+</div>
+<div>
+<label class="block text-[10px] font-bold text-secondary uppercase tracking-widest mb-1 ml-1">Door Code</label>
+<input class="w-full bg-surface-container-lowest border-none rounded-lg p-3 text-sm focus:ring-1 focus:ring-primary/40" type="text"/>
+</div>
+<div class="col-span-2">
+<label class="block text-[10px] font-bold text-secondary uppercase tracking-widest mb-1 ml-1">Courier Instructions</label>
+<textarea class="w-full bg-surface-container-lowest border-none rounded-lg p-3 text-sm focus:ring-1 focus:ring-primary/40 placeholder:text-outline/50" placeholder="e.g. Leave at the door" rows="2"></textarea>
+</div>
+</div>
+<div class="flex gap-3 pt-2">
+<button class="flex-1 py-3 bg-primary text-on-primary font-bold rounded-xl text-sm transition-transform active:scale-95">Save Address</button>
+<button class="px-6 py-3 bg-surface-container-highest text-secondary font-bold rounded-xl text-sm transition-transform active:scale-95">Cancel</button>
+</div>
+</div>
+</section>
+<!-- Section: Order Summary (Contextual) -->
+<section class="space-y-3">
+<div class="flex items-center justify-between px-1">
+<h2 class="text-sm font-bold uppercase tracking-widest text-secondary font-headline">Your Selection</h2>
+</div>
+<div class="bg-surface-container-lowest rounded-2xl overflow-hidden border border-outline-variant/10">
+<div class="p-3 flex gap-3 items-center border-b border-surface-container">
+<img class="w-16 h-16 rounded-lg object-cover" data-alt="close up of traditional flaky Uzbek somsa pastry with golden sesame seeds on a dark rustic surface" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAZ9BwElOrABjEBQC2Y2nUnmjCZLSHt4YzQZ0o8Vn2tGDdQVliifXCLLWrvbLJACYi47i0kRd3C4WV6uHlpfL0KO6lkrtRUQBhLFR3k_6nwfIGYmb-RuGDYOg_GsLA6yGL67zbhWGtKpoxgStIYUIE5MQqBforktFnW-K_oTwOwan72kdk-duA2GNbQeCCl9gpyIhqgIx-VNfnD64XuR4Uj66sxCXYG4NgP2dxiUwF-CPWIvmDn7f5hYbIDnH0wN20MhSB9dIAGTRI"/>
+<div class="flex-1">
+<h4 class="font-bold text-on-surface text-sm">Classic Beef Somsa (x3)</h4>
+<p class="text-xs text-secondary">Extra onions, traditional spices</p>
+</div>
+<span class="font-bold text-primary">36,000 UZS</span>
+</div>
+</div>
+</section>
+<!-- Section: Comment Section -->
+<section class="space-y-3">
+<div class="flex items-center justify-between px-1">
+<h2 class="text-sm font-bold uppercase tracking-widest text-secondary font-headline">Any special instructions?</h2>
+</div>
+<div class="bg-surface-container-lowest p-1 rounded-xl shadow-sm border border-outline-variant/10">
+<textarea class="w-full bg-transparent border-none focus:ring-0 text-sm p-3 placeholder:text-outline/40" placeholder="Tell us if you have allergies or specific delivery needs..." rows="3"></textarea>
+</div>
+</section>
+<!-- Aesthetic Spacer -->
+<div class="h-10"></div>
+</main>
+<!-- Bottom Checkout Button (Telegram MainButton style) -->
+<div class="fixed bottom-0 left-0 w-full p-4 glass-header z-50">
+<div class="max-w-2xl mx-auto">
+<button class="w-full primary-gradient text-on-primary py-4 px-6 rounded-2xl flex items-center justify-between shadow-xl shadow-primary/20 transition-transform active:scale-[0.98] duration-150">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">shopping_bag</span>
+<span class="font-bold font-headline text-lg tracking-tight">Place Order</span>
+</div>
+<div class="flex items-center gap-3">
+<div class="h-6 w-[1px] bg-white/20"></div>
+<span class="font-extrabold font-headline text-lg">36,000 UZS</span>
+</div>
+</button>
+<!-- Safety padding for iOS home indicator -->
+<div class="h-2"></div>
+</div>
+</div>
+</body></html>
