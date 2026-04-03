@@ -2,7 +2,7 @@ import { type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../../stores/authStore';
-import logo from '../../assets/logo.png';
+import logo from '../../assets/logo.webp';
 
 // --- Shared Style Constants ---
 const COLORS = {
