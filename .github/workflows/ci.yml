@@ -31,17 +31,15 @@ jobs:
         working-directory: backend
 
     env:
-      DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
       TELEGRAM_BOT_TOKEN: test_token
       JWT_SECRET: test_secret
-      ALIPOS_API_URL: https://mock.alipos.test
-      ALIPOS_LOGIN: test
-      ALIPOS_PASSWORD: test
+      ALIPOS_API_CLIENT_ID: test_client_id
+      ALIPOS_API_CLIENT_SECRET: test_client_secret
       ALIPOS_RESTAURANT_ID: test-id
-      MULTICARD_API_URL: https://mock.multicard.test
-      MULTICARD_MERCHANT_ID: test
-      MULTICARD_SECRET_KEY: test
-      CLOUDFLARE_TUNNEL_TOKEN: test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+      POSTGRES_HOST: localhost
 
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +56,7 @@ jobs:
         run: uv pip install --system -r requirements-dev.txt
 
       - name: Lint
-        run: uv run ruff check .
+        run: ruff check .
 
       - name: Run database migrations
         run: |
@@ -66,10 +64,9 @@ jobs:
           import asyncio
           from sqlalchemy.ext.asyncio import create_async_engine
           from app.models.models import Base
-          import os
 
           async def main():
-              engine = create_async_engine(os.environ['DATABASE_URL'])
+              engine = create_async_engine('postgresql+asyncpg://test:test@localhost:5432/test')
               async with engine.begin() as conn:
                   await conn.run_sync(Base.metadata.create_all)
               await engine.dispose()
