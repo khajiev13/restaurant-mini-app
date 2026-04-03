@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 _token: str | None = None
 _token_expires_at: float = 0
 
+# Menu cache (5 minute TTL)
+_menu_cache: dict | None = None
+_menu_cache_expires_at: float = 0
+_MENU_TTL = 300
+
 
 def _format_alipos_error(response: httpx.Response) -> str:
     try:
@@ -110,12 +115,17 @@ async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
 
 
 async def get_menu() -> dict:
-    """Fetch the full menu for the configured restaurant."""
+    """Fetch the full menu for the configured restaurant, cached for 5 minutes."""
+    global _menu_cache, _menu_cache_expires_at
+    if _menu_cache is not None and time.monotonic() < _menu_cache_expires_at:
+        return _menu_cache
     resp = await _api_request(
         "GET",
         f"/api/Integration/v1/menu/{settings.alipos_restaurant_id}/composition",
     )
-    return resp.json()
+    _menu_cache = resp.json()
+    _menu_cache_expires_at = time.monotonic() + _MENU_TTL
+    return _menu_cache
 
 
 async def create_order(order_payload: dict) -> dict:
