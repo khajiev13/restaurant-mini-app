@@ -1,5 +1,7 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock
+
 
 @pytest.mark.asyncio
 async def test_get_menu(client):
@@ -11,9 +13,9 @@ async def test_get_menu(client):
 
     with patch("app.routers.menu.alipos_api.get_menu", new_callable=AsyncMock) as mock_get_menu:
         mock_get_menu.return_value = mock_menu_data
-        
+
         response = await client.get("/menu")
-        
+
         assert response.status_code == 200
         json_data = response.json()
         assert json_data["success"] is True

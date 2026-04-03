@@ -1,5 +1,6 @@
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 FAKE_USER = {"id": 777001, "first_name": "Addr", "last_name": None, "username": "addruser"}
 

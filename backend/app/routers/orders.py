@@ -10,8 +10,7 @@ from app.middleware.telegram_auth import CurrentUserDep, DbDep
 from app.models.models import Address, Order
 from app.schemas.common import ApiResponse
 from app.schemas.order import OrderCreate, OrderResponse, OrderStatusResponse
-from app.services import alipos_api
-from app.services import multicard_api
+from app.services import alipos_api, multicard_api
 
 logger = logging.getLogger(__name__)
 

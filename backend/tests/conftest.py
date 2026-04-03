@@ -1,23 +1,18 @@
-import asyncio
-import os
-import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.database import get_db, engine as app_engine
-from app.config import settings
-from app.models.models import Base
+from app.database import engine as app_engine
+from app.database import get_db
 from app.main import app
+
 
 @pytest_asyncio.fixture(scope="session")
 async def db_engine():
     """Yields a SQLAlchemy async engine bounded to the current app database."""
     # We will use the existing application database engine, but we ensure tables exist.
-    async with app_engine.begin() as conn:
-        # Instead of dropping the real database tables, we just rely on existing tables 
-        # because this is the real development database. 
-        # (Assuming migrations/init.sql already ran)
+    async with app_engine.begin():
+        # Rely on existing tables created by init.sql
         pass
 
     yield app_engine
@@ -27,17 +22,17 @@ async def db_session(db_engine):
     """Yields a transactional session that rolls back after each test."""
     async with db_engine.connect() as connection:
         transaction = await connection.begin()
-        
+
         session_maker = async_sessionmaker(
             bind=connection,
             class_=AsyncSession,
             expire_on_commit=False,
             autoflush=False
         )
-        
+
         async with session_maker() as session:
             yield session
-            
+
         await transaction.rollback()
 
 @pytest_asyncio.fixture

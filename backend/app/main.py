@@ -3,7 +3,6 @@ import datetime
 import logging
 
 import httpx
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -51,10 +50,11 @@ async def _expire_pending_payments() -> None:
     Runs every `payment_expiry_check_interval_seconds`. For each expired-but-pending
     order, marks it expired then attempts a best-effort AliPOS cancellation.
     """
+    from sqlalchemy import select, text
+
     from app.database import async_session
     from app.models.models import Order
     from app.services import alipos_api, multicard_api
-    from sqlalchemy import select, text
 
     while True:
         await asyncio.sleep(settings.payment_expiry_check_interval_seconds)
@@ -121,9 +121,11 @@ async def _expire_pending_payments() -> None:
 
                 try:
                     async with async_session() as db:
-                        from sqlalchemy import select as sel
-                        from app.models.models import Order as O
                         import uuid as _uuid
+
+                        from sqlalchemy import select as sel
+
+                        from app.models.models import Order as O
                         result = await db.execute(sel(O).where(O.id == _uuid.UUID(order_id)))
                         o = result.scalar_one_or_none()
                         if o:
