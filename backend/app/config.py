@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     rahmat_payment_timeout_seconds: int = 600
     payment_expiry_check_interval_seconds: int = 30
 
+    # Yandex Maps
+    yandex_maps_api_key: str = ""
+    yandex_geosuggest_api_key: str = ""
+
     # PostgreSQL
     postgres_user: str
     postgres_password: str

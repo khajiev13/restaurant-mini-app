@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ArtisanLayout, { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
-import { createAddress, createOrder, getAddresses, getMe } from '../../services/api';
+import MapPickerOverlay from '../../components/artisan/MapPickerOverlay';
+import { createAddress, createOrder, getAddresses, getMe, reverseGeocode } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { useCartStore } from '../../stores/cartStore';
+import { getTelegramLocation } from '../../hooks/useLocationManager';
 import { formatPrice } from '../../utils/format';
 import type { Address, CreateOrderPayload } from '../../types/api';
 
@@ -67,7 +69,9 @@ export default function ArtisanCheckoutPage() {
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showMapPicker, setShowMapPicker] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [locating, setLocating] = useState(false);
   const [form, setForm] = useState<AddressFormState>(EMPTY_FORM);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>('cash');
   const [toast, setToast] = useState('');
@@ -157,7 +161,8 @@ export default function ArtisanCheckoutPage() {
     try {
       const res = await createAddress({
         label: form.label.trim() || 'Home', full_address: form.address.trim(),
-        latitude: form.lat ? String(form.lat) : null, longitude: form.lng ? String(form.lng) : null,
+        latitude: form.lat !== null ? String(form.lat) : null,
+        longitude: form.lng !== null ? String(form.lng) : null,
         entrance: form.entrance.trim() || null, apartment: form.apartment.trim() || null,
         floor: form.floor.trim() || null, door_code: form.doorCode.trim() || null,
         courier_instructions: form.instructions.trim() || null, is_default: addresses.length === 0,
@@ -169,6 +174,30 @@ export default function ArtisanCheckoutPage() {
       haptic?.notificationOccurred('success');
     } catch { showToast(t('checkout.error_save_address')); }
     finally { setSaving(false); }
+  };
+
+  const handleUseMyLocation = async () => {
+    if (locating) return;
+
+    setLocating(true);
+    try {
+      const location = await getTelegramLocation();
+      const geocodeResponse = await reverseGeocode(location.lat, location.lng, i18n.language);
+      const nextAddress = geocodeResponse.data.data.address
+        || [geocodeResponse.data.data.name, geocodeResponse.data.data.description].filter(Boolean).join(', ');
+
+      setForm((current) => ({
+        ...current,
+        lat: location.lat,
+        lng: location.lng,
+        address: nextAddress || current.address,
+      }));
+      haptic?.notificationOccurred('success');
+    } catch {
+      showToast(t('checkout.error_location_fetch'));
+    } finally {
+      setLocating(false);
+    }
   };
 
   if (loading) {
@@ -307,6 +336,77 @@ export default function ArtisanCheckoutPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
                   <InputField label={t('checkout.address_label_input')} placeholder="e.g. Home" value={form.label} onChange={(v) => setForm((c) => ({ ...c, label: v }))} />
                   <InputField label={t('checkout.street_building')} placeholder={t('checkout.street_placeholder')} value={form.address} onChange={(v) => setForm((c) => ({ ...c, address: v }))} required />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                      <button
+                        onClick={() => void handleUseMyLocation()}
+                        type="button"
+                        disabled={locating}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 8,
+                          padding: '12px 16px',
+                          borderRadius: 12,
+                          border: '1px solid rgba(172,173,173,0.22)',
+                          background: COLORS.surfaceContainerLowest,
+                          color: COLORS.onSurface,
+                          fontWeight: 700,
+                          fontSize: 13,
+                          cursor: locating ? 'wait' : 'pointer',
+                          fontFamily: FONTS.body,
+                        }}
+                      >
+                        <Icon name="my_location" fill size={18} style={{ color: COLORS.primary }} />
+                        {locating ? t('common.loading', 'Loading...') : t('checkout.use_location')}
+                      </button>
+
+                      <button
+                        onClick={() => setShowMapPicker(true)}
+                        type="button"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 8,
+                          padding: '12px 16px',
+                          borderRadius: 12,
+                          border: '1px solid rgba(163, 56, 0, 0.18)',
+                          background: 'rgba(255, 121, 65, 0.08)',
+                          color: COLORS.primary,
+                          fontWeight: 700,
+                          fontSize: 14,
+                          cursor: 'pointer',
+                          fontFamily: FONTS.body,
+                        }}
+                      >
+                        <Icon name="location_on" fill size={18} style={{ color: COLORS.primary }} />
+                        {t('checkout.pick_on_map')}
+                      </button>
+                    </div>
+
+                    {form.lat !== null && form.lng !== null && (
+                      <div
+                        style={{
+                          alignSelf: 'flex-start',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '7px 10px',
+                          borderRadius: 999,
+                          background: 'rgba(4, 120, 87, 0.1)',
+                          color: '#047857',
+                          fontSize: 12,
+                          fontWeight: 700,
+                          fontFamily: FONTS.body,
+                        }}
+                      >
+                        <Icon name="check_circle" fill size={16} style={{ color: '#047857' }} />
+                        {t('checkout.location_set')}
+                      </div>
+                    )}
+                  </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                     <InputField label={t('checkout.entrance')} value={form.entrance} onChange={(v) => setForm((c) => ({ ...c, entrance: v }))} />
                     <InputField label={t('checkout.floor')} value={form.floor} onChange={(v) => setForm((c) => ({ ...c, floor: v }))} />
@@ -474,6 +574,25 @@ export default function ArtisanCheckoutPage() {
           <div style={{ height: 8 }} />
         </div>
       </div>
+
+      {showMapPicker && (
+        <MapPickerOverlay
+          isOpen={showMapPicker}
+          initialLat={form.lat}
+          initialLng={form.lng}
+          onConfirm={(lat, lng, address) => {
+            setForm((current) => ({
+              ...current,
+              lat,
+              lng,
+              address: address || current.address,
+            }));
+            setShowMapPicker(false);
+            haptic?.notificationOccurred('success');
+          }}
+          onClose={() => setShowMapPicker(false)}
+        />
+      )}
     </ArtisanLayout>
   );
 }

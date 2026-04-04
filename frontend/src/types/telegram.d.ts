@@ -41,7 +41,7 @@ interface TelegramHapticFeedback {
   selectionChanged(): void;
 }
 
-interface TelegramLocation {
+export interface TelegramLocation {
   latitude: number;
   longitude: number;
   altitude: number | null;
@@ -53,7 +53,7 @@ interface TelegramLocation {
   speed_accuracy: number | null;
 }
 
-interface TelegramLocationManager {
+export interface TelegramLocationManager {
   isInited: boolean;
   isLocationAvailable: boolean;
   isAccessRequested: boolean;

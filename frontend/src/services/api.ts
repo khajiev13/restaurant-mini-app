@@ -5,13 +5,15 @@ import axios, {
 } from 'axios';
 import type {
   Address,
-  AddressCreate,
   ApiResponse,
+  AddressCreate,
+  AddressSuggestion,
   AuthResponse,
   CreateOrderPayload,
   MenuData,
   Order,
   OrderStatus,
+  ReverseGeocodeResult,
   User,
 } from '../types/api';
 
@@ -83,6 +85,28 @@ export const getAddresses = (): Promise<AxiosResponse<ApiResponse<Address[]>>> =
 export const createAddress = (
   data: AddressCreate,
 ): Promise<AxiosResponse<ApiResponse<Address>>> => api.post('/addresses', data);
+
+export const reverseGeocode = (
+  lat: number,
+  lng: number,
+  lang: string,
+): Promise<AxiosResponse<ApiResponse<ReverseGeocodeResult>>> =>
+  api.get('/geocode/reverse', { params: { lat, lng, lang } });
+
+export const suggestAddress = (
+  text: string,
+  lang: string,
+  lat?: number | null,
+  lng?: number | null,
+): Promise<AxiosResponse<ApiResponse<AddressSuggestion[]>>> =>
+  api.get('/geocode/suggest', {
+    params: {
+      text,
+      lang,
+      lat: lat ?? undefined,
+      lng: lng ?? undefined,
+    },
+  });
 
 export const deleteAddress = (id: string): Promise<AxiosResponse<ApiResponse<null>>> =>
   api.delete(`/addresses/${id}`);

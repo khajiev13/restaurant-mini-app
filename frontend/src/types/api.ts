@@ -44,6 +44,19 @@ export interface AddressCreate {
   is_default?: boolean;
 }
 
+export interface ReverseGeocodeResult {
+  address: string;
+  name: string;
+  description: string;
+}
+
+export interface AddressSuggestion {
+  title: string;
+  subtitle: string;
+  lat: number;
+  lng: number;
+}
+
 export interface MenuImage {
   url: string;
 }
