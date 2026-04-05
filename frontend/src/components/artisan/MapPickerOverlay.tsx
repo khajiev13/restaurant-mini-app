@@ -333,6 +333,8 @@ export default function MapPickerOverlay({
   const currentCenter = centerRef.current;
   const confirmAddress = resolvedAddress || searchQuery.trim();
   const showInitialLoader = !initialCoordinatesProvided && isResolvingInitialLocation;
+  const hasSearchQuery = searchQuery.trim().length > 0;
+  const shouldShowSuggestions = (showSuggestions || isSearching) && (hasSearchQuery || isSearching);
 
   if (!isOpen) {
     return null;
@@ -365,6 +367,9 @@ export default function MapPickerOverlay({
 
       <div
         style={{
+          position: 'relative',
+          zIndex: 8,
+          overflow: 'visible',
           paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)',
           paddingLeft: 16,
           paddingRight: 16,
@@ -424,7 +429,11 @@ export default function MapPickerOverlay({
                 setShowSuggestions(true);
               }}
               onFocus={() => setShowSuggestions(true)}
-              onBlur={() => window.setTimeout(() => setShowSuggestions(false), 120)}
+              onBlur={() => window.setTimeout(() => {
+                if (!searchQuery.trim()) {
+                  setShowSuggestions(false);
+                }
+              }, 120)}
               placeholder={t('checkout.map_search_placeholder')}
               style={{
                 width: '100%',
@@ -438,7 +447,7 @@ export default function MapPickerOverlay({
             />
           </div>
 
-          {showSuggestions && (searchQuery.trim() || isSearching) && (
+          {shouldShowSuggestions && (
             <div
               style={{
                 position: 'absolute',
@@ -496,6 +505,19 @@ export default function MapPickerOverlay({
                   </button>
                 );
               })}
+
+              {!isSearching && hasSearchQuery && suggestions.length === 0 && (
+                <div
+                  style={{
+                    padding: '14px 16px',
+                    fontSize: 14,
+                    color: COLORS.secondary,
+                    fontFamily: FONTS.body,
+                  }}
+                >
+                  {t('checkout.map_no_results', 'No results found')}
+                </div>
+              )}
             </div>
           )}
         </div>

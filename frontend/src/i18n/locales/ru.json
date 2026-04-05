@@ -45,6 +45,7 @@
     "map_loading_address": "Определяем адрес...",
     "map_drag_hint": "Переместите карту",
     "map_unavailable": "Карта временно недоступна. Вы все равно можете найти и подтвердить адрес.",
+    "map_no_results": "Ничего не найдено",
     "entrance": "Подъезд",
     "entrance_description": "Номер входа или подъезда (если применимо)",
     "entrance_placeholder": "1",
