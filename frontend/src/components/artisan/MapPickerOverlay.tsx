@@ -111,6 +111,8 @@ export default function MapPickerOverlay({
   const reverseTimerRef = useRef<number | null>(null);
   const reverseRequestIdRef = useRef(0);
   const searchRequestIdRef = useRef(0);
+  const mapWasInActionRef = useRef(false);
+  const mapUpdateNearbyModeRef = useRef<'show' | 'hide'>('show');
 
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState('');
@@ -133,7 +135,12 @@ export default function MapPickerOverlay({
     }
   }
 
-  async function resolveAddressForCenter(lat: number, lng: number): Promise<void> {
+  async function resolveAddressForCenter(
+    lat: number,
+    lng: number,
+    options: { showNearby?: boolean } = {},
+  ): Promise<void> {
+    const { showNearby = true } = options;
     const requestId = reverseRequestIdRef.current + 1;
     reverseRequestIdRef.current = requestId;
     setIsResolvingAddress(true);
@@ -148,7 +155,7 @@ export default function MapPickerOverlay({
       const nextAddress = payload.address
         || [payload.name, payload.description].filter(Boolean).join(', ');
       setResolvedAddress(nextAddress);
-      setNearbySuggestions(payload.nearby ?? []);
+      setNearbySuggestions(showNearby ? payload.nearby ?? [] : []);
     } catch {
       if (reverseRequestIdRef.current === requestId && !resolvedAddress) {
         setResolvedAddress('');
@@ -161,10 +168,10 @@ export default function MapPickerOverlay({
     }
   }
 
-  function scheduleReverseGeocode(lat: number, lng: number) {
+  function scheduleReverseGeocode(lat: number, lng: number, options: { showNearby?: boolean } = {}) {
     clearReverseTimer();
     reverseTimerRef.current = window.setTimeout(() => {
-      void resolveAddressForCenter(lat, lng);
+      void resolveAddressForCenter(lat, lng, options);
     }, 500);
   }
 
@@ -180,6 +187,8 @@ export default function MapPickerOverlay({
       setIsSearching(false);
       setIsResolvingAddress(false);
       centerRef.current = null;
+      mapWasInActionRef.current = false;
+      mapUpdateNearbyModeRef.current = 'show';
       clearReverseTimer();
       return;
     }
@@ -223,10 +232,27 @@ export default function MapPickerOverlay({
         map.addChild(new ymaps3.YMapDefaultFeaturesLayer());
 
         const listener = new ymaps3.YMapListener({
-          onUpdate: ({ location }) => {
+          onUpdate: ({ location, mapInAction }) => {
             const [lng, lat] = location.center;
             centerRef.current = { lat, lng };
-            scheduleReverseGeocode(lat, lng);
+
+            if (mapInAction) {
+              if (!mapWasInActionRef.current) {
+                dismissKeyboard();
+                setShowSuggestions(false);
+              }
+              mapWasInActionRef.current = true;
+              return;
+            }
+
+            if (!mapWasInActionRef.current) {
+              return;
+            }
+
+            mapWasInActionRef.current = false;
+            const showNearby = mapUpdateNearbyModeRef.current === 'show';
+            mapUpdateNearbyModeRef.current = 'show';
+            scheduleReverseGeocode(lat, lng, { showNearby });
           },
         });
 
@@ -236,13 +262,13 @@ export default function MapPickerOverlay({
         mapListenerRef.current = listener;
         setMapReady(true);
 
-        await resolveAddressForCenter(startingCenter.lat, startingCenter.lng);
+        await resolveAddressForCenter(startingCenter.lat, startingCenter.lng, { showNearby: true });
       })
       .catch((error) => {
         if (!isCancelled) {
           console.error('Failed to initialize Yandex map picker', error);
           setMapError(t('checkout.map_unavailable'));
-          void resolveAddressForCenter(startingCenter.lat, startingCenter.lng);
+          void resolveAddressForCenter(startingCenter.lat, startingCenter.lng, { showNearby: true });
         }
       });
 
@@ -307,6 +333,10 @@ export default function MapPickerOverlay({
   async function handleUseCurrentLocation(): Promise<void> {
     const location = await getCurrentLocation();
     centerRef.current = location;
+    mapUpdateNearbyModeRef.current = 'show';
+    setShowSuggestions(false);
+    setSuggestions([]);
+    dismissKeyboard();
 
     if (mapRef.current) {
       mapRef.current.setLocation({
@@ -314,9 +344,10 @@ export default function MapPickerOverlay({
         zoom: DEFAULT_ZOOM,
         duration: 300,
       });
+      return;
     }
 
-    void resolveAddressForCenter(location.lat, location.lng);
+    void resolveAddressForCenter(location.lat, location.lng, { showNearby: true });
   }
 
   function dismissKeyboard() {
@@ -332,12 +363,10 @@ export default function MapPickerOverlay({
     setResolvedAddress(nextAddress);
     setSuggestions([]);
     setShowSuggestions(false);
-    setNearbySuggestions((current) => {
-      const deduped = current.filter((item) => getSuggestionAddress(item) !== nextAddress);
-      return [suggestion, ...deduped];
-    });
+    setNearbySuggestions([]);
 
     centerRef.current = { lat: suggestion.lat, lng: suggestion.lng };
+    mapUpdateNearbyModeRef.current = 'hide';
 
     if (mapRef.current) {
       mapRef.current.setLocation({
@@ -345,13 +374,14 @@ export default function MapPickerOverlay({
         zoom: DEFAULT_ZOOM,
         duration: 300,
       });
+    } else {
+      void resolveAddressForCenter(suggestion.lat, suggestion.lng, { showNearby: false });
     }
 
     if (shouldDismissKeyboard) {
       dismissKeyboard();
     }
 
-    void resolveAddressForCenter(suggestion.lat, suggestion.lng);
   }
 
   function handleSelectSuggestion(suggestion: AddressSuggestion) {
@@ -630,12 +660,22 @@ export default function MapPickerOverlay({
             flexDirection: 'column',
             gap: 14,
             zIndex: 4,
+            overflowX: 'hidden',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0 }}>
             <Icon name="place" fill size={20} style={{ color: COLORS.primary, marginTop: 2 }} />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontFamily: FONTS.body, fontSize: 14, fontWeight: 700, color: COLORS.onSurface }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+              <span
+                style={{
+                  fontFamily: FONTS.body,
+                  fontSize: 14,
+                  fontWeight: 700,
+                  color: COLORS.onSurface,
+                  whiteSpace: 'normal',
+                  wordBreak: 'break-word',
+                }}
+              >
                 {isResolvingAddress
                   ? t('checkout.map_loading_address')
                   : confirmAddress || t('checkout.map_drag_hint')}
@@ -671,14 +711,23 @@ export default function MapPickerOverlay({
                         gap: 10,
                         textAlign: 'left',
                         cursor: 'pointer',
+                        overflow: 'hidden',
                       }}
                     >
                       <Icon name="near_me" fill size={16} style={{ color: COLORS.primary, marginTop: 2 }} />
-                      <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                         <span style={{ fontFamily: FONTS.body, fontSize: 13, fontWeight: 700, color: COLORS.onSurface }}>
                           {suggestion.title}
                         </span>
-                        <span style={{ fontFamily: FONTS.body, fontSize: 12, color: COLORS.secondary }}>
+                        <span
+                          style={{
+                            fontFamily: FONTS.body,
+                            fontSize: 12,
+                            color: COLORS.secondary,
+                            whiteSpace: 'normal',
+                            wordBreak: 'break-word',
+                          }}
+                        >
                           {suggestion.address || suggestion.subtitle}
                         </span>
                       </span>
