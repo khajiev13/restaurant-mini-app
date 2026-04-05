@@ -81,10 +81,22 @@ def _parse_pos(raw_pos: str) -> tuple[float, float]:
     return float(lat_text), float(lng_text)
 
 
+def _yandex_request_headers() -> dict[str, str]:
+    referer = (settings.public_app_url or settings.public_backend_url).strip()
+    if not referer:
+        return {}
+
+    return {"Referer": f"{referer.rstrip('/')}/"}
+
+
 async def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
         try:
-            response = await client.get(url, params=params)
+            response = await client.get(
+                url,
+                params=params,
+                headers=_yandex_request_headers(),
+            )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = _format_yandex_error(exc.response)
