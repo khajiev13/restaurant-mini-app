@@ -659,7 +659,7 @@ export default function MapPickerOverlay({
                     <button
                       key={`${suggestion.lat}-${suggestion.lng}-${label}`}
                       type="button"
-                      onClick={() => applySuggestionSelection(suggestion)}
+                      onClick={() => applySuggestionSelection(suggestion, true)}
                       style={{
                         width: '100%',
                         padding: '10px 12px',
