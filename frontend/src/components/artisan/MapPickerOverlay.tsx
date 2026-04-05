@@ -105,6 +105,7 @@ export default function MapPickerOverlay({
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const bottomPanelRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<YMapInstance | null>(null);
   const mapListenerRef = useRef<unknown>(null);
   const centerRef = useRef<MapCoordinates | null>(null);
@@ -123,6 +124,7 @@ export default function MapPickerOverlay({
   const [resolvedAddress, setResolvedAddress] = useState('');
   const [nearbySuggestions, setNearbySuggestions] = useState<AddressSuggestion[]>([]);
   const [isResolvingAddress, setIsResolvingAddress] = useState(false);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(0);
 
   const initialCoordinatesProvided = initialLat !== null && initialLat !== undefined
     && initialLng !== null && initialLng !== undefined;
@@ -286,6 +288,25 @@ export default function MapPickerOverlay({
   }, [canInitializeMap, initialCenter, initialLat, initialLng, isOpen, t]);
 
   useEffect(() => {
+    if (!isOpen || !bottomPanelRef.current || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const panel = bottomPanelRef.current;
+    const observer = new ResizeObserver((entries) => {
+      const nextHeight = entries[0]?.contentRect.height ?? 0;
+      setBottomPanelHeight(nextHeight);
+    });
+
+    observer.observe(panel);
+    setBottomPanelHeight(panel.getBoundingClientRect().height);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
     if (!isOpen) {
       return;
     }
@@ -395,8 +416,8 @@ export default function MapPickerOverlay({
   const shouldShowSuggestions = (showSuggestions || isSearching) && (hasSearchQuery || isSearching);
   const nearbySuggestionOptions = nearbySuggestions
     .filter((suggestion) => getSuggestionAddress(suggestion) !== confirmAddress)
-    .slice(0, 3);
-  const gpsButtonBottom = nearbySuggestionOptions.length > 0 ? 228 : 148;
+    .slice(0, 2);
+  const gpsButtonBottom = Math.max(bottomPanelHeight + 28, 148);
 
   if (!isOpen) {
     return null;
@@ -410,6 +431,8 @@ export default function MapPickerOverlay({
     flexDirection: 'column',
     background: COLORS.surface,
     animation: 'mapPickerSlideUp 0.28s ease-out',
+    overflow: 'hidden',
+    overscrollBehavior: 'none',
   };
 
   return (
@@ -519,11 +542,13 @@ export default function MapPickerOverlay({
                 right: 0,
                 maxHeight: 260,
                 overflowY: 'auto',
+                overflowX: 'hidden',
                 background: COLORS.surfaceContainerLowest,
                 borderRadius: 16,
                 boxShadow: '0 16px 40px rgba(45,47,47,0.14)',
                 border: '1px solid rgba(172,173,173,0.18)',
                 zIndex: 6,
+                overscrollBehavior: 'contain',
               }}
             >
               {isSearching && (
@@ -543,6 +568,7 @@ export default function MapPickerOverlay({
                     onClick={() => handleSelectSuggestion(suggestion)}
                     style={{
                       width: '100%',
+                      boxSizing: 'border-box',
                       display: 'flex',
                       alignItems: 'flex-start',
                       gap: 12,
@@ -552,15 +578,33 @@ export default function MapPickerOverlay({
                       borderBottom: '1px solid rgba(172,173,173,0.12)',
                       padding: '14px 16px',
                       cursor: 'pointer',
+                      overflow: 'hidden',
                     }}
                   >
                     <Icon name="location_on" fill size={18} style={{ color: COLORS.primary, marginTop: 1 }} />
-                    <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontFamily: FONTS.body, fontSize: 14, fontWeight: 700, color: COLORS.onSurface }}>
+                    <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                      <span
+                        style={{
+                          fontFamily: FONTS.body,
+                          fontSize: 14,
+                          fontWeight: 700,
+                          color: COLORS.onSurface,
+                          whiteSpace: 'normal',
+                          wordBreak: 'break-word',
+                        }}
+                      >
                         {suggestion.title}
                       </span>
                       {suggestion.subtitle && (
-                        <span style={{ fontFamily: FONTS.body, fontSize: 12, color: COLORS.secondary }}>
+                        <span
+                          style={{
+                            fontFamily: FONTS.body,
+                            fontSize: 12,
+                            color: COLORS.secondary,
+                            whiteSpace: 'normal',
+                            wordBreak: 'break-word',
+                          }}
+                        >
                           {suggestion.subtitle}
                         </span>
                       )}
@@ -586,7 +630,7 @@ export default function MapPickerOverlay({
         </div>
       </div>
 
-      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+      <div style={{ position: 'relative', flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <div ref={mapContainerRef} style={{ position: 'absolute', inset: 0 }} />
         {mapReady && <CenterPin />}
 
@@ -646,6 +690,7 @@ export default function MapPickerOverlay({
         )}
 
         <div
+          ref={bottomPanelRef}
           style={{
             position: 'absolute',
             left: 16,
@@ -661,6 +706,7 @@ export default function MapPickerOverlay({
             gap: 14,
             zIndex: 4,
             overflowX: 'hidden',
+            boxSizing: 'border-box',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0 }}>
@@ -691,7 +737,7 @@ export default function MapPickerOverlay({
               <span style={{ fontFamily: FONTS.body, fontSize: 12, fontWeight: 700, color: COLORS.secondary }}>
                 {t('checkout.map_nearby_title')}
               </span>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 132, overflowY: 'auto' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflow: 'hidden' }}>
                 {nearbySuggestionOptions.map((suggestion) => {
                   const label = getSuggestionAddress(suggestion);
 
@@ -702,6 +748,7 @@ export default function MapPickerOverlay({
                       onClick={() => applySuggestionSelection(suggestion, true)}
                       style={{
                         width: '100%',
+                        boxSizing: 'border-box',
                         padding: '10px 12px',
                         borderRadius: 14,
                         border: '1px solid rgba(172,173,173,0.2)',
@@ -750,6 +797,7 @@ export default function MapPickerOverlay({
             disabled={!currentCenter || !confirmAddress}
             style={{
               width: '100%',
+              boxSizing: 'border-box',
               border: 'none',
               borderRadius: 16,
               padding: '15px 18px',
