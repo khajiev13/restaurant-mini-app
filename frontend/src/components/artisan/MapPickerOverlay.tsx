@@ -112,6 +112,7 @@ export default function MapPickerOverlay({
   const reverseTimerRef = useRef<number | null>(null);
   const reverseRequestIdRef = useRef(0);
   const searchRequestIdRef = useRef(0);
+  const currentZoomRef = useRef(DEFAULT_ZOOM);
   const mapWasInActionRef = useRef(false);
   const mapUpdateNearbyModeRef = useRef<'show' | 'hide'>('show');
 
@@ -227,7 +228,7 @@ export default function MapPickerOverlay({
             center: [startingCenter.lng, startingCenter.lat],
             zoom: DEFAULT_ZOOM,
           },
-          behaviors: ['drag', 'pinchZoom', 'scrollZoom', 'dblClick'],
+          behaviors: ['drag'],
         });
 
         map.addChild(new ymaps3.YMapDefaultSchemeLayer());
@@ -237,11 +238,13 @@ export default function MapPickerOverlay({
           onUpdate: ({ location, mapInAction }) => {
             const [lng, lat] = location.center;
             centerRef.current = { lat, lng };
+            currentZoomRef.current = location.zoom;
 
             if (mapInAction) {
               if (!mapWasInActionRef.current) {
                 dismissKeyboard();
                 setShowSuggestions(false);
+                setNearbySuggestions([]);
               }
               mapWasInActionRef.current = true;
               return;
@@ -362,7 +365,7 @@ export default function MapPickerOverlay({
     if (mapRef.current) {
       mapRef.current.setLocation({
         center: [location.lng, location.lat],
-        zoom: DEFAULT_ZOOM,
+        zoom: currentZoomRef.current,
         duration: 300,
       });
       return;
@@ -392,7 +395,7 @@ export default function MapPickerOverlay({
     if (mapRef.current) {
       mapRef.current.setLocation({
         center: [suggestion.lng, suggestion.lat],
-        zoom: DEFAULT_ZOOM,
+        zoom: currentZoomRef.current,
         duration: 300,
       });
     } else {
@@ -527,7 +530,7 @@ export default function MapPickerOverlay({
                 background: 'transparent',
                 outline: 'none',
                 color: COLORS.onSurface,
-                fontSize: 15,
+                fontSize: 16,
                 fontFamily: FONTS.body,
               }}
             />
