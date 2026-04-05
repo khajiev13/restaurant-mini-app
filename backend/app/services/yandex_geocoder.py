@@ -158,7 +158,18 @@ async def _resolve_uri_to_coordinates(uri: str, lang: str) -> tuple[float, float
     return _parse_pos(raw_pos)
 
 
-async def reverse_geocode(lat: float, lng: float, lang: str) -> dict[str, str]:
+async def reverse_geocode(lat: float, lng: float, lang: str) -> dict[str, Any]:
+    nearby = await nearby_addresses(lat, lng, lang, limit=5)
+    geo_object = None
+    if nearby:
+        nearest_address = nearby[0].get("address") or ""
+        return {
+            "address": str(nearest_address),
+            "name": str(nearby[0].get("title") or nearest_address),
+            "description": str(nearby[0].get("subtitle") or ""),
+            "nearby": nearby,
+        }
+
     payload = await _geocode_request(
         geocode=f"{lng},{lat}",
         lang=lang,
@@ -166,7 +177,7 @@ async def reverse_geocode(lat: float, lng: float, lang: str) -> dict[str, str]:
     )
     geo_object = _extract_first_geo_object(payload)
     if not geo_object:
-        return {"address": "", "name": "", "description": ""}
+        return {"address": "", "name": "", "description": "", "nearby": []}
 
     metadata = geo_object.get("metaDataProperty", {}).get("GeocoderMetaData", {})
     address = metadata.get("Address", {}).get("formatted") or metadata.get("text") or ""
@@ -175,6 +186,7 @@ async def reverse_geocode(lat: float, lng: float, lang: str) -> dict[str, str]:
         "address": address,
         "name": str(geo_object.get("name") or address),
         "description": str(geo_object.get("description") or ""),
+        "nearby": [],
     }
 
 
@@ -187,13 +199,49 @@ def _build_suggestion_from_geo_object(geo_object: dict[str, Any]) -> dict[str, A
     metadata = geo_object.get("metaDataProperty", {}).get("GeocoderMetaData", {})
     title = str(geo_object.get("name") or metadata.get("text") or "")
     subtitle = str(geo_object.get("description") or "")
+    address = str(metadata.get("Address", {}).get("formatted") or metadata.get("text") or "")
 
     return {
         "title": title,
         "subtitle": subtitle,
         "lat": resolved_lat,
         "lng": resolved_lng,
+        "address": address,
     }
+
+
+def _dedupe_suggestions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, float, float]] = set()
+    deduped: list[dict[str, Any]] = []
+
+    for item in items:
+        key = (
+            str(item.get("address") or item.get("title") or ""),
+            round(float(item.get("lat") or 0.0), 6),
+            round(float(item.get("lng") or 0.0), 6),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    return deduped
+
+
+async def nearby_addresses(lat: float, lng: float, lang: str, limit: int = 5) -> list[dict[str, Any]]:
+    payload = await _geocode_request(
+        geocode=f"{lng},{lat}",
+        lang=lang,
+        kind="house",
+        results=max(limit, 1),
+    )
+    geo_objects = _extract_geo_objects(payload)
+    suggestions = [
+        suggestion
+        for suggestion in (_build_suggestion_from_geo_object(geo_object) for geo_object in geo_objects)
+        if suggestion is not None
+    ]
+    return _dedupe_suggestions(suggestions)[:limit]
 
 
 async def _fallback_suggest_via_geocoder(
@@ -221,7 +269,7 @@ async def _fallback_suggest_via_geocoder(
         for suggestion in (_build_suggestion_from_geo_object(geo_object) for geo_object in geo_objects)
         if suggestion is not None
     ]
-    return suggestions[:5]
+    return _dedupe_suggestions(suggestions)[:5]
 
 
 async def suggest(
@@ -284,6 +332,6 @@ async def suggest(
     resolved = await asyncio.gather(*(_resolve_item(item) for item in results))
     suggestions = [item for item in resolved if item is not None]
     if suggestions:
-        return suggestions
+        return _dedupe_suggestions(suggestions)
 
     return await _fallback_suggest_via_geocoder(query, lang, lat, lng)

@@ -77,6 +77,10 @@ function formatSuggestionLabel(suggestion: AddressSuggestion): string {
     : suggestion.title;
 }
 
+function getSuggestionAddress(suggestion: AddressSuggestion): string {
+  return suggestion.address || formatSuggestionLabel(suggestion);
+}
+
 function getInitialCenter(
   initialLat: number | null | undefined,
   initialLng: number | null | undefined,
@@ -100,6 +104,7 @@ export default function MapPickerOverlay({
   const { initialCenter, isResolvingInitialLocation, getCurrentLocation } = useLocationManager();
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const mapRef = useRef<YMapInstance | null>(null);
   const mapListenerRef = useRef<unknown>(null);
   const centerRef = useRef<MapCoordinates | null>(null);
@@ -114,6 +119,7 @@ export default function MapPickerOverlay({
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [resolvedAddress, setResolvedAddress] = useState('');
+  const [nearbySuggestions, setNearbySuggestions] = useState<AddressSuggestion[]>([]);
   const [isResolvingAddress, setIsResolvingAddress] = useState(false);
 
   const initialCoordinatesProvided = initialLat !== null && initialLat !== undefined
@@ -142,9 +148,11 @@ export default function MapPickerOverlay({
       const nextAddress = payload.address
         || [payload.name, payload.description].filter(Boolean).join(', ');
       setResolvedAddress(nextAddress);
+      setNearbySuggestions(payload.nearby ?? []);
     } catch {
       if (reverseRequestIdRef.current === requestId && !resolvedAddress) {
         setResolvedAddress('');
+        setNearbySuggestions([]);
       }
     } finally {
       if (reverseRequestIdRef.current === requestId) {
@@ -168,6 +176,7 @@ export default function MapPickerOverlay({
       setShowSuggestions(false);
       setSuggestions([]);
       setResolvedAddress('');
+      setNearbySuggestions([]);
       setIsSearching(false);
       setIsResolvingAddress(false);
       centerRef.current = null;
@@ -310,12 +319,23 @@ export default function MapPickerOverlay({
     void resolveAddressForCenter(location.lat, location.lng);
   }
 
-  function handleSelectSuggestion(suggestion: AddressSuggestion) {
-    const nextAddress = formatSuggestionLabel(suggestion);
+  function dismissKeyboard() {
+    searchInputRef.current?.blur();
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  }
+
+  function applySuggestionSelection(suggestion: AddressSuggestion, shouldDismissKeyboard = false) {
+    const nextAddress = getSuggestionAddress(suggestion);
     setSearchQuery(nextAddress);
     setResolvedAddress(nextAddress);
     setSuggestions([]);
     setShowSuggestions(false);
+    setNearbySuggestions((current) => {
+      const deduped = current.filter((item) => getSuggestionAddress(item) !== nextAddress);
+      return [suggestion, ...deduped];
+    });
 
     centerRef.current = { lat: suggestion.lat, lng: suggestion.lng };
 
@@ -327,7 +347,15 @@ export default function MapPickerOverlay({
       });
     }
 
+    if (shouldDismissKeyboard) {
+      dismissKeyboard();
+    }
+
     void resolveAddressForCenter(suggestion.lat, suggestion.lng);
+  }
+
+  function handleSelectSuggestion(suggestion: AddressSuggestion) {
+    applySuggestionSelection(suggestion, true);
   }
 
   const currentCenter = centerRef.current;
@@ -335,6 +363,10 @@ export default function MapPickerOverlay({
   const showInitialLoader = !initialCoordinatesProvided && isResolvingInitialLocation;
   const hasSearchQuery = searchQuery.trim().length > 0;
   const shouldShowSuggestions = (showSuggestions || isSearching) && (hasSearchQuery || isSearching);
+  const nearbySuggestionOptions = nearbySuggestions
+    .filter((suggestion) => getSuggestionAddress(suggestion) !== confirmAddress)
+    .slice(0, 3);
+  const gpsButtonBottom = nearbySuggestionOptions.length > 0 ? 228 : 148;
 
   if (!isOpen) {
     return null;
@@ -423,6 +455,7 @@ export default function MapPickerOverlay({
             <Icon name="search" size={20} style={{ color: COLORS.outline }} />
             <input
               autoFocus
+              ref={searchInputRef}
               value={searchQuery}
               onChange={(event) => {
                 setSearchQuery(event.target.value);
@@ -535,7 +568,7 @@ export default function MapPickerOverlay({
           style={{
             position: 'absolute',
             right: 16,
-            bottom: 148,
+            bottom: gpsButtonBottom,
             width: 52,
             height: 52,
             borderRadius: '50%',
@@ -612,6 +645,49 @@ export default function MapPickerOverlay({
               </span>
             </div>
           </div>
+
+          {nearbySuggestionOptions.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <span style={{ fontFamily: FONTS.body, fontSize: 12, fontWeight: 700, color: COLORS.secondary }}>
+                {t('checkout.map_nearby_title')}
+              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 132, overflowY: 'auto' }}>
+                {nearbySuggestionOptions.map((suggestion) => {
+                  const label = getSuggestionAddress(suggestion);
+
+                  return (
+                    <button
+                      key={`${suggestion.lat}-${suggestion.lng}-${label}`}
+                      type="button"
+                      onClick={() => applySuggestionSelection(suggestion)}
+                      style={{
+                        width: '100%',
+                        padding: '10px 12px',
+                        borderRadius: 14,
+                        border: '1px solid rgba(172,173,173,0.2)',
+                        background: COLORS.surfaceContainerLowest,
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 10,
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <Icon name="near_me" fill size={16} style={{ color: COLORS.primary, marginTop: 2 }} />
+                      <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span style={{ fontFamily: FONTS.body, fontSize: 13, fontWeight: 700, color: COLORS.onSurface }}>
+                          {suggestion.title}
+                        </span>
+                        <span style={{ fontFamily: FONTS.body, fontSize: 12, color: COLORS.secondary }}>
+                          {suggestion.address || suggestion.subtitle}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <button
             type="button"

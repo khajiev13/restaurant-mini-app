@@ -44,6 +44,7 @@
     "map_my_location": "My Location",
     "map_loading_address": "Finding address...",
     "map_drag_hint": "Move map to set location",
+    "map_nearby_title": "Nearby addresses",
     "map_unavailable": "Map is temporarily unavailable. You can still search and confirm your address.",
     "map_no_results": "No results found",
     "entrance": "Entrance",

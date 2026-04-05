@@ -48,6 +48,7 @@ export interface ReverseGeocodeResult {
   address: string;
   name: string;
   description: string;
+  nearby?: AddressSuggestion[];
 }
 
 export interface AddressSuggestion {
@@ -55,6 +56,7 @@ export interface AddressSuggestion {
   subtitle: string;
   lat: number;
   lng: number;
+  address?: string;
 }
 
 export interface MenuImage {
