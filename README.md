@@ -90,7 +90,7 @@ Run this every time you want to start the app:
 This will:
 1. Start all Docker containers
 2. Keep the origin private behind `127.0.0.1:8080` locally via Caddy
-3. Create a public Cloudflare Tunnel URL for the whole app
+3. Connect the app to your configured Cloudflare Tunnel hostname
 4. Verify `/healthz` and `/api/health` locally and publicly
 5. Update `PUBLIC_APP_URL` in `.env`
 6. Set the Telegram webhook automatically
@@ -100,11 +100,11 @@ Output looks like:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ✅  App exposed through Cloudflare Quick Tunnel
+  ✅  App exposed through Cloudflare named tunnel
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  🌍  Public app     →  https://xxxx-xxxx.trycloudflare.com/
-  🔗  Webhook        →  https://xxxx-xxxx.trycloudflare.com/api/webhooks/bot
+  🌍  Public app     →  https://restaurant.labtutor.app/
+  🔗  Webhook        →  https://restaurant.labtutor.app/api/webhooks/bot
 ```
 
 To force a full image rebuild (e.g. after pulling new code):
@@ -115,18 +115,16 @@ To force a full image rebuild (e.g. after pulling new code):
 
 ---
 
-## Stable Domain Mode
+## Cloudflare Tunnel
 
-If you want a stable hostname like `https://restaurant.labtutor.app`, create a named Cloudflare Tunnel and then set:
+For local Telegram Mini App testing and production, use a named Cloudflare Tunnel with a stable hostname like `https://restaurant.labtutor.app` and set:
 
 ```env
 PUBLIC_APP_URL=https://restaurant.labtutor.app
 CLOUDFLARE_TUNNEL_TOKEN=your-cloudflare-tunnel-token
 ```
 
-`start.sh` will detect that token and switch from Quick Tunnel mode to stable named-tunnel mode automatically.
-
-Quick Tunnel mode is convenient for testing, but it is not production-ready because the hostname changes whenever the tunnel restarts. For production, use a named tunnel with a stable domain.
+`start.sh` uses a single named Cloudflare Tunnel container and verifies that the stable hostname is reachable before updating Telegram.
 
 ## After Starting
 
@@ -153,7 +151,7 @@ The only manual Telegram step left is BotFather's main Mini App URL if you use t
 ```bash
 cd restaurant-mini-app
 docker compose down
-docker rm -f restaurant_cloudflared restaurant_cloudflared_named >/dev/null 2>&1 || true
+docker rm -f restaurant_cloudflared >/dev/null 2>&1 || true
 ```
 
 ---
@@ -163,7 +161,7 @@ docker rm -f restaurant_cloudflared restaurant_cloudflared_named >/dev/null 2>&1
 | Service | Host Port | Container Port |
 |---|---|---|
 | Local Caddy origin | `127.0.0.1:8080` | `80` |
-| Public app (via tunnel) | random `https://*.trycloudflare.com` | `caddy:80` |
+| Public app (via tunnel) | configured `PUBLIC_APP_URL` | `caddy:80` |
 
 ---
 
@@ -248,14 +246,14 @@ restaurant-mini-app/
 
 ## Troubleshooting
 
-**"530 The origin has been unregistered"**
-→ The quick tunnel died or restarted. Run `./start.sh` again.
+**Cloudflare public URL is not reachable**
+→ Check that `PUBLIC_APP_URL` and `CLOUDFLARE_TUNNEL_TOKEN` are correct in `.env`, then run `./start.sh` again.
 
 **"422 Unprocessable Entity" on /users/me or /orders**
 → Auth hasn't completed yet (race condition on first load). Reload the Mini App.
 
 **Frontend shows blank / won't load**
-→ Run `./start.sh` again and use the newly printed `trycloudflare.com` URL.
+→ Run `./start.sh` again and verify that the configured `PUBLIC_APP_URL` opens correctly.
 
 **Docker port already in use**
 → Check what's using the local Caddy port: `lsof -i :8080` then kill it or change the Caddy port in `docker-compose.yml`.

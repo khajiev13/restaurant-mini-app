@@ -231,7 +231,9 @@ export default function MapPickerOverlay({
       })
       .catch((error) => {
         if (!isCancelled) {
-          setMapError(error instanceof Error ? error.message : t('checkout.error_general'));
+          console.error('Failed to initialize Yandex map picker', error);
+          setMapError(t('checkout.map_unavailable'));
+          void resolveAddressForCenter(startingCenter.lat, startingCenter.lng);
         }
       });
 
@@ -536,20 +538,25 @@ export default function MapPickerOverlay({
           <div
             style={{
               position: 'absolute',
-              inset: 24,
+              left: 16,
+              right: 16,
+              top: 16,
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'center',
-              textAlign: 'center',
-              padding: 24,
-              background: 'rgba(255,255,255,0.95)',
-              borderRadius: 20,
-              color: COLORS.error,
+              gap: 10,
+              padding: '12px 14px',
+              background: 'rgba(179, 27, 37, 0.92)',
+              borderRadius: 16,
+              color: '#fff',
               fontFamily: FONTS.body,
               zIndex: 6,
+              boxShadow: '0 14px 30px rgba(179,27,37,0.22)',
             }}
           >
-            {mapError}
+            <Icon name="warning" fill size={18} style={{ color: '#fff', flexShrink: 0 }} />
+            <span style={{ fontSize: 13, lineHeight: 1.45 }}>
+              {mapError}
+            </span>
           </div>
         )}
 

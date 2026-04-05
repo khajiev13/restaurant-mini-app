@@ -44,6 +44,7 @@
     "map_my_location": "Mening joylashuvim",
     "map_loading_address": "Manzil aniqlanmoqda...",
     "map_drag_hint": "Joyni belgilash uchun xaritani suring",
+    "map_unavailable": "Xarita vaqtincha ishlamayapti. Baribir manzilni qidirib tasdiqlashingiz mumkin.",
     "entrance": "Kirish",
     "entrance_description": "Bino kirish yoki podezdning raqami (agar mavjud bo'lsa)",
     "entrance_placeholder": "1",
