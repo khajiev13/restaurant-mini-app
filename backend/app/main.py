@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+from typing import Any
 
 import httpx
 from fastapi import FastAPI
@@ -12,8 +13,27 @@ from app.routers import addresses, auth, geocoding, menu, orders, users, webhook
 
 logger = logging.getLogger(__name__)
 PAYMENTS_EXPIRY_LOCK_ID = 841_337_204
+TELEGRAM_ALLOWED_UPDATES = ["message"]
 
 app = FastAPI(title="Mr.Pub Restaurant API", version="0.1.0")
+
+
+async def _get_telegram_webhook_info(client: httpx.AsyncClient) -> dict[str, Any]:
+    response = await client.get(
+        f"https://api.telegram.org/bot{settings.telegram_bot_token}/getWebhookInfo",
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"getWebhookInfo failed: {payload}")
+    return payload["result"]
+
+
+def _normalized_allowed_updates(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    return sorted(values)
 
 
 @app.on_event("startup")
@@ -22,18 +42,42 @@ async def register_telegram_webhook() -> None:
         return
 
     webhook_url = f"{settings.public_base_url}/api/webhooks/bot"
-    payload: dict = {"url": webhook_url, "allowed_updates": ["message"]}
+    payload: dict[str, Any] = {"url": webhook_url, "allowed_updates": TELEGRAM_ALLOWED_UPDATES}
     if settings.telegram_webhook_secret:
         payload["secret_token"] = settings.telegram_webhook_secret
 
     async with httpx.AsyncClient() as client:
         try:
+            try:
+                current_info = await _get_telegram_webhook_info(client)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Telegram webhook inspection failed; will attempt setWebhook: %s",
+                    exc,
+                )
+            else:
+                current_url = current_info.get("url", "")
+                current_allowed_updates = _normalized_allowed_updates(
+                    current_info.get("allowed_updates")
+                )
+                expected_allowed_updates = _normalized_allowed_updates(TELEGRAM_ALLOWED_UPDATES)
+                if (
+                    current_url == webhook_url
+                    and current_allowed_updates == expected_allowed_updates
+                ):
+                    logger.info(
+                        "Telegram webhook already configured for %s; skipping setWebhook",
+                        webhook_url,
+                    )
+                    return
+
             response = await client.post(
                 f"https://api.telegram.org/bot{settings.telegram_bot_token}/setWebhook",
                 json=payload,
                 timeout=10,
             )
             response.raise_for_status()
+            logger.info("Telegram webhook registered for %s", webhook_url)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Telegram webhook auto-registration failed: %s", exc)
 

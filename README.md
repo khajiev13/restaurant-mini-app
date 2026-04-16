@@ -126,6 +126,11 @@ CLOUDFLARE_TUNNEL_TOKEN=your-cloudflare-tunnel-token
 
 `start.sh` uses a single named Cloudflare Tunnel container and verifies that the stable hostname is reachable before updating Telegram.
 
+Important:
+- Never run the production `CLOUDFLARE_TUNNEL_TOKEN` on a developer laptop.
+- The production tunnel must only be attached to the production server connector.
+- If you need local Cloudflare testing, use a separate tunnel or a temporary Quick Tunnel.
+
 ## After Starting
 
 `start.sh` updates the webhook and the bot menu button automatically.

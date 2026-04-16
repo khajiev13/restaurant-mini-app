@@ -1,7 +1,9 @@
 import datetime
 import hmac
 import logging
+import time
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from sqlalchemy import select
@@ -14,6 +16,13 @@ from app.services import multicard_api
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+def _mask_telegram_id(telegram_id: Any) -> str:
+    value = str(telegram_id)
+    if len(value) <= 4:
+        return value
+    return f"***{value[-4:]}"
 
 
 def _verify_webhook_credentials(client_id: str | None, client_secret: str | None) -> None:
@@ -35,22 +44,49 @@ async def telegram_bot_webhook(
     x_telegram_bot_api_secret_token: str | None = Header(None),
 ) -> dict:
     """Receive Telegram bot updates (contact messages)."""
+    started_at = time.perf_counter()
+    body = await request.json()
+    update_id = body.get("update_id")
+    message = body.get("message", {})
+    contact = message.get("contact")
+
+    logger.info(
+        "Telegram bot webhook received | update_id=%s has_contact=%s",
+        update_id,
+        bool(contact),
+    )
+
     if settings.telegram_webhook_secret:
         if not x_telegram_bot_api_secret_token or not hmac.compare_digest(
             x_telegram_bot_api_secret_token, settings.telegram_webhook_secret
         ):
+            logger.warning(
+                "Telegram bot webhook rejected | update_id=%s secret_valid=false duration_ms=%s",
+                update_id,
+                round((time.perf_counter() - started_at) * 1000),
+            )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret")
 
-    body = await request.json()
-    message = body.get("message", {})
-    contact = message.get("contact")
+        logger.info("Telegram bot webhook secret accepted | update_id=%s", update_id)
+
     if not contact:
+        logger.info(
+            "Telegram bot webhook ignored | update_id=%s result=no_contact duration_ms=%s",
+            update_id,
+            round((time.perf_counter() - started_at) * 1000),
+        )
         return {"result": "OK"}
 
     telegram_id = contact.get("user_id") or (message.get("from") or {}).get("id")
     phone_number = contact.get("phone_number")
 
     if not telegram_id or not phone_number:
+        logger.info(
+            "Telegram bot webhook ignored | update_id=%s result=incomplete_contact telegram_user_id=%s duration_ms=%s",
+            update_id,
+            _mask_telegram_id(telegram_id or "unknown"),
+            round((time.perf_counter() - started_at) * 1000),
+        )
         return {"result": "OK"}
 
     async with async_session() as db:
@@ -59,6 +95,19 @@ async def telegram_bot_webhook(
         if user:
             user.phone_number = phone_number
             await db.commit()
+            logger.info(
+                "Telegram bot webhook processed | update_id=%s result=phone_saved telegram_user_id=%s duration_ms=%s",
+                update_id,
+                _mask_telegram_id(telegram_id),
+                round((time.perf_counter() - started_at) * 1000),
+            )
+        else:
+            logger.info(
+                "Telegram bot webhook ignored | update_id=%s result=user_not_found telegram_user_id=%s duration_ms=%s",
+                update_id,
+                _mask_telegram_id(telegram_id),
+                round((time.perf_counter() - started_at) * 1000),
+            )
 
     return {"result": "OK"}
 
