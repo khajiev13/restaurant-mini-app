@@ -86,7 +86,7 @@ services:
       - tunnel
       - --no-autoupdate
       - --protocol
-      - quic
+      - http2
       - run
       - --token
       - ${CLOUDFLARE_TUNNEL_TOKEN}
