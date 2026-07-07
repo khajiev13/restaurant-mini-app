@@ -272,8 +272,6 @@ If the call times out or the result is ambiguous:
 
 Primary surface: order status page Rahmat payment banner.
 
-This is simple enough for v1 and does not require a separate UI designer before implementation. The existing payment banner can absorb the new actions and states using the current component style, button treatments, icon language, and Telegram confirmation pattern. A designer pass can still polish copy/spacing later, but it is not a launch dependency.
-
 Add states:
 
 - `pending`: awaiting payment; actions are "Pay with Rahmat" and "Cancel order".
@@ -286,9 +284,9 @@ The order list and profile page should not expose the primary refund action, but
 
 Use Telegram `showConfirm` before any cancel/refund action. After the backend call, immediately refresh the order and continue polling.
 
-## Optional UI Designer Brief
+## UI Designer Brief
 
-If a UI designer later reviews this, use the following brief. For v1, engineering should implement these states directly in the existing Telegram Mini App order status page. Keep the current artisan/restaurant visual language and integrate into the existing order status page rather than making a new page.
+Design an update to the existing Telegram Mini App order status experience for Rahmat refund/cancellation states. Keep the current artisan/restaurant visual language and integrate into the existing order status page rather than making a new page.
 
 Required screens/states:
 
@@ -421,4 +419,4 @@ The spec is approved when the team agrees on:
 - No automatic refund after `ACCEPTED_BY_RESTAURANT` in v1.
 - Same-table refund fields.
 - Order status transition centralization before or alongside refund implementation.
-- Existing order status payment banner as the v1 UI surface, with no separate designer dependency.
+- UI designer brief above as the design input.
