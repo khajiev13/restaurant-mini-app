@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import logo from '../../assets/logo.webp';
+import { useAuthStore } from '../../stores/authStore';
 import { COLORS, FONTS, Icon } from '../artisan/ArtisanLayout';
 
 const shellStyle: CSSProperties = {
@@ -32,7 +33,7 @@ const topBarStyle: CSSProperties = {
   boxShadow: '0 1px 0 rgba(172, 173, 173, 0.3)',
 };
 
-const navStyle: CSSProperties = {
+const getNavStyle = (itemCount: number): CSSProperties => ({
   position: 'fixed',
   left: 0,
   right: 0,
@@ -40,14 +41,14 @@ const navStyle: CSSProperties = {
   zIndex: 40,
   height: 88,
   display: 'grid',
-  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+  gridTemplateColumns: `repeat(${itemCount}, minmax(0, 1fr))`,
   alignItems: 'center',
   padding: '8px 16px 24px',
   boxSizing: 'border-box',
   backgroundColor: 'rgba(255, 255, 255, 0.92)',
   backdropFilter: 'blur(12px)',
   boxShadow: '0 -8px 24px rgba(45, 47, 47, 0.08)',
-};
+});
 
 const brandStyle: CSSProperties = {
   margin: 0,
@@ -103,8 +104,22 @@ function NavItem({
 
 export default function StaffLayout({ children }: { children: ReactNode }) {
   const location = useLocation();
+  const role = useAuthStore((state) => state.user?.role);
+  const isAdmin = role === 'admin';
+
   const ordersActive = location.pathname.startsWith('/staff/orders');
   const profileActive = location.pathname === '/profile';
+  const adminActive = location.pathname.startsWith('/admin');
+  const navItems = isAdmin
+    ? [
+        { active: adminActive, icon: 'admin_panel_settings', label: 'Admin', to: '/admin' },
+        { active: ordersActive, icon: 'receipt_long', label: 'Orders', to: '/staff/orders' },
+        { active: profileActive, icon: 'person', label: 'Profile', to: '/profile' },
+      ]
+    : [
+        { active: ordersActive, icon: 'receipt_long', label: 'Orders', to: '/staff/orders' },
+        { active: profileActive, icon: 'person', label: 'Profile', to: '/profile' },
+      ];
 
   return (
     <div style={shellStyle}>
@@ -115,9 +130,16 @@ export default function StaffLayout({ children }: { children: ReactNode }) {
 
       <div style={frameStyle}>{children}</div>
 
-      <nav aria-label="Staff navigation" style={navStyle}>
-        <NavItem active={ordersActive} icon="receipt_long" label="Orders" to="/staff/orders" />
-        <NavItem active={profileActive} icon="person" label="Profile" to="/profile" />
+      <nav aria-label={isAdmin ? 'Admin navigation' : 'Staff navigation'} style={getNavStyle(navItems.length)}>
+        {navItems.map((item) => (
+          <NavItem
+            key={item.to}
+            active={item.active}
+            icon={item.icon}
+            label={item.label}
+            to={item.to}
+          />
+        ))}
       </nav>
     </div>
   );
