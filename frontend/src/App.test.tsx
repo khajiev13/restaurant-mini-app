@@ -4,11 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
 const authState = vi.hoisted(() => ({
-  authenticate: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  bootstrapAuth: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   user: null as { role: string } | null,
   token: null as string | null,
   isLoading: false,
   hasHydratedUser: true,
+  hasResolvedInitialAuth: true,
 }));
 
 vi.mock('./stores/authStore', () => ({
@@ -50,11 +51,12 @@ vi.mock('./pages/staff/StaffProfilePage', () => ({
 describe('App', () => {
   beforeEach(() => {
     cleanup();
-    authState.authenticate.mockClear();
+    authState.bootstrapAuth.mockClear();
     authState.user = null;
     authState.token = null;
     authState.isLoading = false;
     authState.hasHydratedUser = true;
+    authState.hasResolvedInitialAuth = true;
     localStorage.clear();
     delete (window as Window & { Telegram?: unknown }).Telegram;
   });
@@ -79,12 +81,25 @@ describe('App', () => {
     );
 
     expect(view.getByText('Artisan menu page')).toBeInTheDocument();
-    expect(authState.authenticate).toHaveBeenCalledTimes(1);
+    expect(view.queryByTestId('role-route-loading')).not.toBeInTheDocument();
+    expect(authState.bootstrapAuth).toHaveBeenCalledTimes(1);
   });
 
-  it('renders a neutral shell while auth is still loading role-sensitive routes', () => {
-    authState.isLoading = true;
+  it('renders a neutral shell on Telegram cold start before auth resolves', () => {
     authState.hasHydratedUser = false;
+    authState.hasResolvedInitialAuth = false;
+    (window as unknown as { Telegram?: { WebApp: unknown } }).Telegram = {
+      WebApp: {
+        initData: 'telegram-init-data',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        setHeaderColor: vi.fn(),
+        setBackgroundColor: vi.fn(),
+        setBottomBarColor: vi.fn(),
+        disableVerticalSwipes: vi.fn(),
+        isVersionAtLeast: vi.fn(() => false),
+      },
+    };
 
     const view = render(
       <MemoryRouter initialEntries={['/']}>
@@ -95,11 +110,13 @@ describe('App', () => {
     expect(view.getByTestId('role-route-loading')).toBeInTheDocument();
     expect(view.queryByText('Artisan menu page')).not.toBeInTheDocument();
     expect(view.queryByText('Staff orders page')).not.toBeInTheDocument();
+    expect(authState.bootstrapAuth).toHaveBeenCalledTimes(1);
   });
 
   it('holds staff routes on a neutral shell until the stored-token user is hydrated', () => {
     authState.token = 'persisted-jwt';
     authState.hasHydratedUser = false;
+    authState.hasResolvedInitialAuth = false;
 
     const view = render(
       <MemoryRouter initialEntries={['/staff/orders']}>

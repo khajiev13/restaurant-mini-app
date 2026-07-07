@@ -16,14 +16,14 @@ function RoleRouteLoadingShell() {
 }
 
 export default function App() {
-  const authenticate = useAuthStore((state) => state.authenticate);
-  const token = useAuthStore((state) => state.token);
+  const bootstrapAuth = useAuthStore((state) => state.bootstrapAuth);
   const user = useAuthStore((state) => state.user);
   const isLoading = useAuthStore((state) => state.isLoading);
   const hasHydratedUser = useAuthStore((state) => state.hasHydratedUser);
+  const hasResolvedInitialAuth = useAuthStore((state) => state.hasResolvedInitialAuth);
   const navigate = useNavigate();
   const isStaffMode = user?.role === 'staff' || user?.role === 'admin';
-  const isResolvingRole = isLoading || (!!token && !hasHydratedUser);
+  const isResolvingRole = isLoading || !hasResolvedInitialAuth || !hasHydratedUser;
 
   const renderRoleSensitiveRoute = (customerElement: ReactNode, staffElement: ReactNode) => {
     if (isResolvingRole) {
@@ -62,10 +62,8 @@ export default function App() {
   }, [navigate]);
 
   useEffect(() => {
-    if (!localStorage.getItem('manual_logout')) {
-      void authenticate();
-    }
-  }, [authenticate]);
+    void bootstrapAuth();
+  }, [bootstrapAuth]);
 
   return (
     <Routes>

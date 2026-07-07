@@ -9,30 +9,89 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   hasHydratedUser: boolean;
+  hasResolvedInitialAuth: boolean;
+  bootstrapAuth: () => Promise<void>;
   authenticate: () => Promise<void>;
   refreshMe: () => Promise<User | null>;
   logout: () => void;
 }
 
-export const useAuthStore = create<AuthState>((set) => {
+function hasTelegramInitData(): boolean {
+  return !!window.Telegram?.WebApp?.initData;
+}
+
+function hasManualLogout(): boolean {
+  return localStorage.getItem('manual_logout') === '1';
+}
+
+function shouldResolveInitialAuth(token: string | null): boolean {
+  if (hasManualLogout()) {
+    return false;
+  }
+
+  return !!token || hasTelegramInitData();
+}
+
+export const useAuthStore = create<AuthState>((set, get) => {
   const token = localStorage.getItem('jwt');
+  const needsInitialAuthResolution = shouldResolveInitialAuth(token);
 
   return {
     token,
     user: null,
     isAuthenticated: !!token,
     isLoading: false,
-    hasHydratedUser: !token,
+    hasHydratedUser: !needsInitialAuthResolution,
+    hasResolvedInitialAuth: !needsInitialAuthResolution,
+
+    bootstrapAuth: async () => {
+      if (hasManualLogout()) {
+        localStorage.removeItem('jwt');
+        set({
+          token: null,
+          user: null,
+          isAuthenticated: false,
+          isLoading: false,
+          hasHydratedUser: true,
+          hasResolvedInitialAuth: true,
+        });
+        return;
+      }
+
+      if (hasTelegramInitData()) {
+        await get().authenticate();
+        return;
+      }
+
+      if (get().token) {
+        await get().refreshMe();
+        return;
+      }
+
+      set({
+        isLoading: false,
+        hasHydratedUser: true,
+        hasResolvedInitialAuth: true,
+      });
+    },
 
     authenticate: async () => {
       const tg = window.Telegram?.WebApp;
       if (!tg?.initData) {
         console.warn('Not running inside Telegram - skipping auth');
-        set({ isLoading: false, hasHydratedUser: true });
+        set({
+          isLoading: false,
+          hasHydratedUser: true,
+          hasResolvedInitialAuth: true,
+        });
         return;
       }
 
-      set({ isLoading: true, hasHydratedUser: false });
+      set({
+        isLoading: true,
+        hasHydratedUser: false,
+        hasResolvedInitialAuth: false,
+      });
       try {
         const res = await authenticateTelegram(tg.initData);
         const token = res.data.data.access_token;
@@ -44,7 +103,11 @@ export const useAuthStore = create<AuthState>((set) => {
         try {
           const meRes = await getMe();
           const me = meRes.data.data;
-          set({ user: me, hasHydratedUser: true });
+          set({
+            user: me,
+            hasHydratedUser: true,
+            hasResolvedInitialAuth: true,
+          });
           const lang = me?.language;
           if (lang && lang !== i18n.language) {
             await i18n.changeLanguage(lang);
@@ -52,11 +115,22 @@ export const useAuthStore = create<AuthState>((set) => {
           }
         } catch {
           // Non-critical: keep current language if profile fetch fails
-          set({ user: null, hasHydratedUser: true });
+          set({
+            user: null,
+            hasHydratedUser: true,
+            hasResolvedInitialAuth: true,
+          });
         }
       } catch (err) {
         console.error('Auth failed:', err);
-        set({ user: null, hasHydratedUser: true });
+        localStorage.removeItem('jwt');
+        set({
+          token: null,
+          user: null,
+          isAuthenticated: false,
+          hasHydratedUser: true,
+          hasResolvedInitialAuth: true,
+        });
       } finally {
         set({ isLoading: false });
       }
@@ -66,10 +140,18 @@ export const useAuthStore = create<AuthState>((set) => {
       try {
         const meRes = await getMe();
         const user = meRes.data.data;
-        set({ user, hasHydratedUser: true });
+        set({
+          user,
+          hasHydratedUser: true,
+          hasResolvedInitialAuth: true,
+        });
         return user;
       } catch {
-        set({ hasHydratedUser: true });
+        set({
+          user: null,
+          hasHydratedUser: true,
+          hasResolvedInitialAuth: true,
+        });
         return null;
       }
     },
@@ -83,6 +165,7 @@ export const useAuthStore = create<AuthState>((set) => {
         isAuthenticated: false,
         isLoading: false,
         hasHydratedUser: true,
+        hasResolvedInitialAuth: true,
       });
     },
   };
