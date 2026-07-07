@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class TelegramAuthRequest(BaseModel):
@@ -25,3 +25,15 @@ class UserResponse(BaseModel):
 class UserUpdate(BaseModel):
     phone_number: str | None = None
     language: str | None = None
+
+
+class UserRoleUpdate(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def normalize_role(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"customer", "staff", "admin"}:
+            raise ValueError("Invalid role")
+        return normalized
