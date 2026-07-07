@@ -6,7 +6,9 @@ import App from './App';
 const authState = vi.hoisted(() => ({
   authenticate: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   user: null as { role: string } | null,
+  token: null as string | null,
   isLoading: false,
+  hasHydratedUser: true,
 }));
 
 vi.mock('./stores/authStore', () => ({
@@ -50,7 +52,9 @@ describe('App', () => {
     cleanup();
     authState.authenticate.mockClear();
     authState.user = null;
+    authState.token = null;
     authState.isLoading = false;
+    authState.hasHydratedUser = true;
     localStorage.clear();
     delete (window as Window & { Telegram?: unknown }).Telegram;
   });
@@ -78,6 +82,36 @@ describe('App', () => {
     expect(authState.authenticate).toHaveBeenCalledTimes(1);
   });
 
+  it('renders a neutral shell while auth is still loading role-sensitive routes', () => {
+    authState.isLoading = true;
+    authState.hasHydratedUser = false;
+
+    const view = render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByTestId('role-route-loading')).toBeInTheDocument();
+    expect(view.queryByText('Artisan menu page')).not.toBeInTheDocument();
+    expect(view.queryByText('Staff orders page')).not.toBeInTheDocument();
+  });
+
+  it('holds staff routes on a neutral shell until the stored-token user is hydrated', () => {
+    authState.token = 'persisted-jwt';
+    authState.hasHydratedUser = false;
+
+    const view = render(
+      <MemoryRouter initialEntries={['/staff/orders']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByTestId('role-route-loading')).toBeInTheDocument();
+    expect(view.queryByText('Artisan menu page')).not.toBeInTheDocument();
+    expect(view.queryByText('Staff orders page')).not.toBeInTheDocument();
+  });
+
   it('routes staff users from home to staff orders', () => {
     authState.user = { role: 'staff' };
 
@@ -88,6 +122,19 @@ describe('App', () => {
     );
 
     expect(view.getByText('Staff orders page')).toBeInTheDocument();
+  });
+
+  it('routes customer users away from staff orders back to home', () => {
+    authState.user = { role: 'customer' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/staff/orders']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Artisan menu page')).toBeInTheDocument();
+    expect(view.queryByText('Staff orders page')).not.toBeInTheDocument();
   });
 
   it('routes staff users from profile to the staff profile shell', () => {

@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import type { ReactNode } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import ArtisanMenuPage from './pages/artisan/ArtisanMenuPage';
 import ArtisanCheckoutPage from './pages/artisan/ArtisanCheckoutPage';
@@ -10,11 +11,27 @@ import StaffOrderDetailPage from './pages/staff/StaffOrderDetailPage';
 import StaffProfilePage from './pages/staff/StaffProfilePage';
 import { useAuthStore } from './stores/authStore';
 
+function RoleRouteLoadingShell() {
+  return <div aria-busy="true" className="min-h-screen" data-testid="role-route-loading" />;
+}
+
 export default function App() {
   const authenticate = useAuthStore((state) => state.authenticate);
+  const token = useAuthStore((state) => state.token);
   const user = useAuthStore((state) => state.user);
+  const isLoading = useAuthStore((state) => state.isLoading);
+  const hasHydratedUser = useAuthStore((state) => state.hasHydratedUser);
   const navigate = useNavigate();
   const isStaffMode = user?.role === 'staff' || user?.role === 'admin';
+  const isResolvingRole = isLoading || (!!token && !hasHydratedUser);
+
+  const renderRoleSensitiveRoute = (customerElement: ReactNode, staffElement: ReactNode) => {
+    if (isResolvingRole) {
+      return <RoleRouteLoadingShell />;
+    }
+
+    return isStaffMode ? staffElement : customerElement;
+  };
 
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
@@ -54,31 +71,40 @@ export default function App() {
     <Routes>
       <Route
         path="/"
-        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanMenuPage />}
+        element={renderRoleSensitiveRoute(<ArtisanMenuPage />, <Navigate to="/staff/orders" replace />)}
       />
       <Route
         path="/checkout"
-        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanCheckoutPage />}
+        element={renderRoleSensitiveRoute(
+          <ArtisanCheckoutPage />,
+          <Navigate to="/staff/orders" replace />,
+        )}
       />
       <Route
         path="/order"
-        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanOrdersPage />}
+        element={renderRoleSensitiveRoute(
+          <ArtisanOrdersPage />,
+          <Navigate to="/staff/orders" replace />,
+        )}
       />
       <Route
         path="/profile"
-        element={isStaffMode ? <StaffProfilePage /> : <ArtisanProfilePage />}
+        element={renderRoleSensitiveRoute(<ArtisanProfilePage />, <StaffProfilePage />)}
       />
       <Route
         path="/order/:orderId"
-        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanOrderStatusPage />}
+        element={renderRoleSensitiveRoute(
+          <ArtisanOrderStatusPage />,
+          <Navigate to="/staff/orders" replace />,
+        )}
       />
       <Route
         path="/staff/orders"
-        element={isStaffMode ? <StaffOrdersPage /> : <Navigate to="/" replace />}
+        element={renderRoleSensitiveRoute(<Navigate to="/" replace />, <StaffOrdersPage />)}
       />
       <Route
         path="/staff/orders/:orderId"
-        element={isStaffMode ? <StaffOrderDetailPage /> : <Navigate to="/" replace />}
+        element={renderRoleSensitiveRoute(<Navigate to="/" replace />, <StaffOrderDetailPage />)}
       />
     </Routes>
   );
