@@ -14,6 +14,7 @@ from app.services.permissions import require_staff
 
 AVAILABLE_STATUS = "TAKEN_BY_COURIER"
 DELIVERED_STATUS = "DELIVERED"
+DELIVERY_DISCRIMINATOR = "delivery"
 CANCELLED_STATUSES = {"CANCELLED", "CANCELED"}
 TERMINAL_STATUSES = {DELIVERED_STATUS, *CANCELLED_STATUSES}
 ACTIVE_ORDER_CONFLICT = "Finish your active delivery before taking another order."
@@ -30,6 +31,7 @@ def _staff_order_options():
 def _active_order_filters(staff_id: int):
     return (
         Order.assigned_staff_id == staff_id,
+        Order.discriminator == DELIVERY_DISCRIMINATOR,
         Order.delivered_at.is_(None),
         Order.status.not_in(TERMINAL_STATUSES),
     )
@@ -48,7 +50,7 @@ async def _load_staff_order(
     query = (
         select(Order)
         .options(*_staff_order_options())
-        .where(Order.id == order_id, Order.discriminator == "delivery")
+        .where(Order.id == order_id, Order.discriminator == DELIVERY_DISCRIMINATOR)
     )
     if for_update:
         query = query.with_for_update()
@@ -90,7 +92,7 @@ async def list_available_orders(db: AsyncSession, current_user: User) -> list[Or
         select(Order)
         .options(*_staff_order_options())
         .where(
-            Order.discriminator == "delivery",
+            Order.discriminator == DELIVERY_DISCRIMINATOR,
             Order.status == AVAILABLE_STATUS,
             Order.assigned_staff_id.is_(None),
             or_(Order.payment_method == "cash", Order.payment_status == "paid"),
@@ -121,6 +123,7 @@ async def list_completed_orders(db: AsyncSession, current_user: User) -> list[Or
         .options(*_staff_order_options())
         .where(
             Order.assigned_staff_id == current_user.telegram_id,
+            Order.discriminator == DELIVERY_DISCRIMINATOR,
             Order.status == DELIVERED_STATUS,
             Order.delivered_at.is_not(None),
         )

@@ -150,6 +150,7 @@ class Order(Base):
             unique=True,
             postgresql_where=text(
                 "assigned_staff_id IS NOT NULL "
+                "AND discriminator = 'delivery' "
                 "AND delivered_at IS NULL "
                 "AND status NOT IN ('DELIVERED', 'CANCELLED', 'CANCELED')"
             ),

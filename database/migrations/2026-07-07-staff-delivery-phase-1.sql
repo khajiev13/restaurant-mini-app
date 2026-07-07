@@ -17,8 +17,10 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_orders_assigned_staff_id ON orders(assigned_staff_id);
 CREATE INDEX IF NOT EXISTS idx_orders_delivered_at ON orders(delivered_at);
 CREATE INDEX IF NOT EXISTS idx_orders_staff_available ON orders(status, assigned_staff_id, discriminator);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_one_active_delivery_per_staff
+DROP INDEX IF EXISTS uq_orders_one_active_delivery_per_staff;
+CREATE UNIQUE INDEX uq_orders_one_active_delivery_per_staff
     ON orders(assigned_staff_id)
     WHERE assigned_staff_id IS NOT NULL
+      AND discriminator = 'delivery'
       AND delivered_at IS NULL
       AND status NOT IN ('DELIVERED', 'CANCELLED', 'CANCELED');

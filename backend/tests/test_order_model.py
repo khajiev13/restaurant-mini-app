@@ -8,4 +8,8 @@ def test_order_metadata_declares_one_active_delivery_per_staff_index():
 
     assert index.unique is True
     assert [column.name for column in index.columns] == ["assigned_staff_id"]
-    assert index.dialect_options["postgresql"]["where"] is not None
+    where_clause = str(index.dialect_options["postgresql"]["where"])
+
+    assert "assigned_staff_id IS NOT NULL" in where_clause
+    assert "delivered_at IS NULL" in where_clause
+    assert "discriminator = 'delivery'" in where_clause

@@ -153,6 +153,56 @@ async def test_staff_cannot_take_second_active_order(client, db_session):
 
 
 @pytest.mark.asyncio
+async def test_non_delivery_assignment_does_not_block_taking_delivery(client, db_session):
+    customer = await _create_user(db_session, 715, "customer")
+    staff = await _create_user(db_session, 716, "staff")
+    await _create_delivery_order(
+        db_session,
+        customer,
+        discriminator="pickup",
+        assigned_staff_id=staff.telegram_id,
+        assigned_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+        order_number="P1-001",
+    )
+    delivery_order = await _create_delivery_order(
+        db_session,
+        customer,
+        order_number="D1-001",
+    )
+
+    response = await client.post(
+        f"/api/staff/orders/{delivery_order.id}/take",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    await db_session.refresh(delivery_order)
+    assert response.status_code == 200
+    assert delivery_order.assigned_staff_id == staff.telegram_id
+
+
+@pytest.mark.asyncio
+async def test_non_delivery_assignment_does_not_appear_as_active_delivery(client, db_session):
+    customer = await _create_user(db_session, 717, "customer")
+    staff = await _create_user(db_session, 718, "staff")
+    await _create_delivery_order(
+        db_session,
+        customer,
+        discriminator="pickup",
+        assigned_staff_id=staff.telegram_id,
+        assigned_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+        order_number="P1-002",
+    )
+
+    response = await client.get(
+        "/api/staff/orders/active",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] is None
+
+
+@pytest.mark.asyncio
 async def test_only_assigned_staff_can_mark_delivered(client, db_session):
     customer = await _create_user(db_session, 708, "customer")
     assigned_staff = await _create_user(db_session, 709, "staff")
@@ -211,3 +261,50 @@ async def test_delivered_order_appears_in_completed(client, db_session):
 
     assert response.status_code == 200
     assert len(response.json()["data"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_endpoint_only_returns_delivery_orders(client, db_session):
+    customer = await _create_user(db_session, 719, "customer")
+    staff = await _create_user(db_session, 720, "staff")
+    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    await _create_delivery_order(
+        db_session,
+        customer,
+        assigned_staff_id=staff.telegram_id,
+        status="DELIVERED",
+        delivered_at=now,
+        order_number="D1-002",
+    )
+    await _create_delivery_order(
+        db_session,
+        customer,
+        discriminator="pickup",
+        assigned_staff_id=staff.telegram_id,
+        status="DELIVERED",
+        delivered_at=now,
+        order_number="P1-003",
+    )
+
+    response = await client.get(
+        "/api/staff/orders/completed",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 200
+    assert [order["order_number"] for order in response.json()["data"]] == ["D1-002"]
+
+
+@pytest.mark.asyncio
+async def test_admin_can_access_staff_available_orders(client, db_session):
+    customer = await _create_user(db_session, 721, "customer")
+    admin = await _create_user(db_session, 722, "admin")
+    await _create_delivery_order(db_session, customer, order_number="D1-003")
+
+    response = await client.get(
+        "/api/staff/orders/available",
+        headers=_auth_headers(admin.telegram_id),
+    )
+
+    assert response.status_code == 200
+    assert [order["order_number"] for order in response.json()["data"]] == ["D1-003"]
