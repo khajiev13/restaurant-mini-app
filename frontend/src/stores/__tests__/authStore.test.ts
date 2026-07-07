@@ -120,7 +120,7 @@ describe('authStore', () => {
     expect(useAuthStore.getState().user).toEqual(adminUser);
   });
 
-  it('refreshMe keeps role resolution pending when profile refresh fails transiently', async () => {
+  it('refreshMe keeps role routing blocked with a retryable error when profile refresh fails transiently', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
       token: 'jwt-123',
@@ -140,7 +140,8 @@ describe('authStore', () => {
       user: null,
       isAuthenticated: true,
       hasHydratedUser: false,
-      hasResolvedInitialAuth: false,
+      hasResolvedInitialAuth: true,
+      authError: 'Could not verify your role. Check your connection and try again.',
     });
   });
 
@@ -196,7 +197,7 @@ describe('authStore', () => {
     expect(localStorage.getItem('jwt')).toBeNull();
   });
 
-  it('authenticate keeps role resolution pending when profile hydration fails transiently after login', async () => {
+  it('authenticate keeps role routing blocked with a retryable error when profile hydration fails transiently after login', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
       token: 'stale-jwt',
@@ -220,7 +221,8 @@ describe('authStore', () => {
       isAuthenticated: true,
       isLoading: false,
       hasHydratedUser: false,
-      hasResolvedInitialAuth: false,
+      hasResolvedInitialAuth: true,
+      authError: 'Could not verify your role. Check your connection and try again.',
     });
     expect(localStorage.getItem('jwt')).toBe('new-jwt');
   });

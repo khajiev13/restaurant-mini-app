@@ -17,6 +17,25 @@ import {
 import type { StaffOrder } from '../../types/staff';
 
 const validTabs: ReadonlyArray<StaffOrderTab> = ['available', 'active', 'completed'];
+const ACTIVE_ORDER_CONFLICT = 'Finish your active delivery before taking another order.';
+const TAKE_ORDER_ERROR_DETAILS = new Set([
+  ACTIVE_ORDER_CONFLICT,
+  'This order was already taken by another staff member.',
+  'This order is no longer available.',
+  'This order is not ready for delivery payment handling.',
+  'Could not refresh order status. Try again.',
+]);
+
+function getTakeOrderError(error: unknown): string {
+  if (error && typeof error === 'object' && 'response' in error) {
+    const detail = (error as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
+    if (typeof detail === 'string' && TAKE_ORDER_ERROR_DETAILS.has(detail)) {
+      return detail;
+    }
+  }
+
+  return 'This order is no longer available.';
+}
 
 export default function StaffOrdersPage() {
   const { t, i18n } = useTranslation();
@@ -31,9 +50,11 @@ export default function StaffOrdersPage() {
   const [completedOrders, setCompletedOrders] = useState<StaffOrder[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [confirmingOrder, setConfirmingOrder] = useState<StaffOrder | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const loadErrorMessage = t('staff.orders.load_error', 'Could not load staff orders. Try again.');
 
   const loadOrders = useCallback(async () => {
     setIsLoading(true);
@@ -49,11 +70,11 @@ export default function StaffOrdersPage() {
       setActiveOrder(activeResponse.data.data ?? null);
       setCompletedOrders(completedResponse.data.data ?? []);
     } catch {
-      setPageError(t('staff.orders.load_error', 'Could not load staff orders. Try again.'));
+      setPageError(loadErrorMessage);
     } finally {
       setIsLoading(false);
     }
-  }, [t]);
+  }, [loadErrorMessage]);
 
   useEffect(() => {
     void loadOrders();
@@ -69,14 +90,17 @@ export default function StaffOrdersPage() {
       return;
     }
 
+    setActionError(null);
     setPageError(null);
     try {
       await takeStaffOrder(order.id);
       await loadOrders();
       setTab('active');
-    } catch {
-      setPageError(t('staff.orders.take_error', 'This order is no longer available.'));
+    } catch (error) {
+      const nextError = getTakeOrderError(error);
+      setActionError(nextError);
       await loadOrders();
+      setActionError(nextError);
     }
   };
 
@@ -103,8 +127,10 @@ export default function StaffOrdersPage() {
     <StaffLayout>
       <StaffOrderTabs active={activeTab} onChange={setTab} />
 
-      {pageError ? (
-        <p style={{ margin: '0 20px 16px', color: COLORS.error, fontWeight: 700 }}>{pageError}</p>
+      {actionError || pageError ? (
+        <p style={{ margin: '0 20px 16px', color: COLORS.error, fontWeight: 700 }}>
+          {actionError ?? pageError}
+        </p>
       ) : null}
 
       {isLoading ? (

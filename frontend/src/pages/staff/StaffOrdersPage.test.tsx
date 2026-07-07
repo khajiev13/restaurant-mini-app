@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -58,6 +58,8 @@ const staffOrder = {
 
 describe('StaffOrdersPage', () => {
   beforeEach(() => {
+    cleanup();
+    vi.clearAllMocks();
     apiMocks.getAvailableStaffOrders.mockResolvedValue({ data: { data: [staffOrder] } });
     apiMocks.getActiveStaffOrder.mockResolvedValue({ data: { data: null } });
     apiMocks.getCompletedStaffOrders.mockResolvedValue({ data: { data: [] } });
@@ -128,5 +130,70 @@ describe('StaffOrdersPage', () => {
     await user.click(screen.getAllByText('Yakkasaray District, Shota Rustaveli 45')[0]);
 
     expect(screen.queryByText('Order detail route')).not.toBeInTheDocument();
+  });
+
+  it('keeps active-delivery conflict visible after refreshing orders', async () => {
+    const user = userEvent.setup();
+    apiMocks.takeStaffOrder.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { detail: 'Finish your active delivery before taking another order.' },
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={['/staff/orders?tab=available']}>
+        <StaffOrdersPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Take Order' }));
+
+    expect(apiMocks.takeStaffOrder).toHaveBeenCalledWith('order-1');
+    expect(
+      await screen.findByText('Finish your active delivery before taking another order.'),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps already-taken conflict detail visible after refreshing orders', async () => {
+    const user = userEvent.setup();
+    apiMocks.takeStaffOrder.mockRejectedValue({
+      response: {
+        status: 409,
+        data: { detail: 'This order was already taken by another staff member.' },
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={['/staff/orders?tab=available']}>
+        <StaffOrdersPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Take Order' }));
+
+    expect(await screen.findByText('This order was already taken by another staff member.')).toBeInTheDocument();
+  });
+
+  it('shows elapsed delivery time on completed cards', async () => {
+    apiMocks.getAvailableStaffOrders.mockResolvedValue({ data: { data: [] } });
+    apiMocks.getCompletedStaffOrders.mockResolvedValue({
+      data: {
+        data: [
+          {
+            ...staffOrder,
+            status: 'DELIVERED',
+            assigned_at: '2026-07-07T10:00:00Z',
+            delivered_at: '2026-07-07T10:27:00Z',
+          },
+        ],
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/staff/orders?tab=completed']}>
+        <StaffOrdersPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/27 min/)).toBeInTheDocument();
   });
 });

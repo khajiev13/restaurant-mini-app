@@ -15,17 +15,64 @@ function RoleRouteLoadingShell() {
   return <div aria-busy="true" className="min-h-screen" data-testid="role-route-loading" />;
 }
 
+function AuthRetryShell({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <main
+      style={{
+        minHeight: '100vh',
+        display: 'grid',
+        placeItems: 'center',
+        padding: 24,
+        backgroundColor: '#f6f6f6',
+        color: '#2d2f2f',
+      }}
+    >
+      <section style={{ maxWidth: 360, textAlign: 'center' }}>
+        <p style={{ margin: 0, fontSize: 16, fontWeight: 700, lineHeight: 1.45 }}>{message}</p>
+        <button
+          type="button"
+          onClick={onRetry}
+          style={{
+            height: 48,
+            marginTop: 18,
+            padding: '0 22px',
+            border: 'none',
+            borderRadius: 12,
+            backgroundColor: '#a33800',
+            color: '#ffefeb',
+            fontWeight: 800,
+            cursor: 'pointer',
+          }}
+        >
+          Retry
+        </button>
+      </section>
+    </main>
+  );
+}
+
 export default function App() {
   const bootstrapAuth = useAuthStore((state) => state.bootstrapAuth);
   const user = useAuthStore((state) => state.user);
   const isLoading = useAuthStore((state) => state.isLoading);
   const hasHydratedUser = useAuthStore((state) => state.hasHydratedUser);
   const hasResolvedInitialAuth = useAuthStore((state) => state.hasResolvedInitialAuth);
+  const authError = useAuthStore((state) => state.authError);
   const navigate = useNavigate();
   const isStaffMode = user?.role === 'staff' || user?.role === 'admin';
   const isResolvingRole = isLoading || !hasResolvedInitialAuth || !hasHydratedUser;
 
   const renderRoleSensitiveRoute = (customerElement: ReactNode, staffElement: ReactNode) => {
+    if (authError) {
+      return <AuthRetryShell message={authError} onRetry={() => { void bootstrapAuth(); }} />;
+    }
+
     if (isResolvingRole) {
       return <RoleRouteLoadingShell />;
     }

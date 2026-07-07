@@ -1,4 +1,5 @@
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
@@ -10,6 +11,7 @@ const authState = vi.hoisted(() => ({
   isLoading: false,
   hasHydratedUser: true,
   hasResolvedInitialAuth: true,
+  authError: null as string | null,
 }));
 
 vi.mock('./stores/authStore', () => ({
@@ -57,6 +59,7 @@ describe('App', () => {
     authState.isLoading = false;
     authState.hasHydratedUser = true;
     authState.hasResolvedInitialAuth = true;
+    authState.authError = null;
     localStorage.clear();
     delete (window as Window & { Telegram?: unknown }).Telegram;
   });
@@ -127,6 +130,28 @@ describe('App', () => {
     expect(view.getByTestId('role-route-loading')).toBeInTheDocument();
     expect(view.queryByText('Artisan menu page')).not.toBeInTheDocument();
     expect(view.queryByText('Staff orders page')).not.toBeInTheDocument();
+  });
+
+  it('renders a retry shell when stored-token role hydration fails transiently', async () => {
+    const user = userEvent.setup();
+    authState.token = 'persisted-jwt';
+    authState.hasHydratedUser = false;
+    authState.hasResolvedInitialAuth = true;
+    authState.authError = 'Could not verify your role. Check your connection and try again.';
+
+    render(
+      <MemoryRouter initialEntries={['/staff/orders']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Could not verify your role. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('Artisan menu page')).not.toBeInTheDocument();
+    expect(screen.queryByText('Staff orders page')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(authState.bootstrapAuth).toHaveBeenCalledTimes(2);
   });
 
   it('routes staff users from home to staff orders', () => {

@@ -9,6 +9,27 @@ function getItemSummary(order: StaffOrder): string {
     .join(', ');
 }
 
+function getDeliveryDuration(order: StaffOrder): string | null {
+  if (!order.assigned_at || !order.delivered_at) {
+    return null;
+  }
+
+  const assignedAt = new Date(order.assigned_at).getTime();
+  const deliveredAt = new Date(order.delivered_at).getTime();
+  if (!Number.isFinite(assignedAt) || !Number.isFinite(deliveredAt) || deliveredAt < assignedAt) {
+    return null;
+  }
+
+  const totalMinutes = Math.max(1, Math.round((deliveredAt - assignedAt) / 60000));
+  if (totalMinutes < 60) {
+    return `${totalMinutes} min`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
 export default function StaffOrderCard({
   disabled = false,
   language,
@@ -25,6 +46,7 @@ export default function StaffOrderCard({
   const navigate = useNavigate();
   const cashOrder = order.payment_method === 'cash';
   const canOpenOrder = mode !== 'available' || !disabled;
+  const deliveryDuration = getDeliveryDuration(order);
 
   return (
     <article
@@ -136,9 +158,16 @@ export default function StaffOrderCard({
       ) : null}
 
       {mode === 'completed' && order.delivered_at ? (
-        <p style={{ margin: '14px 0 0', color: COLORS.secondary }}>
-          Delivered {formatDateTime(order.delivered_at, language)}
-        </p>
+        <div style={{ display: 'grid', gap: 4, marginTop: 14 }}>
+          <p style={{ margin: 0, color: COLORS.secondary }}>
+            Delivered {formatDateTime(order.delivered_at, language)}
+          </p>
+          {deliveryDuration ? (
+            <p style={{ margin: 0, color: COLORS.onSurfaceVariant, fontWeight: 700 }}>
+              Delivery time {deliveryDuration}
+            </p>
+          ) : null}
+        </div>
       ) : null}
     </article>
   );

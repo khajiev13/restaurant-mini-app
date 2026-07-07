@@ -10,6 +10,7 @@ interface AuthState {
   isLoading: boolean;
   hasHydratedUser: boolean;
   hasResolvedInitialAuth: boolean;
+  authError: string | null;
   bootstrapAuth: () => Promise<void>;
   authenticate: () => Promise<void>;
   refreshMe: () => Promise<User | null>;
@@ -40,6 +41,8 @@ function isUnauthorizedError(error: unknown): boolean {
   return (error as { response?: { status?: number } }).response?.status === 401;
 }
 
+const AUTH_RETRY_MESSAGE = 'Could not verify your role. Check your connection and try again.';
+
 export const useAuthStore = create<AuthState>((set, get) => {
   const token = localStorage.getItem('jwt');
   const needsInitialAuthResolution = shouldResolveInitialAuth(token);
@@ -51,6 +54,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     isLoading: false,
     hasHydratedUser: !needsInitialAuthResolution,
     hasResolvedInitialAuth: !needsInitialAuthResolution,
+    authError: null,
 
     bootstrapAuth: async () => {
       if (hasManualLogout()) {
@@ -62,6 +66,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
           isLoading: false,
           hasHydratedUser: true,
           hasResolvedInitialAuth: true,
+          authError: null,
         });
         return;
       }
@@ -80,6 +85,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         isLoading: false,
         hasHydratedUser: true,
         hasResolvedInitialAuth: true,
+        authError: null,
       });
     },
 
@@ -91,6 +97,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
           isLoading: false,
           hasHydratedUser: true,
           hasResolvedInitialAuth: true,
+          authError: null,
         });
         return;
       }
@@ -99,6 +106,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         isLoading: true,
         hasHydratedUser: false,
         hasResolvedInitialAuth: false,
+        authError: null,
       });
       try {
         const res = await authenticateTelegram(tg.initData);
@@ -115,6 +123,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
             user: me,
             hasHydratedUser: true,
             hasResolvedInitialAuth: true,
+            authError: null,
           });
           const lang = me?.language;
           if (lang && lang !== i18n.language) {
@@ -130,12 +139,14 @@ export const useAuthStore = create<AuthState>((set, get) => {
               isAuthenticated: false,
               hasHydratedUser: true,
               hasResolvedInitialAuth: true,
+              authError: null,
             });
           } else {
             set({
               user: null,
               hasHydratedUser: false,
-              hasResolvedInitialAuth: false,
+              hasResolvedInitialAuth: true,
+              authError: AUTH_RETRY_MESSAGE,
             });
           }
         }
@@ -148,6 +159,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
           isAuthenticated: false,
           hasHydratedUser: true,
           hasResolvedInitialAuth: true,
+          authError: null,
         });
       } finally {
         set({ isLoading: false });
@@ -162,6 +174,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
           user,
           hasHydratedUser: true,
           hasResolvedInitialAuth: true,
+          authError: null,
         });
         return user;
       } catch (err) {
@@ -173,12 +186,14 @@ export const useAuthStore = create<AuthState>((set, get) => {
             isAuthenticated: false,
             hasHydratedUser: true,
             hasResolvedInitialAuth: true,
+            authError: null,
           });
         } else {
           set({
             user: null,
             hasHydratedUser: false,
-            hasResolvedInitialAuth: false,
+            hasResolvedInitialAuth: true,
+            authError: AUTH_RETRY_MESSAGE,
           });
         }
         return null;
@@ -195,6 +210,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
         isLoading: false,
         hasHydratedUser: true,
         hasResolvedInitialAuth: true,
+        authError: null,
       });
     },
   };
