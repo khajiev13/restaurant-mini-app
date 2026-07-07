@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import StaffOrdersPage from './StaffOrdersPage';
 
@@ -103,5 +103,30 @@ describe('StaffOrdersPage', () => {
 
     await user.click(screen.getByLabelText(/i have collected/i));
     expect(confirmButton).toBeEnabled();
+  });
+
+  it('does not navigate to an available order when another delivery is already active', async () => {
+    const user = userEvent.setup();
+
+    apiMocks.getActiveStaffOrder.mockResolvedValue({
+      data: { data: { ...staffOrder, id: 'active-order-1', assigned_at: '2026-07-07T10:01:00Z' } },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/staff/orders?tab=available']}>
+        <Routes>
+          <Route path="/staff/orders" element={<StaffOrdersPage />} />
+          <Route path="/staff/orders/:orderId" element={<div>Order detail route</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole('button', { name: 'Active Delivery In Progress' }),
+    ).toBeDisabled();
+
+    await user.click(screen.getAllByText('Yakkasaray District, Shota Rustaveli 45')[0]);
+
+    expect(screen.queryByText('Order detail route')).not.toBeInTheDocument();
   });
 });

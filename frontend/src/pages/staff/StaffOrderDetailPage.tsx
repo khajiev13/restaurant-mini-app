@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import StaffLayout from '../../components/staff/StaffLayout';
 import StaffPaymentBlock from '../../components/staff/StaffPaymentBlock';
-import { getStaffOrder, takeStaffOrder } from '../../services/staffApi';
+import { getActiveStaffOrder, getStaffOrder, takeStaffOrder } from '../../services/staffApi';
 import type { StaffOrder } from '../../types/staff';
 
 const floatingButtonBar: CSSProperties = {
@@ -22,6 +22,7 @@ export default function StaffOrderDetailPage() {
   const navigate = useNavigate();
   const { orderId } = useParams();
   const [order, setOrder] = useState<StaffOrder | null>(null);
+  const [activeOrder, setActiveOrder] = useState<StaffOrder | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -36,10 +37,11 @@ export default function StaffOrderDetailPage() {
     setIsLoading(true);
     setError(null);
 
-    void getStaffOrder(orderId)
-      .then((response) => {
+    void Promise.all([getStaffOrder(orderId), getActiveStaffOrder()])
+      .then(([orderResponse, activeOrderResponse]) => {
         if (!cancelled) {
-          setOrder(response.data.data);
+          setOrder(orderResponse.data.data);
+          setActiveOrder(activeOrderResponse.data.data ?? null);
         }
       })
       .catch(() => {
@@ -66,6 +68,20 @@ export default function StaffOrderDetailPage() {
     setIsSubmitting(true);
     setError(null);
     try {
+      const activeOrderResponse = await getActiveStaffOrder();
+      const latestActiveOrder = activeOrderResponse.data.data ?? null;
+
+      if (latestActiveOrder && latestActiveOrder.id !== order.id) {
+        setActiveOrder(latestActiveOrder);
+        setError(
+          t(
+            'staff.order_detail.active_delivery_error',
+            'Finish your current delivery before taking another order.',
+          ),
+        );
+        return;
+      }
+
       await takeStaffOrder(order.id);
       navigate('/staff/orders?tab=active', { replace: true });
     } catch {
@@ -75,7 +91,8 @@ export default function StaffOrderDetailPage() {
     }
   };
 
-  const showTakeButton = !!order && !order.assigned_at && !order.delivered_at;
+  const hasAnotherActiveOrder = !!activeOrder && !!order && activeOrder.id !== order.id;
+  const showTakeButton = !!order && !order.assigned_at && !order.delivered_at && !hasAnotherActiveOrder;
 
   return (
     <StaffLayout>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import StaffLayout from '../../components/staff/StaffLayout';
@@ -10,27 +10,39 @@ export default function StaffProfilePage() {
   const { t } = useTranslation();
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const logout = useAuthStore((state) => state.logout);
+  const isMountedRef = useRef(true);
+
+  const loadProfile = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await getMe();
+      if (isMountedRef.current) {
+        setUser(response.data.data);
+      }
+    } catch {
+      if (isMountedRef.current) {
+        setUser(null);
+        setError(t('staff.profile.load_error', 'Could not load your profile.'));
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
+    }
+  }, [t]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    void getMe()
-      .then((response) => {
-        if (!cancelled) {
-          setUser(response.data.data);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
-      });
+    isMountedRef.current = true;
+    void loadProfile();
 
     return () => {
-      cancelled = true;
+      isMountedRef.current = false;
     };
-  }, []);
+  }, [loadProfile]);
 
   return (
     <StaffLayout>
@@ -47,6 +59,37 @@ export default function StaffProfilePage() {
         </h1>
 
         {isLoading ? <p style={{ margin: 0, color: COLORS.secondary }}>Loading profile...</p> : null}
+
+        {!isLoading && error ? (
+          <section
+            style={{
+              padding: 20,
+              borderRadius: 16,
+              backgroundColor: COLORS.surfaceContainerLowest,
+            }}
+          >
+            <p style={{ margin: 0, color: COLORS.error, fontWeight: 700 }}>{error}</p>
+            <button
+              type="button"
+              onClick={() => {
+                void loadProfile();
+              }}
+              style={{
+                height: 44,
+                marginTop: 14,
+                padding: '0 16px',
+                border: 'none',
+                borderRadius: 10,
+                backgroundColor: COLORS.primary,
+                color: COLORS.onPrimary,
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              {t('staff.profile.retry', 'Retry')}
+            </button>
+          </section>
+        ) : null}
 
         {user ? (
           <section

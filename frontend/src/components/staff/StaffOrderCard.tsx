@@ -24,17 +24,22 @@ export default function StaffOrderCard({
 }) {
   const navigate = useNavigate();
   const cashOrder = order.payment_method === 'cash';
+  const canOpenOrder = mode !== 'available' || !disabled;
 
   return (
     <article
-      onClick={() => navigate(`/staff/orders/${order.id}`)}
+      onClick={() => {
+        if (canOpenOrder) {
+          navigate(`/staff/orders/${order.id}`);
+        }
+      }}
       style={{
         margin: '0 20px 16px',
         padding: 18,
         borderRadius: 16,
         backgroundColor: COLORS.surfaceContainerLowest,
         boxShadow: '0 12px 32px rgba(45, 47, 47, 0.08)',
-        cursor: 'pointer',
+        cursor: canOpenOrder ? 'pointer' : 'default',
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
