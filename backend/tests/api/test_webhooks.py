@@ -10,17 +10,23 @@ from app.models.models import Order, User
 from app.routers import webhooks as webhooks_router
 
 
-@pytest.fixture(autouse=True)
-def override_webhook_async_session(db_session, monkeypatch):
+@pytest.fixture
+def webhook_db_session(db_session, monkeypatch):
     @asynccontextmanager
     async def _session_override():
         yield db_session
 
     monkeypatch.setattr(webhooks_router, "async_session", _session_override)
+    return db_session
 
 
 @pytest.mark.asyncio
-async def test_telegram_bot_webhook_updates_phone_number(client, db_session, monkeypatch, caplog):
+async def test_telegram_bot_webhook_updates_phone_number(
+    client,
+    webhook_db_session,
+    monkeypatch,
+    caplog,
+):
     monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
     user = User(
         telegram_id=12345678,
@@ -28,8 +34,8 @@ async def test_telegram_bot_webhook_updates_phone_number(client, db_session, mon
         last_name=None,
         username="tester",
     )
-    db_session.add(user)
-    await db_session.commit()
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
 
     payload = {
         "update_id": 101,
@@ -46,7 +52,7 @@ async def test_telegram_bot_webhook_updates_phone_number(client, db_session, mon
             headers={"x-telegram-bot-api-secret-token": "test-secret"},
         )
 
-    await db_session.refresh(user)
+    await webhook_db_session.refresh(user)
 
     assert response.status_code == 200
     assert user.phone_number == "+998901234567"
@@ -85,7 +91,7 @@ async def test_telegram_bot_webhook_rejects_invalid_secret(client, monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_telegram_bot_webhook_ignores_unknown_user(client, monkeypatch, caplog):
+async def test_telegram_bot_webhook_ignores_unknown_user(client, webhook_db_session, monkeypatch, caplog):
     monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
 
     payload = {
@@ -111,7 +117,7 @@ async def test_telegram_bot_webhook_ignores_unknown_user(client, monkeypatch, ca
 @pytest.mark.asyncio
 async def test_order_status_webhook_does_not_overwrite_local_delivered(
     client,
-    db_session,
+    webhook_db_session,
     monkeypatch,
 ):
     monkeypatch.setattr(settings, "alipos_api_client_id", "client")
@@ -132,8 +138,8 @@ async def test_order_status_webhook_does_not_overwrite_local_delivered(
         status="DELIVERED",
         delivered_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
     )
-    db_session.add_all([user, order])
-    await db_session.commit()
+    webhook_db_session.add_all([user, order])
+    await webhook_db_session.commit()
 
     response = await client.post(
         "/api/webhooks/order-status",
@@ -141,7 +147,7 @@ async def test_order_status_webhook_does_not_overwrite_local_delivered(
         headers={"clientId": "client", "clientSecret": "secret"},
     )
 
-    await db_session.refresh(order)
+    await webhook_db_session.refresh(order)
 
     assert response.status_code == 200
     assert order.status == "DELIVERED"

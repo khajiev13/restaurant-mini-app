@@ -11,8 +11,8 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import async_session
 from app.models.models import Order, Stoplist, User
-from app.services.order_status_service import apply_alipos_status_update
 from app.services import multicard_api
+from app.services.order_status_service import apply_alipos_status_update
 
 logger = logging.getLogger(__name__)
 
