@@ -123,7 +123,13 @@ export default function ArtisanCheckoutPage() {
     setSubmitting(true);
     try {
       const payload: CreateOrderPayload = {
-        items: s.items.map((i) => ({ id: i.id, quantity: i.quantity, price: i.price, modifications: [] })),
+        items: s.items.map((i) => ({
+          id: i.id,
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          modifications: [],
+        })),
         phone_number: s.phone, delivery_address: addr.full_address,
         latitude: addr.latitude, longitude: addr.longitude, address_id: addr.id,
         comment: s.comment || undefined, payment_method: s.paymentMethod, discriminator: 'delivery',

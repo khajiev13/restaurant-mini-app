@@ -17,6 +17,10 @@ const floatingButtonBar: CSSProperties = {
   backdropFilter: 'blur(12px)',
 };
 
+function canHandleDeliveryPayment(order: StaffOrder): boolean {
+  return order.payment_method === 'cash' || order.payment_status === 'paid';
+}
+
 export default function StaffOrderDetailPage() {
   const { i18n, t } = useTranslation();
   const navigate = useNavigate();
@@ -92,7 +96,12 @@ export default function StaffOrderDetailPage() {
   };
 
   const hasAnotherActiveOrder = !!activeOrder && !!order && activeOrder.id !== order.id;
-  const showTakeButton = !!order && !order.assigned_at && !order.delivered_at && !hasAnotherActiveOrder;
+  const showTakeButton = !!order
+    && order.status === 'TAKEN_BY_COURIER'
+    && canHandleDeliveryPayment(order)
+    && !order.assigned_at
+    && !order.delivered_at
+    && !hasAnotherActiveOrder;
 
   return (
     <StaffLayout>

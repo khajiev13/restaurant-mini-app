@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import StaffOrderDetailPage from './StaffOrderDetailPage';
@@ -31,7 +31,7 @@ vi.mock('react-i18next', async () => {
 const availableOrder = {
   id: 'order-1',
   order_number: 'A7-492',
-  status: 'ACCEPTED_BY_RESTAURANT',
+  status: 'TAKEN_BY_COURIER',
   created_at: '2026-07-07T10:00:00Z',
   status_updated_at: null,
   assigned_at: null,
@@ -61,9 +61,57 @@ const availableOrder = {
 
 describe('StaffOrderDetailPage', () => {
   beforeEach(() => {
+    cleanup();
     apiMocks.getStaffOrder.mockResolvedValue({ data: { data: availableOrder } });
     apiMocks.getActiveStaffOrder.mockResolvedValue({ data: { data: null } });
     apiMocks.takeStaffOrder.mockResolvedValue({ data: { data: availableOrder } });
+  });
+
+  it('hides the take CTA when the unassigned order is not ready for courier pickup', async () => {
+    apiMocks.getStaffOrder.mockResolvedValue({
+      data: {
+        data: {
+          ...availableOrder,
+          status: 'ACCEPTED_BY_RESTAURANT',
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/staff/orders/order-1']}>
+        <Routes>
+          <Route path="/staff/orders/:orderId" element={<StaffOrderDetailPage />} />
+          <Route path="/staff/orders" element={<div>Orders list</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('#A7-492')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Take Order' })).not.toBeInTheDocument();
+  });
+
+  it('hides the take CTA when an online order is not paid yet', async () => {
+    apiMocks.getStaffOrder.mockResolvedValue({
+      data: {
+        data: {
+          ...availableOrder,
+          payment_method: 'rahmat',
+          payment_status: 'pending',
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/staff/orders/order-1']}>
+        <Routes>
+          <Route path="/staff/orders/:orderId" element={<StaffOrderDetailPage />} />
+          <Route path="/staff/orders" element={<div>Orders list</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('#A7-492')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Take Order' })).not.toBeInTheDocument();
   });
 
   it('hides the take CTA when another active delivery exists', async () => {

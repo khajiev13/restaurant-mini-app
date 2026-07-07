@@ -99,6 +99,43 @@ async def test_staff_can_list_available_orders(client, db_session):
 
 
 @pytest.mark.asyncio
+async def test_staff_detail_hides_unassigned_orders_before_courier_stage(client, db_session):
+    customer = await _create_user(db_session, 723, "customer")
+    staff = await _create_user(db_session, 724, "staff")
+    order = await _create_delivery_order(
+        db_session,
+        customer,
+        status="ACCEPTED_BY_RESTAURANT",
+    )
+
+    response = await client.get(
+        f"/api/staff/orders/{order.id}",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_staff_detail_hides_unassigned_online_orders_until_paid(client, db_session):
+    customer = await _create_user(db_session, 725, "customer")
+    staff = await _create_user(db_session, 726, "staff")
+    order = await _create_delivery_order(
+        db_session,
+        customer,
+        payment_method="rahmat",
+        payment_status="pending",
+    )
+
+    response = await client.get(
+        f"/api/staff/orders/{order.id}",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_staff_can_take_available_order(client, db_session):
     customer = await _create_user(db_session, 704, "customer")
     staff = await _create_user(db_session, 705, "staff")
@@ -229,6 +266,29 @@ async def test_assigned_staff_can_mark_delivered(client, db_session):
         db_session,
         customer,
         assigned_staff_id=staff.telegram_id,
+    )
+
+    response = await client.post(
+        f"/api/staff/orders/{order.id}/delivered",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.status == "DELIVERED"
+    assert order.delivered_at is not None
+
+
+@pytest.mark.asyncio
+async def test_mark_delivered_repairs_missing_delivered_at(client, db_session):
+    customer = await _create_user(db_session, 727, "customer")
+    staff = await _create_user(db_session, 728, "staff")
+    order = await _create_delivery_order(
+        db_session,
+        customer,
+        assigned_staff_id=staff.telegram_id,
+        status="DELIVERED",
+        delivered_at=None,
     )
 
     response = await client.post(

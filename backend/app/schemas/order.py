@@ -6,12 +6,14 @@ from pydantic import BaseModel
 
 class OrderItemModifier(BaseModel):
     id: str
+    name: str | None = None
     quantity: float
     price: float
 
 
 class OrderItem(BaseModel):
     id: str
+    name: str | None = None
     quantity: float
     price: float
     modifications: list[OrderItemModifier] = []

@@ -127,6 +127,7 @@ export interface CartItem extends MenuItem {
 export interface CreateOrderPayload {
   items: Array<{
     id: string;
+    name?: string;
     quantity: number;
     price: number;
     modifications: unknown[];

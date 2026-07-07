@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.models import Order, User
 from app.services import alipos_api
-from app.services.order_status_service import apply_alipos_status_update
+from app.services.order_status_service import apply_alipos_status_update_for_order
 from app.services.permissions import require_staff
 
 AVAILABLE_STATUS = "TAKEN_BY_COURIER"
@@ -140,7 +140,15 @@ async def get_staff_order(
     require_staff(current_user)
 
     order = await _require_staff_order(db, order_id)
-    if order.assigned_staff_id not in (None, current_user.telegram_id):
+    if order.assigned_staff_id is None:
+        if order.status != AVAILABLE_STATUS or not _can_handle_delivery_payment(order):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found",
+            )
+        return order
+
+    if order.assigned_staff_id != current_user.telegram_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Order is assigned to another staff member.",
@@ -173,7 +181,8 @@ async def take_order(
                 detail="Could not refresh order status. Try again.",
             ) from exc
 
-        if apply_alipos_status_update(
+        if await apply_alipos_status_update_for_order(
+            db,
             order,
             alipos_data.get("status", order.status),
             alipos_data.get("orderNumber"),
@@ -231,6 +240,12 @@ async def mark_order_delivered(
         )
 
     if order.status == DELIVERED_STATUS:
+        if order.delivered_at is None:
+            now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+            order.delivered_at = now
+            order.status_updated_at = now
+            await db.commit()
+            return await _require_staff_order(db, order.id)
         return order
 
     now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)

@@ -12,7 +12,7 @@ from app.config import settings
 from app.database import async_session
 from app.models.models import Order, Stoplist, User
 from app.services import multicard_api
-from app.services.order_status_service import apply_alipos_status_update
+from app.services.order_status_service import apply_alipos_status_update_for_order
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,12 @@ async def order_status_webhook(
             select(Order).where(Order.alipos_eats_id == eats_id)
         )
         order = result.scalar_one_or_none()
-        if order and apply_alipos_status_update(order, new_status, order_number):
+        if order and await apply_alipos_status_update_for_order(
+            db,
+            order,
+            new_status,
+            order_number,
+        ):
             await db.commit()
 
     return {"result": "OK"}

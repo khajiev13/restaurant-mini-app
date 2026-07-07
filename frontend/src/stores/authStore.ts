@@ -32,6 +32,14 @@ function shouldResolveInitialAuth(token: string | null): boolean {
   return !!token || hasTelegramInitData();
 }
 
+function isUnauthorizedError(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('response' in error)) {
+    return false;
+  }
+
+  return (error as { response?: { status?: number } }).response?.status === 401;
+}
+
 export const useAuthStore = create<AuthState>((set, get) => {
   const token = localStorage.getItem('jwt');
   const needsInitialAuthResolution = shouldResolveInitialAuth(token);
@@ -113,15 +121,23 @@ export const useAuthStore = create<AuthState>((set, get) => {
             await i18n.changeLanguage(lang);
             localStorage.setItem('i18nextLng', lang);
           }
-        } catch {
-          localStorage.removeItem('jwt');
-          set({
-            token: null,
-            user: null,
-            isAuthenticated: false,
-            hasHydratedUser: true,
-            hasResolvedInitialAuth: true,
-          });
+        } catch (err) {
+          if (isUnauthorizedError(err)) {
+            localStorage.removeItem('jwt');
+            set({
+              token: null,
+              user: null,
+              isAuthenticated: false,
+              hasHydratedUser: true,
+              hasResolvedInitialAuth: true,
+            });
+          } else {
+            set({
+              user: null,
+              hasHydratedUser: false,
+              hasResolvedInitialAuth: false,
+            });
+          }
         }
       } catch (err) {
         console.error('Auth failed:', err);
@@ -148,12 +164,23 @@ export const useAuthStore = create<AuthState>((set, get) => {
           hasResolvedInitialAuth: true,
         });
         return user;
-      } catch {
-        set({
-          user: null,
-          hasHydratedUser: true,
-          hasResolvedInitialAuth: true,
-        });
+      } catch (err) {
+        if (isUnauthorizedError(err)) {
+          localStorage.removeItem('jwt');
+          set({
+            token: null,
+            user: null,
+            isAuthenticated: false,
+            hasHydratedUser: true,
+            hasResolvedInitialAuth: true,
+          });
+        } else {
+          set({
+            user: null,
+            hasHydratedUser: false,
+            hasResolvedInitialAuth: false,
+          });
+        }
         return null;
       }
     },

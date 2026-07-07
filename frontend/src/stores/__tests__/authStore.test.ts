@@ -120,7 +120,7 @@ describe('authStore', () => {
     expect(useAuthStore.getState().user).toEqual(adminUser);
   });
 
-  it('refreshMe clears stale user data when profile refresh fails', async () => {
+  it('refreshMe keeps role resolution pending when profile refresh fails transiently', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
       token: 'jwt-123',
@@ -139,9 +139,35 @@ describe('authStore', () => {
       token: 'jwt-123',
       user: null,
       isAuthenticated: true,
+      hasHydratedUser: false,
+      hasResolvedInitialAuth: false,
+    });
+  });
+
+  it('refreshMe clears auth state when profile refresh is unauthorized', async () => {
+    const useAuthStore = await loadStore();
+    useAuthStore.setState({
+      token: 'jwt-123',
+      user: staffUser,
+      isAuthenticated: true,
+      isLoading: false,
+      hasHydratedUser: false,
+      hasResolvedInitialAuth: false,
+    });
+    localStorage.setItem('jwt', 'jwt-123');
+    apiMocks.getMe.mockRejectedValue({ response: { status: 401 } });
+
+    const user = await useAuthStore.getState().refreshMe();
+
+    expect(user).toBeNull();
+    expect(useAuthStore.getState()).toMatchObject({
+      token: null,
+      user: null,
+      isAuthenticated: false,
       hasHydratedUser: true,
       hasResolvedInitialAuth: true,
     });
+    expect(localStorage.getItem('jwt')).toBeNull();
   });
 
   it('authenticate clears stale auth state when login fails', async () => {
@@ -170,7 +196,7 @@ describe('authStore', () => {
     expect(localStorage.getItem('jwt')).toBeNull();
   });
 
-  it('authenticate clears auth state when profile hydration fails after login', async () => {
+  it('authenticate keeps role resolution pending when profile hydration fails transiently after login', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
       token: 'stale-jwt',
@@ -185,6 +211,35 @@ describe('authStore', () => {
       data: { data: { access_token: 'new-jwt' } },
     });
     apiMocks.getMe.mockRejectedValue(new Error('profile failed'));
+
+    await useAuthStore.getState().authenticate();
+
+    expect(useAuthStore.getState()).toMatchObject({
+      token: 'new-jwt',
+      user: null,
+      isAuthenticated: true,
+      isLoading: false,
+      hasHydratedUser: false,
+      hasResolvedInitialAuth: false,
+    });
+    expect(localStorage.getItem('jwt')).toBe('new-jwt');
+  });
+
+  it('authenticate clears auth state when profile hydration is unauthorized after login', async () => {
+    const useAuthStore = await loadStore();
+    useAuthStore.setState({
+      token: 'stale-jwt',
+      user: staffUser,
+      isAuthenticated: true,
+      isLoading: false,
+      hasHydratedUser: false,
+      hasResolvedInitialAuth: false,
+    });
+    localStorage.setItem('jwt', 'stale-jwt');
+    apiMocks.authenticateTelegram.mockResolvedValue({
+      data: { data: { access_token: 'new-jwt' } },
+    });
+    apiMocks.getMe.mockRejectedValue({ response: { status: 401 } });
 
     await useAuthStore.getState().authenticate();
 

@@ -11,7 +11,7 @@ from app.models.models import Address, Order
 from app.schemas.common import ApiResponse
 from app.schemas.order import OrderCreate, OrderResponse, OrderStatusResponse
 from app.services import alipos_api, multicard_api
-from app.services.order_status_service import apply_alipos_status_update
+from app.services.order_status_service import apply_alipos_status_update_for_order
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ async def create_order(
         id=order_id,
         user_id=current_user.telegram_id,
         address_id=selected_address.id if selected_address else body.address_id,
-        items=[item.model_dump() for item in body.items],
+        items=[item.model_dump(exclude_none=True) for item in body.items],
         total_amount=total,
         delivery_fee=0,
         comment=body.comment,
@@ -290,7 +290,7 @@ async def get_order_status(
             )
             new_status = alipos_data.get("status", order.status)
             order_number = alipos_data.get("orderNumber")
-            if apply_alipos_status_update(order, new_status, order_number):
+            if await apply_alipos_status_update_for_order(db, order, new_status, order_number):
                 await db.commit()
         except Exception:
             pass  # Return cached status if AliPOS is unreachable
