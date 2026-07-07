@@ -11,6 +11,7 @@ from app.models.models import Address, Order
 from app.schemas.common import ApiResponse
 from app.schemas.order import OrderCreate, OrderResponse, OrderStatusResponse
 from app.services import alipos_api, multicard_api
+from app.services.order_status_service import apply_alipos_status_update
 
 logger = logging.getLogger(__name__)
 
@@ -289,10 +290,7 @@ async def get_order_status(
             )
             new_status = alipos_data.get("status", order.status)
             order_number = alipos_data.get("orderNumber")
-            if new_status != order.status or order_number != order.order_number:
-                order.status = new_status
-                order.order_number = order_number
-                order.status_updated_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+            if apply_alipos_status_update(order, new_status, order_number):
                 await db.commit()
         except Exception:
             pass  # Return cached status if AliPOS is unreachable

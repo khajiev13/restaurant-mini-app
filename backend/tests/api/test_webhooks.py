@@ -1,10 +1,22 @@
+import datetime
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from app.config import settings
 from app.main import register_telegram_webhook
-from app.models.models import User
+from app.models.models import Order, User
+from app.routers import webhooks as webhooks_router
+
+
+@pytest.fixture(autouse=True)
+def override_webhook_async_session(db_session, monkeypatch):
+    @asynccontextmanager
+    async def _session_override():
+        yield db_session
+
+    monkeypatch.setattr(webhooks_router, "async_session", _session_override)
 
 
 @pytest.mark.asyncio
@@ -94,6 +106,46 @@ async def test_telegram_bot_webhook_ignores_unknown_user(client, monkeypatch, ca
     assert response.status_code == 200
     assert "result=user_not_found" in caplog.text
     assert "+998998887766" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_order_status_webhook_does_not_overwrite_local_delivered(
+    client,
+    db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "alipos_api_client_id", "client")
+    monkeypatch.setattr(settings, "alipos_api_client_secret", "secret")
+    unique_suffix = int(datetime.datetime.now(datetime.UTC).timestamp() * 1_000_000)
+    telegram_id = unique_suffix
+    eats_id = f"eats-delivered-{unique_suffix}"
+
+    user = User(telegram_id=telegram_id, first_name="Customer", last_name=None, username=None)
+    order = Order(
+        user_id=telegram_id,
+        items=[],
+        total_amount=36000,
+        delivery_fee=0,
+        payment_method="cash",
+        discriminator="delivery",
+        alipos_eats_id=eats_id,
+        status="DELIVERED",
+        delivered_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+    )
+    db_session.add_all([user, order])
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/webhooks/order-status",
+        json={"eatsId": eats_id, "status": "TAKEN_BY_COURIER", "orderNumber": "99"},
+        headers={"clientId": "client", "clientSecret": "secret"},
+    )
+
+    await db_session.refresh(order)
+
+    assert response.status_code == 200
+    assert order.status == "DELIVERED"
+    assert order.order_number is None
 
 
 @pytest.mark.asyncio
