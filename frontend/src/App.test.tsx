@@ -50,6 +50,10 @@ vi.mock('./pages/staff/StaffProfilePage', () => ({
   default: () => <div>Staff profile page</div>,
 }));
 
+vi.mock('./pages/admin/AdminUsersPage', () => ({
+  default: () => <div>Admin users page</div>,
+}));
+
 describe('App', () => {
   beforeEach(() => {
     cleanup();
@@ -154,6 +158,69 @@ describe('App', () => {
     expect(authState.bootstrapAuth).toHaveBeenCalledTimes(2);
   });
 
+  it('routes admin users from home to admin users page', () => {
+    authState.user = { role: 'admin' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Admin users page')).toBeInTheDocument();
+    expect(view.queryByText('Staff orders page')).not.toBeInTheDocument();
+  });
+
+  it('lets admin users open staff orders', () => {
+    authState.user = { role: 'admin' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/staff/orders']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff orders page')).toBeInTheDocument();
+  });
+
+  it('renders the staff order detail route for admin users', () => {
+    authState.user = { role: 'admin' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/staff/orders/abc-123']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff order detail page')).toBeInTheDocument();
+  });
+
+  it('routes staff users away from admin routes to staff orders', () => {
+    authState.user = { role: 'staff' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff orders page')).toBeInTheDocument();
+    expect(view.queryByText('Admin users page')).not.toBeInTheDocument();
+  });
+
+  it('routes customer users away from admin routes to home', () => {
+    authState.user = { role: 'customer' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Artisan menu page')).toBeInTheDocument();
+    expect(view.queryByText('Admin users page')).not.toBeInTheDocument();
+  });
+
   it('routes staff users from home to staff orders', () => {
     authState.user = { role: 'staff' };
 
@@ -191,18 +258,6 @@ describe('App', () => {
     expect(view.getByText('Staff profile page')).toBeInTheDocument();
   });
 
-  it('renders the staff order detail route for admin users', () => {
-    authState.user = { role: 'admin' };
-
-    const view = render(
-      <MemoryRouter initialEntries={['/staff/orders/abc-123']}>
-        <App />
-      </MemoryRouter>,
-    );
-
-    expect(view.getByText('Staff order detail page')).toBeInTheDocument();
-  });
-
   it('routes staff users away from checkout to staff orders', () => {
     authState.user = { role: 'staff' };
 
@@ -216,7 +271,7 @@ describe('App', () => {
   });
 
   it('routes staff users away from customer order detail to staff orders', () => {
-    authState.user = { role: 'admin' };
+    authState.user = { role: 'staff' };
 
     const view = render(
       <MemoryRouter initialEntries={['/order/abc-123']}>
@@ -225,6 +280,18 @@ describe('App', () => {
     );
 
     expect(view.getByText('Staff orders page')).toBeInTheDocument();
+  });
+
+  it('routes admin users away from customer order detail to admin page', () => {
+    authState.user = { role: 'admin' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/order/abc-123']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Admin users page')).toBeInTheDocument();
   });
 
   it('initializes Telegram WebApp chrome when available', () => {

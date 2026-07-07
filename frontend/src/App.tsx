@@ -9,6 +9,7 @@ import ArtisanOrdersPage from './pages/artisan/ArtisanOrdersPage';
 import StaffOrdersPage from './pages/staff/StaffOrdersPage';
 import StaffOrderDetailPage from './pages/staff/StaffOrderDetailPage';
 import StaffProfilePage from './pages/staff/StaffProfilePage';
+import AdminUsersPage from './pages/admin/AdminUsersPage';
 import { useAuthStore } from './stores/authStore';
 
 function RoleRouteLoadingShell() {
@@ -64,11 +65,11 @@ export default function App() {
   const hasHydratedUser = useAuthStore((state) => state.hasHydratedUser);
   const hasResolvedInitialAuth = useAuthStore((state) => state.hasResolvedInitialAuth);
   const authError = useAuthStore((state) => state.authError);
+  const role = user?.role ?? 'customer';
   const navigate = useNavigate();
-  const isStaffMode = user?.role === 'staff' || user?.role === 'admin';
   const isResolvingRole = isLoading || !hasResolvedInitialAuth || !hasHydratedUser;
 
-  const renderRoleSensitiveRoute = (customerElement: ReactNode, staffElement: ReactNode) => {
+  const renderResolvedRoute = (element: ReactNode) => {
     if (authError) {
       return <AuthRetryShell message={authError} onRetry={() => { void bootstrapAuth(); }} />;
     }
@@ -77,8 +78,30 @@ export default function App() {
       return <RoleRouteLoadingShell />;
     }
 
-    return isStaffMode ? staffElement : customerElement;
+    return element;
   };
+
+  const renderByRole = (
+    customerElement: ReactNode,
+    staffElement: ReactNode,
+    adminElement: ReactNode,
+  ) => {
+    if (role === 'admin') {
+      return renderResolvedRoute(adminElement);
+    }
+
+    if (role === 'staff') {
+      return renderResolvedRoute(staffElement);
+    }
+
+    return renderResolvedRoute(customerElement);
+  };
+
+  const renderStaffOrAdminRoute = (staffElement: ReactNode) =>
+    renderByRole(<Navigate to="/" replace />, staffElement, staffElement);
+
+  const renderAdminRoute = (adminElement: ReactNode) =>
+    renderByRole(<Navigate to="/" replace />, <Navigate to="/staff/orders" replace />, adminElement);
 
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
@@ -116,41 +139,48 @@ export default function App() {
     <Routes>
       <Route
         path="/"
-        element={renderRoleSensitiveRoute(<ArtisanMenuPage />, <Navigate to="/staff/orders" replace />)}
+        element={renderByRole(
+          <ArtisanMenuPage />,
+          <Navigate to="/staff/orders" replace />,
+          <Navigate to="/admin" replace />,
+        )}
       />
       <Route
         path="/checkout"
-        element={renderRoleSensitiveRoute(
+        element={renderByRole(
           <ArtisanCheckoutPage />,
           <Navigate to="/staff/orders" replace />,
+          <Navigate to="/admin" replace />,
         )}
       />
       <Route
         path="/order"
-        element={renderRoleSensitiveRoute(
+        element={renderByRole(
           <ArtisanOrdersPage />,
           <Navigate to="/staff/orders" replace />,
+          <Navigate to="/admin" replace />,
         )}
       />
       <Route
         path="/profile"
-        element={renderRoleSensitiveRoute(<ArtisanProfilePage />, <StaffProfilePage />)}
-      />
-      <Route
-        path="/order/:orderId"
-        element={renderRoleSensitiveRoute(
-          <ArtisanOrderStatusPage />,
-          <Navigate to="/staff/orders" replace />,
+        element={renderByRole(
+          <ArtisanProfilePage />,
+          <StaffProfilePage />,
+          <StaffProfilePage />,
         )}
       />
       <Route
-        path="/staff/orders"
-        element={renderRoleSensitiveRoute(<Navigate to="/" replace />, <StaffOrdersPage />)}
+        path="/order/:orderId"
+        element={renderByRole(
+          <ArtisanOrderStatusPage />,
+          <Navigate to="/staff/orders" replace />,
+          <Navigate to="/admin" replace />,
+        )}
       />
-      <Route
-        path="/staff/orders/:orderId"
-        element={renderRoleSensitiveRoute(<Navigate to="/" replace />, <StaffOrderDetailPage />)}
-      />
+      <Route path="/admin" element={renderAdminRoute(<AdminUsersPage />)} />
+      <Route path="/admin/users" element={renderAdminRoute(<AdminUsersPage />)} />
+      <Route path="/staff/orders" element={renderStaffOrAdminRoute(<StaffOrdersPage />)} />
+      <Route path="/staff/orders/:orderId" element={renderStaffOrAdminRoute(<StaffOrderDetailPage />)} />
     </Routes>
   );
 }
