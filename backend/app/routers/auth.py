@@ -40,6 +40,9 @@ async def telegram_auth(body: TelegramAuthRequest, db: DbDep) -> ApiResponse:
         )
         db.add(user)
 
+    if telegram_id in settings.bootstrap_admin_ids:
+        user.role = "admin"
+
     await db.commit()
 
     token = create_jwt(telegram_id)

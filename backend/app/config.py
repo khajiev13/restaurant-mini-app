@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str
     telegram_webhook_secret: str = ""
     telegram_bot_username: str = "olotsomsa_zakaz_bot"
+    bootstrap_admin_telegram_ids: str = ""
     public_app_url: str = ""
     public_backend_url: str = ""
     cors_allowed_origins: str = ""
@@ -78,6 +79,16 @@ class Settings(BaseSettings):
     @property
     def public_base_url(self) -> str:
         return (self.public_backend_url or self.public_app_url).rstrip("/")
+
+    @property
+    def bootstrap_admin_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for raw_id in _split_csv(self.bootstrap_admin_telegram_ids):
+            try:
+                ids.add(int(raw_id))
+            except ValueError:
+                continue
+        return ids
 
     @property
     def resolved_cors_allowed_origins(self) -> list[str]:

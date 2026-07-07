@@ -17,6 +17,7 @@ class UserResponse(BaseModel):
     username: str | None = None
     phone_number: str | None = None
     language: str = "uz"
+    role: str = "customer"
 
     model_config = {"from_attributes": True}
 

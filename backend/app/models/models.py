@@ -1,7 +1,16 @@
 import datetime
 import uuid
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, Numeric, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -19,6 +28,7 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(255))
     phone_number: Mapped[str | None] = mapped_column(String(50))
     language: Mapped[str] = mapped_column(String(5), default="uz")
+    role: Mapped[str] = mapped_column(String(32), default="customer")
     created_at: Mapped[datetime.datetime] = mapped_column(
         default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     )
@@ -28,7 +38,19 @@ class User(Base):
     )
 
     addresses: Mapped[list["Address"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    orders: Mapped[list["Order"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    orders: Mapped[list["Order"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="Order.user_id",
+    )
+    assigned_orders: Mapped[list["Order"]] = relationship(
+        back_populates="assigned_staff",
+        foreign_keys="Order.assigned_staff_id",
+    )
+
+    __table_args__ = (
+        CheckConstraint("role IN ('customer', 'staff', 'admin')", name="ck_users_role_valid"),
+    )
 
 
 class Address(Base):
@@ -63,6 +85,12 @@ class Order(Base):
     address_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("addresses.id", ondelete="SET NULL")
     )
+    assigned_staff_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_id", ondelete="SET NULL"),
+    )
+    assigned_at: Mapped[datetime.datetime | None] = mapped_column()
+    delivered_at: Mapped[datetime.datetime | None] = mapped_column()
     items: Mapped[dict] = mapped_column(JSONB)
     total_amount: Mapped[float] = mapped_column(Numeric(12, 2))
     delivery_fee: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
@@ -95,7 +123,15 @@ class Order(Base):
         onupdate=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
     )
 
-    user: Mapped["User"] = relationship(back_populates="orders")
+    user: Mapped["User"] = relationship(
+        back_populates="orders",
+        foreign_keys=[user_id],
+    )
+    assigned_staff: Mapped["User | None"] = relationship(
+        back_populates="assigned_orders",
+        foreign_keys=[assigned_staff_id],
+    )
+    address: Mapped["Address | None"] = relationship()
 
     __table_args__ = (
         Index("idx_orders_user_id", "user_id"),
@@ -104,6 +140,9 @@ class Order(Base):
         Index("idx_orders_payment_status", "payment_status"),
         Index("idx_orders_payment_expires_at", "payment_expires_at"),
         Index("idx_orders_multicard_payment_uuid", "multicard_payment_uuid"),
+        Index("idx_orders_assigned_staff_id", "assigned_staff_id"),
+        Index("idx_orders_delivered_at", "delivered_at"),
+        Index("idx_orders_staff_available", "status", "assigned_staff_id", "discriminator"),
     )
 
 

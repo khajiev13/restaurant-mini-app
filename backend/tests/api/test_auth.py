@@ -41,3 +41,27 @@ async def test_auth_upserts_existing_user(client):
         r2 = await client.post("/api/auth/telegram", json={"init_data": "mocked"})
         assert r2.status_code == 200
         assert "access_token" in r2.json()["data"]
+
+
+@pytest.mark.asyncio
+async def test_auth_bootstraps_configured_admin(client, monkeypatch):
+    fake_user = {
+        "id": 424242,
+        "first_name": "Admin",
+        "last_name": "User",
+        "username": "adminuser",
+    }
+    monkeypatch.setattr("app.config.settings.bootstrap_admin_telegram_ids", "424242")
+
+    with patch("app.routers.auth.validate_init_data", return_value=fake_user):
+        auth_response = await client.post("/api/auth/telegram", json={"init_data": "mocked"})
+
+    token = auth_response.json()["data"]["access_token"]
+    me_response = await client.get(
+        "/api/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert auth_response.status_code == 200
+    assert me_response.status_code == 200
+    assert me_response.json()["data"]["role"] == "admin"
