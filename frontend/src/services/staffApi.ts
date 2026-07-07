@@ -1,6 +1,6 @@
 import type { AxiosResponse } from 'axios';
 import api from './api';
-import type { ApiResponse, User } from '../types/api';
+import type { ApiResponse } from '../types/api';
 import type { StaffOrder } from '../types/staff';
 
 export const getAvailableStaffOrders = (): Promise<AxiosResponse<ApiResponse<StaffOrder[]>>> =>
@@ -21,13 +21,3 @@ export const takeStaffOrder = (id: string): Promise<AxiosResponse<ApiResponse<St
 export const markStaffOrderDelivered = (
   id: string,
 ): Promise<AxiosResponse<ApiResponse<StaffOrder>>> => api.post(`/staff/orders/${id}/delivered`);
-
-export const searchAdminUsers = (
-  query: string,
-): Promise<AxiosResponse<ApiResponse<User[]>>> => api.get('/admin/users', { params: { query } });
-
-export const updateAdminUserRole = (
-  telegramId: number,
-  role: User['role'],
-): Promise<AxiosResponse<ApiResponse<User>>> =>
-  api.patch(`/admin/users/${telegramId}/role`, { role });
