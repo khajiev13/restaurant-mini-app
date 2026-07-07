@@ -114,9 +114,11 @@ export const useAuthStore = create<AuthState>((set, get) => {
             localStorage.setItem('i18nextLng', lang);
           }
         } catch {
-          // Non-critical: keep current language if profile fetch fails
+          localStorage.removeItem('jwt');
           set({
+            token: null,
             user: null,
+            isAuthenticated: false,
             hasHydratedUser: true,
             hasResolvedInitialAuth: true,
           });
