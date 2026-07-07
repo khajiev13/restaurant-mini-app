@@ -541,7 +541,6 @@ Create `backend/tests/api/test_staff_delivery.py`:
 
 ```python
 import datetime
-import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -645,8 +644,12 @@ async def test_staff_can_take_available_order(client, db_session):
 async def test_staff_cannot_take_second_active_order(client, db_session):
     customer = await _create_user(db_session, 706, "customer")
     staff = await _create_user(db_session, 707, "staff")
-    active_order = await _create_delivery_order(db_session, customer, assigned_staff_id=staff.telegram_id)
-    active_order.assigned_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    await _create_delivery_order(
+        db_session,
+        customer,
+        assigned_staff_id=staff.telegram_id,
+        assigned_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+    )
     second_order = await _create_delivery_order(db_session, customer, order_number="B2-110")
     await db_session.commit()
 
@@ -1279,7 +1282,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 @router.get("/users")
-async def search_users(query: str = "", current_user: CurrentUserDep = None, db: DbDep = None) -> ApiResponse:
+async def search_users(current_user: CurrentUserDep, db: DbDep, query: str = "") -> ApiResponse:
     users = await admin_user_service.search_users(db, current_user, query)
     return ApiResponse(success=True, data=[UserResponse.model_validate(user).model_dump() for user in users])
 
