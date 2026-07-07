@@ -10,6 +10,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -143,6 +144,16 @@ class Order(Base):
         Index("idx_orders_assigned_staff_id", "assigned_staff_id"),
         Index("idx_orders_delivered_at", "delivered_at"),
         Index("idx_orders_staff_available", "status", "assigned_staff_id", "discriminator"),
+        Index(
+            "uq_orders_one_active_delivery_per_staff",
+            "assigned_staff_id",
+            unique=True,
+            postgresql_where=text(
+                "assigned_staff_id IS NOT NULL "
+                "AND delivered_at IS NULL "
+                "AND status NOT IN ('DELIVERED', 'CANCELLED', 'CANCELED')"
+            ),
+        ),
     )
 
 
