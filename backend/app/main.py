@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import settings
-from app.routers import addresses, auth, geocoding, menu, orders, users, webhooks
+from app.routers import addresses, auth, geocoding, menu, orders, staff, users, webhooks
 
 logger = logging.getLogger(__name__)
 PAYMENTS_EXPIRY_LOCK_ID = 841_337_204
@@ -200,6 +200,7 @@ app.include_router(users.router, prefix="/api")
 app.include_router(addresses.router, prefix="/api")
 app.include_router(geocoding.router, prefix="/api")
 app.include_router(orders.router, prefix="/api")
+app.include_router(staff.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
 
 

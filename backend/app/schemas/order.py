@@ -60,3 +60,88 @@ class OrderStatusResponse(BaseModel):
     payment_status: str | None = None
     payment_expires_at: datetime.datetime | None = None
     multicard_receipt_url: str | None = None
+
+
+class StaffCustomerResponse(BaseModel):
+    telegram_id: int
+    first_name: str
+    last_name: str | None = None
+    phone_number: str | None = None
+
+
+class StaffAddressResponse(BaseModel):
+    full_address: str
+    latitude: str | None = None
+    longitude: str | None = None
+    entrance: str | None = None
+    apartment: str | None = None
+    floor: str | None = None
+    courier_instructions: str | None = None
+
+
+class StaffSummaryResponse(BaseModel):
+    telegram_id: int
+    first_name: str
+    last_name: str | None = None
+
+
+class StaffOrderResponse(BaseModel):
+    id: uuid.UUID
+    order_number: str | None = None
+    status: str
+    created_at: datetime.datetime
+    status_updated_at: datetime.datetime | None = None
+    assigned_at: datetime.datetime | None = None
+    delivered_at: datetime.datetime | None = None
+    customer: StaffCustomerResponse
+    address: StaffAddressResponse
+    items: list[dict]
+    total_amount: float
+    delivery_fee: float
+    payment_method: str
+    payment_status: str | None = None
+    assigned_staff: StaffSummaryResponse | None = None
+
+
+def build_staff_order_response(order) -> StaffOrderResponse:
+    address = order.address
+    assigned_staff = order.assigned_staff
+
+    return StaffOrderResponse(
+        id=order.id,
+        order_number=order.order_number,
+        status=order.status,
+        created_at=order.created_at,
+        status_updated_at=order.status_updated_at,
+        assigned_at=order.assigned_at,
+        delivered_at=order.delivered_at,
+        customer=StaffCustomerResponse(
+            telegram_id=order.user.telegram_id,
+            first_name=order.user.first_name,
+            last_name=order.user.last_name,
+            phone_number=order.user.phone_number,
+        ),
+        address=StaffAddressResponse(
+            full_address=address.full_address if address else "",
+            latitude=address.latitude if address else None,
+            longitude=address.longitude if address else None,
+            entrance=address.entrance if address else None,
+            apartment=address.apartment if address else None,
+            floor=address.floor if address else None,
+            courier_instructions=address.courier_instructions if address else None,
+        ),
+        items=order.items,
+        total_amount=float(order.total_amount),
+        delivery_fee=float(order.delivery_fee),
+        payment_method=order.payment_method,
+        payment_status=order.payment_status,
+        assigned_staff=(
+            StaffSummaryResponse(
+                telegram_id=assigned_staff.telegram_id,
+                first_name=assigned_staff.first_name,
+                last_name=assigned_staff.last_name,
+            )
+            if assigned_staff
+            else None
+        ),
+    )
