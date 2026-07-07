@@ -1,10 +1,12 @@
-import { render } from '@testing-library/react';
+import { cleanup, render } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
 const authState = vi.hoisted(() => ({
   authenticate: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  user: null as { role: string } | null,
+  isLoading: false,
 }));
 
 vi.mock('./stores/authStore', () => ({
@@ -31,9 +33,24 @@ vi.mock('./pages/artisan/ArtisanOrderStatusPage', () => ({
   default: () => <div>Artisan order status page</div>,
 }));
 
+vi.mock('./pages/staff/StaffOrdersPage', () => ({
+  default: () => <div>Staff orders page</div>,
+}));
+
+vi.mock('./pages/staff/StaffOrderDetailPage', () => ({
+  default: () => <div>Staff order detail page</div>,
+}));
+
+vi.mock('./pages/staff/StaffProfilePage', () => ({
+  default: () => <div>Staff profile page</div>,
+}));
+
 describe('App', () => {
   beforeEach(() => {
+    cleanup();
     authState.authenticate.mockClear();
+    authState.user = null;
+    authState.isLoading = false;
     localStorage.clear();
     delete (window as Window & { Telegram?: unknown }).Telegram;
   });
@@ -59,6 +76,66 @@ describe('App', () => {
 
     expect(view.getByText('Artisan menu page')).toBeInTheDocument();
     expect(authState.authenticate).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes staff users from home to staff orders', () => {
+    authState.user = { role: 'staff' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff orders page')).toBeInTheDocument();
+  });
+
+  it('routes staff users from profile to the staff profile shell', () => {
+    authState.user = { role: 'staff' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/profile']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff profile page')).toBeInTheDocument();
+  });
+
+  it('renders the staff order detail route for admin users', () => {
+    authState.user = { role: 'admin' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/staff/orders/abc-123']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff order detail page')).toBeInTheDocument();
+  });
+
+  it('routes staff users away from checkout to staff orders', () => {
+    authState.user = { role: 'staff' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff orders page')).toBeInTheDocument();
+  });
+
+  it('routes staff users away from customer order detail to staff orders', () => {
+    authState.user = { role: 'admin' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/order/abc-123']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff orders page')).toBeInTheDocument();
   });
 
   it('initializes Telegram WebApp chrome when available', () => {

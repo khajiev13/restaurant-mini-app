@@ -1,15 +1,20 @@
 import { useEffect } from 'react';
-import { Route, Routes, useNavigate } from 'react-router-dom';
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import ArtisanMenuPage from './pages/artisan/ArtisanMenuPage';
 import ArtisanCheckoutPage from './pages/artisan/ArtisanCheckoutPage';
 import ArtisanProfilePage from './pages/artisan/ArtisanProfilePage';
 import ArtisanOrderStatusPage from './pages/artisan/ArtisanOrderStatusPage';
 import ArtisanOrdersPage from './pages/artisan/ArtisanOrdersPage';
+import StaffOrdersPage from './pages/staff/StaffOrdersPage';
+import StaffOrderDetailPage from './pages/staff/StaffOrderDetailPage';
+import StaffProfilePage from './pages/staff/StaffProfilePage';
 import { useAuthStore } from './stores/authStore';
 
 export default function App() {
   const authenticate = useAuthStore((state) => state.authenticate);
+  const user = useAuthStore((state) => state.user);
   const navigate = useNavigate();
+  const isStaffMode = user?.role === 'staff' || user?.role === 'admin';
 
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
@@ -47,11 +52,34 @@ export default function App() {
 
   return (
     <Routes>
-      <Route path="/" element={<ArtisanMenuPage />} />
-      <Route path="/checkout" element={<ArtisanCheckoutPage />} />
-      <Route path="/order" element={<ArtisanOrdersPage />} />
-      <Route path="/profile" element={<ArtisanProfilePage />} />
-      <Route path="/order/:orderId" element={<ArtisanOrderStatusPage />} />
+      <Route
+        path="/"
+        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanMenuPage />}
+      />
+      <Route
+        path="/checkout"
+        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanCheckoutPage />}
+      />
+      <Route
+        path="/order"
+        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanOrdersPage />}
+      />
+      <Route
+        path="/profile"
+        element={isStaffMode ? <StaffProfilePage /> : <ArtisanProfilePage />}
+      />
+      <Route
+        path="/order/:orderId"
+        element={isStaffMode ? <Navigate to="/staff/orders" replace /> : <ArtisanOrderStatusPage />}
+      />
+      <Route
+        path="/staff/orders"
+        element={isStaffMode ? <StaffOrdersPage /> : <Navigate to="/" replace />}
+      />
+      <Route
+        path="/staff/orders/:orderId"
+        element={isStaffMode ? <StaffOrderDetailPage /> : <Navigate to="/" replace />}
+      />
     </Routes>
   );
 }

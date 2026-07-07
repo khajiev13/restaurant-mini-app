@@ -15,6 +15,7 @@ export interface User {
   photo_url?: string | null;
   phone_number: string | null;
   language: string;
+  role: 'customer' | 'staff' | 'admin';
 }
 
 export interface Address {

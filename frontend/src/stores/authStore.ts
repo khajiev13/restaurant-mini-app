@@ -1,17 +1,21 @@
 import { create } from 'zustand';
 import { authenticateTelegram, getMe } from '../services/api';
 import i18n from '../i18n';
+import type { User } from '../types/api';
 
 interface AuthState {
   token: string | null;
+  user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   authenticate: () => Promise<void>;
+  refreshMe: () => Promise<User | null>;
   logout: () => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
   token: localStorage.getItem('jwt'),
+  user: null,
   isAuthenticated: !!localStorage.getItem('jwt'),
   isLoading: false,
 
@@ -33,7 +37,9 @@ export const useAuthStore = create<AuthState>((set) => ({
       // Sync language preference from server
       try {
         const meRes = await getMe();
-        const lang = meRes.data.data?.language;
+        const me = meRes.data.data;
+        set({ user: me });
+        const lang = me?.language;
         if (lang && lang !== i18n.language) {
           await i18n.changeLanguage(lang);
           localStorage.setItem('i18nextLng', lang);
@@ -43,14 +49,26 @@ export const useAuthStore = create<AuthState>((set) => ({
       }
     } catch (err) {
       console.error('Auth failed:', err);
+      set({ user: null });
     } finally {
       set({ isLoading: false });
+    }
+  },
+
+  refreshMe: async () => {
+    try {
+      const meRes = await getMe();
+      const user = meRes.data.data;
+      set({ user });
+      return user;
+    } catch {
+      return null;
     }
   },
 
   logout: () => {
     localStorage.removeItem('jwt');
     localStorage.setItem('manual_logout', '1');
-    set({ token: null, isAuthenticated: false, isLoading: false });
+    set({ token: null, user: null, isAuthenticated: false, isLoading: false });
   },
 }));
