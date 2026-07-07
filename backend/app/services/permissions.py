@@ -16,5 +16,17 @@ def require_role(user: User, allowed_roles: set[str]) -> None:
         )
 
 
+def require_staff(user: User) -> None:
+    require_role(user, STAFF_ROLES)
+
+
+def require_admin(user: User) -> None:
+    require_role(user, {ROLE_ADMIN})
+
+
 def is_staff_role(user: User) -> bool:
     return user.role in STAFF_ROLES
+
+
+def is_admin(user: User) -> bool:
+    return user.role == ROLE_ADMIN
