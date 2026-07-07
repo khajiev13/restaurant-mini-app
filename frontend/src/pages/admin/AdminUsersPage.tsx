@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react';
 import StaffLayout from '../../components/staff/StaffLayout';
 import { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import { searchAdminUsers, updateAdminUserRole } from '../../services/adminApi';
+import { useAuthStore } from '../../stores/authStore';
 import type { User } from '../../types/api';
 
 const ROLE_OPTIONS: ReadonlyArray<User['role']> = ['customer', 'staff', 'admin'];
@@ -21,6 +22,8 @@ function getApiErrorMessage(error: unknown, fallback: string): string {
 }
 
 export default function AdminUsersPage() {
+  const currentAuthUser = useAuthStore((state) => state.user);
+  const refreshMe = useAuthStore((state) => state.refreshMe);
   const [query, setQuery] = useState('');
   const [users, setUsers] = useState<User[]>([]);
   const [selectedRoles, setSelectedRoles] = useState<Record<number, User['role']>>({});
@@ -43,6 +46,8 @@ export default function AdminUsersPage() {
       );
       setHasSearched(true);
     } catch (searchError) {
+      setUsers([]);
+      setSelectedRoles({});
       setError(getApiErrorMessage(searchError, 'Could not search users. Try again.'));
     } finally {
       setIsSearching(false);
@@ -77,6 +82,9 @@ export default function AdminUsersPage() {
         ...currentRoles,
         [updatedUser.telegram_id]: updatedUser.role,
       }));
+      if (updatedUser.telegram_id === currentAuthUser?.telegram_id) {
+        await refreshMe();
+      }
       setMessage('Role updated.');
     } catch (saveError) {
       setError(getApiErrorMessage(saveError, 'Could not update this role. Try again.'));

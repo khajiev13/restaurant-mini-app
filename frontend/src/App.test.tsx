@@ -208,6 +208,32 @@ describe('App', () => {
     expect(view.queryByText('Admin users page')).not.toBeInTheDocument();
   });
 
+  it('renders the explicit admin users route for admin users', () => {
+    authState.user = { role: 'admin' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/admin/users']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Admin users page')).toBeInTheDocument();
+    expect(view.queryByText('Staff orders page')).not.toBeInTheDocument();
+  });
+
+  it('routes staff users away from explicit admin users route to staff orders', () => {
+    authState.user = { role: 'staff' };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/admin/users']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Staff orders page')).toBeInTheDocument();
+    expect(view.queryByText('Admin users page')).not.toBeInTheDocument();
+  });
+
   it('routes customer users away from admin routes to home', () => {
     authState.user = { role: 'customer' };
 
