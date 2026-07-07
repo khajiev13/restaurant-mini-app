@@ -30,6 +30,9 @@
   - Owns admin API helpers: `searchAdminUsers(query)` and `updateAdminUserRole(telegramId, role)`.
   - Consumes the shared Axios `api` client from `frontend/src/services/api.ts`.
 
+- Create `frontend/src/services/adminApi.test.ts`
+  - Covers the admin API helper request paths and payloads.
+
 - Modify `frontend/src/services/staffApi.ts`
   - Remove unused admin helper exports from the staff delivery service module.
   - Keep only staff delivery API calls.
@@ -65,6 +68,7 @@
 
 **Files:**
 - Create: `frontend/src/services/adminApi.ts`
+- Create: `frontend/src/services/adminApi.test.ts`
 - Modify: `frontend/src/services/staffApi.ts`
 
 **Interfaces:**
@@ -73,7 +77,61 @@
   - `searchAdminUsers(query: string): Promise<AxiosResponse<ApiResponse<User[]>>>`
   - `updateAdminUserRole(telegramId: number, role: User['role']): Promise<AxiosResponse<ApiResponse<User>>>`
 
-- [ ] **Step 1: Create the admin API module**
+- [ ] **Step 1: Write failing admin API helper tests**
+
+Create `frontend/src/services/adminApi.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { searchAdminUsers, updateAdminUserRole } from './adminApi';
+
+const apiMocks = vi.hoisted(() => ({
+  get: vi.fn(),
+  patch: vi.fn(),
+}));
+
+vi.mock('./api', () => ({
+  default: apiMocks,
+}));
+
+describe('adminApi', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('searches admin users by query', async () => {
+    apiMocks.get.mockResolvedValue({ data: { data: [] } });
+
+    await searchAdminUsers('8613269797807');
+
+    expect(apiMocks.get).toHaveBeenCalledWith('/admin/users', {
+      params: { query: '8613269797807' },
+    });
+  });
+
+  it('updates a user role', async () => {
+    apiMocks.patch.mockResolvedValue({ data: { data: { role: 'staff' } } });
+
+    await updateAdminUserRole(992208572, 'staff');
+
+    expect(apiMocks.patch).toHaveBeenCalledWith('/admin/users/992208572/role', {
+      role: 'staff',
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail before implementation**
+
+Run:
+
+```bash
+cd frontend && npm test -- src/services/adminApi.test.ts
+```
+
+Expected: FAIL because `frontend/src/services/adminApi.ts` does not exist.
+
+- [ ] **Step 3: Create the admin API module**
 
 Create `frontend/src/services/adminApi.ts`:
 
@@ -93,7 +151,7 @@ export const updateAdminUserRole = (
   api.patch(`/admin/users/${telegramId}/role`, { role });
 ```
 
-- [ ] **Step 2: Remove admin helpers from the staff API module**
+- [ ] **Step 4: Remove admin helpers from the staff API module**
 
 In `frontend/src/services/staffApi.ts`, remove the `User` import and the two admin exports. The file should keep this shape:
 
@@ -123,20 +181,20 @@ export const markStaffOrderDelivered = (
 ): Promise<AxiosResponse<ApiResponse<StaffOrder>>> => api.post(`/staff/orders/${id}/delivered`);
 ```
 
-- [ ] **Step 3: Verify TypeScript sees the split**
+- [ ] **Step 5: Verify tests and TypeScript see the split**
 
 Run:
 
 ```bash
-cd frontend && npm run typecheck
+cd frontend && npm test -- src/services/adminApi.test.ts && npm run typecheck
 ```
 
 Expected: command exits `0`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/src/services/adminApi.ts frontend/src/services/staffApi.ts
+git add frontend/src/services/adminApi.ts frontend/src/services/adminApi.test.ts frontend/src/services/staffApi.ts
 git commit -m "refactor: separate admin api helpers"
 ```
 
@@ -234,6 +292,7 @@ describe('AdminUsersPage', () => {
   });
 
   it('shows an empty state when no users match', async () => {
+    const user = userEvent.setup();
     apiMocks.searchAdminUsers.mockResolvedValue({ data: { data: [] } });
 
     render(
@@ -241,6 +300,8 @@ describe('AdminUsersPage', () => {
         <AdminUsersPage />
       </MemoryRouter>,
     );
+
+    await user.click(screen.getByRole('button', { name: 'Search' }));
 
     expect(await screen.findByText('No users found')).toBeInTheDocument();
   });
