@@ -18,9 +18,223 @@ TEST_ONLINE_ORDER_ID = "44444444-4444-4444-8444-444444444444"
 TEST_UUID_KEY = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 TEST_UUID_V7 = "018f47a0-7b1c-7def-8abc-0123456789ab"
 
+# Captured from the notebook's authentic saved dry run before live evidence replaced it.
+AUTHENTIC_DRY_PROBE_OUTPUTS_JSON = r"""
+[
+  [{"name": "stdout", "output_type": "stream", "text": ["Configuration loaded; deployed target requires the second live-read flag.\n", "Live reads enabled: False\n", "Deployed reads enabled: False\n"]}],
+  [{"name": "stdout", "output_type": "stream", "text": ["Offline safety self-checks passed.\n"]}],
+  [{"name": "stdout", "output_type": "stream", "text": ["Dry run: authentication and all network requests are skipped.\n"]}],
+  [{"name": "stdout", "output_type": "stream", "text": ["Dry run documented route names: ['restaurants', 'payment_methods', 'menu_composition', 'halls_and_tables']\n", "Dry run dummy-order route count: 4\n"]}],
+  [{"name": "stdout", "output_type": "stream", "text": ["Dry run booking GET route count: 88\n"]}],
+  [{"data": {"text/markdown": ["# AliPOS Table Booking Discovery\n", "\n", "**Mode:** dry run; no AliPOS API request was sent.\n", "\n", "Planned GET routes: 96\n", "\n", "Live execution requires both explicit AliPOS read flags."], "text/plain": ["<IPython.core.display.Markdown object>"]}, "metadata": {}, "output_type": "display_data"}]
+]
+"""
+
+SAVED_STREAM_TEXT_CONTRACTS = {
+    "dry": (
+        r"Configuration loaded; deployed target requires the second live-read flag\.\n"
+        r"Live reads enabled: False\nDeployed reads enabled: False\n",
+        r"Offline safety self-checks passed\.\n",
+        r"Dry run: authentication and all network requests are skipped\.\n",
+        r"Dry run documented route names: \['restaurants', 'payment_methods', "
+        r"'menu_composition', 'halls_and_tables'\]\n"
+        r"Dry run dummy-order route count: 4\n",
+        r"Dry run booking GET route count: [1-9][0-9]*\n",
+    ),
+    "live": (
+        r"Configuration loaded; deployed target requires the second live-read flag\.\n"
+        r"Live reads enabled: True\nDeployed reads enabled: True\n",
+        r"Offline safety self-checks passed\.\n",
+        r"AliPOS authentication succeeded; token output is suppressed\.\n",
+        r"Documented and dummy-order GET probes completed\.\n",
+        r"Booking discovery completed within request budget: ([0-9]+)\n",
+    ),
+}
+
+OPPOSITE_MODE_MARKERS = {
+    "dry": ("Live reads enabled: True", "Deployed reads enabled: True", "AliPOS authentication succeeded", "Documented and dummy-order GET probes completed", "Booking discovery completed", "**Mode:** live"),
+    "live": ("Live reads enabled: False", "Deployed reads enabled: False", "Dry run", "**Mode:** dry run"),
+}
+SAVED_OUTPUT_PRIVACY_PATTERNS = (
+    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+    r"\+?998[0-9 ()-]{9,16}",
+    r"(?i)\bBearer\s+",
+    r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+    r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b",
+    r"(?i)\b(?:token|access[_-]?token|refresh[_-]?token|id[_-]?token|jwt|api[_-]?key|client[_-]?secret|password|credentials?)\b[\\\"']*\s*(?::|=)",
+)
+
 
 def load_notebook() -> dict:
     return json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+
+
+def saved_probe_outputs(notebook: dict) -> list[list[dict]]:
+    return [
+        cell.get("outputs", [])
+        for cell in notebook["cells"]
+        if "probe-live" in cell.get("metadata", {}).get("tags", [])
+    ]
+
+
+def authentic_dry_probe_outputs() -> list[list[dict]]:
+    return json.loads(AUTHENTIC_DRY_PROBE_OUTPUTS_JSON)
+
+
+def authentic_live_probe_outputs() -> list[list[dict]]:
+    return saved_probe_outputs(load_notebook())
+
+
+def tamper_saved_probe_outputs(outputs: list[list[dict]], corruption: str) -> None:
+    injections = {
+        "live-plus-one-dry-marker": (
+            2,
+            "Dry run: authentication and all network requests are skipped.\n",
+        ),
+        "dry-plus-one-live-marker": (
+            2,
+            "AliPOS authentication succeeded; token output is suppressed.\n",
+        ),
+        "email-injection": (1, "operator@example.test\n"),
+        "opaque-token-field-injection": (1, "access_token = opaque-value\n"),
+        "jwt-injection": (1, "jwt=eyJhbGciOiJIUzI1NiJ9.payload.signature\n"),
+    }
+    if corruption in injections:
+        cell_index, text = injections[corruption]
+        outputs[cell_index][0]["text"].append(text)
+    elif corruption == "missing-dry-report":
+        outputs[5].clear()
+    elif corruption == "appended-raw-body-output":
+        outputs[3].append(
+            {"name": "stdout", "output_type": "stream", "text": ['{"raw": true}\n']}
+        )
+    elif corruption == "unexpected-mime":
+        outputs[5][0]["data"]["application/json"] = {"status": "ok"}
+    elif corruption == "unexpected-output-type":
+        outputs[5][0].update(output_type="execute_result", execution_count=11)
+    elif corruption == "request-count-over-budget":
+        outputs[4][0]["text"] = ["Booking discovery completed within request budget: 121\n"]
+    elif corruption == "classification-total-mismatch":
+        lines = outputs[5][0]["data"]["text/markdown"]
+        index = next(i for i, line in enumerate(lines) if line.startswith("- confirmed:"))
+        lines[index] = f"- confirmed: {int(lines[index].split(':')[1]) + 1}\n"
+    else:
+        raise AssertionError(f"unknown saved-output corruption: {corruption}")
+
+
+def live_report_matches_contract(report: str, expected_route_count: int) -> bool:
+    required_markers = (
+        "# AliPOS Table Booking Discovery",
+        "**Mode:** live read-only probe.",
+        "## Classification counts",
+        "## Route results",
+        "| Method | Route | Status | Classification | Shape |",
+        "## Conclusion",
+        "Halls and tables alone do not confirm reservation support.",
+    )
+    classification_names = (
+        "confirmed",
+        "unsupported",
+        "unauthorized/forbidden",
+        "invalid test data",
+        "ambiguous",
+        "skipped",
+    )
+    counts = re.findall(
+        r"^- (confirmed|unsupported|unauthorized/forbidden|invalid test data|ambiguous|skipped): ([0-9]+)$",
+        report,
+        re.MULTILINE,
+    )
+    route_rows = re.findall(
+        r"^\| (?:GET|OPTIONS) \| `/[^`]+` \| (?:[1-5][0-9]{2}|network-error) \| "
+        r"(?:confirmed|unsupported|unauthorized/forbidden|invalid test data|ambiguous|skipped) \| `.*` \|$",
+        report,
+        re.MULTILINE,
+    )
+    return (
+        all(report.count(marker) == 1 for marker in required_markers)
+        and tuple(name for name, _ in counts) == classification_names
+        and len(route_rows) == sum(int(count) for _, count in counts) == expected_route_count
+        and re.search(r"^\s*[\[{].*[\]}]\s*$", report, re.MULTILINE) is None
+    )
+
+
+def validate_saved_probe_outputs(outputs_by_cell: list[list[dict]]) -> str:
+    assert isinstance(outputs_by_cell, list)
+    assert len(outputs_by_cell) == 6
+    assert all(
+        isinstance(outputs, list) and len(outputs) == 1
+        for outputs in outputs_by_cell
+    )
+
+    stream_texts = []
+    for outputs in outputs_by_cell[:5]:
+        output = outputs[0]
+        assert isinstance(output, dict)
+        assert set(output) == {"name", "output_type", "text"}
+        assert output["name"] == "stdout"
+        assert output["output_type"] == "stream"
+        assert isinstance(output["text"], list)
+        assert all(isinstance(line, str) for line in output["text"])
+        stream_texts.append("".join(output["text"]))
+
+    report_output = outputs_by_cell[5][0]
+    assert isinstance(report_output, dict)
+    assert set(report_output) == {"data", "metadata", "output_type"}
+    assert report_output["output_type"] == "display_data"
+    assert report_output["metadata"] == {}
+    assert isinstance(report_output["data"], dict)
+    assert set(report_output["data"]) == {"text/markdown", "text/plain"}
+    assert report_output["data"]["text/plain"] == [
+        "<IPython.core.display.Markdown object>"
+    ]
+    markdown_lines = report_output["data"]["text/markdown"]
+    assert isinstance(markdown_lines, list)
+    assert all(isinstance(line, str) for line in markdown_lines)
+    report = "".join(markdown_lines)
+
+    serialized = json.dumps(outputs_by_cell, ensure_ascii=False)
+    assert all(
+        re.search(pattern, serialized) is None
+        for pattern in SAVED_OUTPUT_PRIVACY_PATTERNS
+    )
+    assert "secret" not in serialized.casefold()
+    assert "error" not in serialized.casefold()
+    assert all(
+        output.get("output_type") != "error"
+        for outputs in outputs_by_cell
+        for output in outputs
+    )
+
+    dry_report = re.fullmatch(
+        r"# AliPOS Table Booking Discovery\n\n"
+        r"\*\*Mode:\*\* dry run; no AliPOS API request was sent\.\n\n"
+        r"Planned GET routes: [1-9][0-9]*\n\n"
+        r"Live execution requires both explicit AliPOS read flags\.",
+        report,
+    ) is not None
+    dry_mode = dry_report and all(
+        re.fullmatch(pattern, text) is not None
+        for pattern, text in zip(SAVED_STREAM_TEXT_CONTRACTS["dry"], stream_texts)
+    )
+    live_contracts = SAVED_STREAM_TEXT_CONTRACTS["live"]
+    live_count_match = re.fullmatch(live_contracts[4], stream_texts[4])
+    live_request_count = int(live_count_match.group(1)) if live_count_match else 0
+    live_mode = (
+        live_count_match is not None
+        and 1 <= live_request_count <= 120
+        and all(
+            re.fullmatch(pattern, text) is not None
+            for pattern, text in zip(live_contracts[:4], stream_texts[:4])
+        )
+        and live_report_matches_contract(report, live_request_count)
+    )
+    mode_matches = [mode for mode, matches in (("dry", dry_mode), ("live", live_mode)) if matches]
+    assert len(mode_matches) == 1
+
+    mode = mode_matches[0]
+    assert all(marker not in serialized for marker in OPPOSITE_MODE_MARKERS[mode])
+    return mode
 
 
 def load_probe_namespace() -> dict:
@@ -924,41 +1138,55 @@ def test_live_cells_end_in_safe_outputs_and_do_not_display_raw_objects() -> None
             )
 
 
+@pytest.mark.parametrize(
+    ("expected_mode", "outputs_factory"),
+    (
+        pytest.param("dry", authentic_dry_probe_outputs, id="authentic-dry"),
+        pytest.param("live", authentic_live_probe_outputs, id="authentic-live"),
+    ),
+)
+def test_saved_output_contract_accepts_complete_authentic_mode(
+    expected_mode: str,
+    outputs_factory,
+) -> None:
+    assert validate_saved_probe_outputs(outputs_factory()) == expected_mode
+
+
+@pytest.mark.parametrize(
+    ("base_mode", "corruption"),
+    (
+        pytest.param("dry", "missing-dry-report", id="missing-dry-report"),
+        pytest.param("live", "live-plus-one-dry-marker", id="live-plus-one-dry-marker"),
+        pytest.param("dry", "dry-plus-one-live-marker", id="dry-plus-one-live-marker"),
+        pytest.param("live", "email-injection", id="email-injection"),
+        pytest.param("live", "opaque-token-field-injection", id="opaque-token-field-injection"),
+        pytest.param("dry", "jwt-injection", id="jwt-injection"),
+        pytest.param("live", "appended-raw-body-output", id="appended-raw-body-output"),
+        pytest.param("live", "unexpected-mime", id="unexpected-mime"),
+        pytest.param("live", "unexpected-output-type", id="unexpected-output-type"),
+        pytest.param("live", "request-count-over-budget", id="request-count-over-budget"),
+        pytest.param("live", "classification-total-mismatch", id="classification-total-mismatch"),
+    ),
+)
+def test_saved_output_contract_rejects_tampered_artifacts(
+    base_mode: str,
+    corruption: str,
+) -> None:
+    outputs = (
+        authentic_dry_probe_outputs()
+        if base_mode == "dry"
+        else authentic_live_probe_outputs()
+    )
+    tamper_saved_probe_outputs(outputs, corruption)
+
+    with pytest.raises(AssertionError):
+        validate_saved_probe_outputs(outputs)
+
+
 def test_saved_outputs_use_one_safe_authentic_mode() -> None:
-    notebook = load_notebook()
-    outputs = [
-        output
-        for cell in notebook["cells"]
-        if "probe-live" in cell.get("metadata", {}).get("tags", [])
-        for output in cell.get("outputs", [])
-    ]
-    serialized = json.dumps(outputs, ensure_ascii=False)
+    outputs_by_cell = saved_probe_outputs(load_notebook())
 
-    dry_mode = all(
-        marker in serialized
-        for marker in (
-            "Dry run: authentication and all network requests are skipped.",
-            "Live reads enabled: False",
-            "Deployed reads enabled: False",
-        )
-    )
-    live_mode = all(
-        marker in serialized
-        for marker in (
-            "AliPOS authentication succeeded; token output is suppressed.",
-            "Live reads enabled: True",
-            "Deployed reads enabled: True",
-            "**Mode:** live read-only probe.",
-        )
-    )
-
-    assert dry_mode != live_mode
-    assert re.search(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", serialized) is None
-    assert re.search(r"\+?998[0-9 ()-]{9,16}", serialized) is None
-    assert re.search(r"(?i)\bBearer\s+", serialized) is None
-    assert "secret" not in serialized.casefold()
-    assert "error" not in serialized.casefold()
-    assert all(output.get("output_type") != "error" for output in outputs)
+    assert validate_saved_probe_outputs(outputs_by_cell) in {"dry", "live"}
 
 
 def test_notebook_constructs_exactly_one_oauth_post() -> None:
