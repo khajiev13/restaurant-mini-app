@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -128,13 +129,19 @@ def test_extract_dummy_identifiers_from_saved_cell_outputs(tmp_path: Path) -> No
     assert order_ids == (TEST_CASH_ORDER_ID, TEST_ONLINE_ORDER_ID)
 
 
-def test_validate_probe_config_rejects_deployed_restaurant_id() -> None:
+def test_deployed_target_requires_second_live_flag_but_dry_run_is_allowed() -> None:
     namespace = load_probe_namespace()
     config = valid_config(namespace)
     config["dummy_restaurant_id"] = DEPLOYED_RESTAURANT_ID
+    config["live_enabled"] = True
+    config["deployed_reads_enabled"] = False
 
-    with pytest.raises(namespace["ProbeSafetyError"], match="deployed"):
-        namespace["validate_probe_config"](config)
+    namespace["validate_probe_config"](config, require_live=False)
+    with pytest.raises(namespace["ProbeSafetyError"], match="explicit authorization"):
+        namespace["validate_probe_config"](config, require_live=True)
+
+    config["deployed_reads_enabled"] = True
+    namespace["validate_probe_config"](config, require_live=True)
 
 
 def test_validate_probe_config_requires_explicit_live_flag() -> None:
@@ -748,3 +755,41 @@ def test_authentication_http_error_429_permanently_stops_transport() -> None:
     with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
         client.request("GET", "/api/Integration/v1/a", "a", "top_level")
     assert len(opener.requests) == 1
+
+
+def test_rendered_report_contains_no_raw_sensitive_values() -> None:
+    namespace = load_probe_namespace()
+    result = {
+        "name": "halls_and_tables",
+        "family": "documented",
+        "method": "GET",
+        "path": f"/api/Integration/v1/restaurant/{TEST_RESTAURANT_ID}/halls-and-tables",
+        "status": 200,
+        "latency_ms": 12.3,
+        "content_type": "application/json",
+        "allow": "GET",
+        "payload": {
+            "Halls": [{"Id": TEST_RESTAURANT_ID, "Title": "Test Hall", "phoneNumber": "+998901234567"}],
+            "Tables": [],
+        },
+        "error": "",
+    }
+
+    report = namespace["render_markdown_report"]([result])
+
+    assert "# AliPOS Table Booking Discovery" in report
+    assert "confirmed" in report
+    assert TEST_RESTAURANT_ID not in report
+    assert "+998901234567" not in report
+
+
+def test_live_cells_do_not_call_mutating_discovery_methods() -> None:
+    notebook = load_notebook()
+    live_source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if "probe-live" in cell.get("metadata", {}).get("tags", [])
+    )
+    forbidden = re.compile(r"\.request\(\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]")
+    assert forbidden.search(live_source) is None
+    assert "/api/Integration/v1/order\"" not in live_source
