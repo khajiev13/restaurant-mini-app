@@ -147,6 +147,51 @@ def test_validate_probe_config_requires_explicit_live_flag() -> None:
         namespace["validate_probe_config"](config, require_live=True)
 
 
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("timeout_seconds", 15.01),
+        ("timeout_seconds", 0),
+        ("timeout_seconds", -1),
+        ("timeout_seconds", "15"),
+        ("timeout_seconds", True),
+        ("minimum_interval_seconds", 0.249),
+        ("minimum_interval_seconds", 0),
+        ("minimum_interval_seconds", -1),
+        ("minimum_interval_seconds", "0.25"),
+        ("minimum_interval_seconds", True),
+        ("max_requests", 121),
+        ("max_requests", 0),
+        ("max_requests", -1),
+        ("max_requests", 120.0),
+        ("max_requests", "120"),
+        ("max_requests", True),
+    ],
+)
+def test_validate_probe_config_rejects_unsafe_http_limits(
+    field: str,
+    unsafe_value: object,
+) -> None:
+    namespace = load_probe_namespace()
+    config = valid_config(namespace)
+    config[field] = unsafe_value
+
+    with pytest.raises(namespace["ProbeSafetyError"], match=field):
+        namespace["validate_probe_config"](config)
+
+
+def test_validate_probe_config_accepts_stricter_http_limits() -> None:
+    namespace = load_probe_namespace()
+    config = valid_config(namespace)
+    config.update(
+        timeout_seconds=7.5,
+        minimum_interval_seconds=0.5,
+        max_requests=60,
+    )
+
+    namespace["validate_probe_config"](config)
+
+
 def test_redaction_removes_sensitive_values_and_masks_identifiers() -> None:
     namespace = load_probe_namespace()
     payload = {
@@ -382,7 +427,8 @@ def test_option_selection_prioritizes_405_then_one_404_per_family() -> None:
     assert all(route["method"] == "OPTIONS" for route in selected)
 
 
-from urllib.error import URLError
+from io import BytesIO
+from urllib.error import HTTPError, URLError
 
 
 class FakeResponse:
@@ -409,6 +455,31 @@ class FakeResponse:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         return None
+
+
+class FailingReadResponse(FakeResponse):
+    def read(self, size: int = -1) -> bytes:
+        raise OSError("synthetic body read failure")
+
+
+class FailingBytesIO(BytesIO):
+    def read(self, size: int = -1) -> bytes:
+        raise OSError("synthetic HTTPError body read failure")
+
+
+def real_http_error(
+    status: int,
+    url: str = "https://web.alipos.uz/api/Integration/v1/test",
+    body: bytes = b'{"error":"synthetic"}',
+    body_stream=None,
+) -> HTTPError:
+    return HTTPError(
+        url,
+        status,
+        "synthetic HTTP error",
+        {"Content-Type": "application/json"},
+        body_stream or BytesIO(body),
+    )
 
 
 class FakeOpener:
@@ -484,6 +555,76 @@ def test_client_rejects_cross_origin_final_url() -> None:
         client.request("GET", "/api/Integration/v1/test", "test", "unsafe")
 
 
+def test_discovery_rejects_cross_origin_http_error_before_body_read() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener(
+        [
+            real_http_error(
+                404,
+                url="https://example.test/redirected",
+                body_stream=FailingBytesIO(b"synthetic"),
+            )
+        ]
+    )
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    with pytest.raises(namespace["UnsafeRedirectError"]):
+        client.request("GET", "/api/Integration/v1/test", "test", "unsafe")
+    assert len(opener.requests) == 1
+
+
+def test_authentication_rejects_cross_origin_http_error() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener(
+        [
+            real_http_error(
+                401,
+                url="https://example.test/security/oauth/token",
+                body_stream=FailingBytesIO(b"synthetic"),
+            )
+        ]
+    )
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+
+    with pytest.raises(namespace["UnsafeRedirectError"]):
+        client.authenticate()
+    assert len(opener.requests) == 1
+
+
+def test_client_decodes_same_origin_real_urllib_http_error() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener([real_http_error(404, body=b'{"error":"missing"}')])
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    result = client.request(
+        "GET",
+        "/api/Integration/v1/test",
+        "test",
+        "documented",
+    )
+
+    assert result["status"] == 404
+    assert result["payload"] == {"error": "missing"}
+    assert result["classification"] == "unsupported"
+
+
 def test_client_does_not_retry_transport_failure() -> None:
     namespace = load_probe_namespace()
     opener = FakeOpener([URLError("synthetic failure")])
@@ -522,4 +663,88 @@ def test_client_stops_all_later_requests_after_rate_limit() -> None:
     assert result["status"] == 429
     with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
         client.request("GET", "/api/Integration/v1/b", "b", "top_level")
+    with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
+        client.authenticate()
+    assert len(opener.requests) == 1
+
+
+def test_rate_limit_stop_precedes_authentication_requirement() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener([FakeResponse(b"{}", status=429)])
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    client.request("GET", "/api/Integration/v1/a", "a", "top_level")
+    client._access_token = None
+
+    with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
+        client.request("GET", "/api/Integration/v1/b", "b", "top_level")
+    assert len(opener.requests) == 1
+
+
+def test_discovery_429_latches_before_ordinary_body_read_failure() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener([FailingReadResponse(b"", status=429)])
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    with pytest.raises(OSError, match="body read failure"):
+        client.request("GET", "/api/Integration/v1/a", "a", "top_level")
+
+    assert client.rate_limited is True
+    with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
+        client.authenticate()
+    assert len(opener.requests) == 1
+
+
+def test_discovery_http_error_429_latches_before_body_read_failure() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener(
+        [real_http_error(429, body_stream=FailingBytesIO(b"synthetic"))]
+    )
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    with pytest.raises(OSError, match="HTTPError body read failure"):
+        client.request("GET", "/api/Integration/v1/a", "a", "top_level")
+
+    assert client.rate_limited is True
+    with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
+        client.authenticate()
+    assert len(opener.requests) == 1
+
+
+def test_authentication_http_error_429_permanently_stops_transport() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener([real_http_error(429)])
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+
+    with pytest.raises(namespace["AuthenticationError"], match="429"):
+        client.authenticate()
+
+    assert client.rate_limited is True
+    with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
+        client.authenticate()
+    with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
+        client.request("GET", "/api/Integration/v1/a", "a", "top_level")
     assert len(opener.requests) == 1
