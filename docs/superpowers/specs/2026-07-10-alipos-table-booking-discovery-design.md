@@ -12,10 +12,11 @@ tables, availability, or booking routes, and some of them contain cells that can
 create real orders.
 
 The repository `.env` contains the official AliPOS client credentials and the
-deployed restaurant ID. Existing notebook outputs contain separate dummy/test
-restaurant and order IDs. The discovery notebook may authenticate with the
-official credentials, but it must never send the deployed restaurant ID in a
-probe.
+deployed restaurant ID. Verification on 2026-07-10 showed that the saved
+notebook test orders use that same restaurant ID; no alternate restaurant ID
+exists in the project notebooks. The user explicitly authorized strictly
+read-only probes against the deployed restaurant. This requires a second,
+deployment-specific opt-in flag in addition to the general live-read flag.
 
 ## Goal
 
@@ -29,7 +30,7 @@ creating or modifying any AliPOS resource.
 - Creating, changing, or canceling a reservation.
 - Creating or changing an order.
 - Testing payment or Multicard mutations.
-- Probing the deployed restaurant's resource IDs.
+- Mutating any deployed restaurant resource.
 - Persisting access tokens, full API responses, or customer data.
 - Refactoring the backend AliPOS integration.
 
@@ -53,24 +54,24 @@ The notebook will load these values from the ignored project `.env`:
 - `ALIPOS_API_BASE_URL`
 - `ALIPOS_API_CLIENT_ID`
 - `ALIPOS_API_CLIENT_SECRET`
-- `ALIPOS_RESTAURANT_ID`, used only as the deployed-ID deny value
+- `ALIPOS_RESTAURANT_ID`, used as the explicitly authorized read target
 
-The dummy restaurant and order ID candidates will be copied from the saved test
+The restaurant and test-order ID candidates will be copied from the saved test
 execution in `notebooks/alipos_support_report_ru_uz.ipynb` into a clearly
 labeled configuration cell. The order IDs must be outputs of that notebook's
-test-order cells, and the restaurant ID must differ from the current deployed
-restaurant ID. Their literal values will not appear in the design document or
-final prose report.
+test-order cells. Their literal values will not appear in the design document
+or final prose report.
 
 Before authentication or probing, the notebook will enforce all of these
 conditions:
 
-1. The dummy restaurant ID is present and has the expected identifier shape.
+1. The restaurant ID is present and has the expected identifier shape.
 2. The deployed restaurant ID is present.
-3. The dummy restaurant ID does not equal the deployed restaurant ID.
+3. If the target equals the deployed restaurant ID,
+   `ALLOW_DEPLOYED_ALIPOS_READS=1` is required.
 4. The API base URL uses HTTPS and matches the configured AliPOS host.
-5. Live probing is enabled only when `ALLOW_LIVE_ALIPOS_READS=1`. It is off by
-   default in the saved notebook.
+5. Live probing is enabled only when `ALLOW_LIVE_ALIPOS_READS=1`. Both live
+   flags are off by default in the saved notebook.
 
 If any guard fails, the notebook stops before making a network request.
 
@@ -181,7 +182,7 @@ Results are classified as:
 
 1. Purpose, warnings, and non-mutation guarantee.
 2. Imports and `.env` key loader.
-3. Dummy-ID configuration and deployed-ID guard.
+3. Saved test-ID configuration and two-key deployed-read guard.
 4. Redaction, route rendering, and result classification helpers.
 5. Synthetic self-checks for method blocking, identifier guards, route
    rendering, and redaction.
@@ -208,7 +209,8 @@ Before the live run:
 
 1. Statically inspect every request call and confirm the method allowlist.
 2. Run synthetic checks proving mutating methods are rejected.
-3. Run synthetic checks proving the deployed restaurant ID is rejected.
+3. Run synthetic checks proving the deployed restaurant ID is rejected unless
+   both explicit live-read flags are enabled.
 4. Run redaction checks with fake tokens, phone numbers, addresses, and payment
    data.
 5. Execute a dry run that renders the route inventory without network access.
@@ -231,7 +233,8 @@ with live probing disabled.
 - The official AliPOS credentials authenticate successfully without being
   displayed or persisted.
 - No request after authentication uses a mutating HTTP method.
-- The deployed restaurant ID is never sent.
+- The deployed restaurant ID is sent only when both explicit live-read flags
+  are enabled, and only in `GET`/`OPTIONS` requests.
 - Documented halls-and-tables behavior is verified against dummy/test data.
 - Booking and availability route candidates receive a reproducible status and
   classification.

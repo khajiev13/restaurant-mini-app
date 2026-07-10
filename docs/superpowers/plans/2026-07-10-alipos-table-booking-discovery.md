@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and execute a safe AliPOS notebook that verifies documented hall/table reads and probes booking-related GET routes with dummy resource IDs.
+**Goal:** Build and execute a safe AliPOS notebook that verifies documented hall/table reads and probes booking-related GET routes with saved test-order IDs.
 
-**Architecture:** Keep the implementation in one self-contained `.ipynb`. Pure helpers live in code cells tagged `probe-library`; an offline pytest harness loads only those cells, so safety, redaction, routing, and HTTP behavior can be tested without executing configuration or live-network cells. Live cells authenticate with the official `.env` credentials, reject the deployed restaurant ID, run only `GET`/`OPTIONS` after OAuth, and render sanitized results.
+**Architecture:** Keep the implementation in one self-contained `.ipynb`. Pure helpers live in code cells tagged `probe-library`; an offline pytest harness loads only those cells, so safety, redaction, routing, and HTTP behavior can be tested without executing configuration or live-network cells. Live cells authenticate with the official `.env` credentials, require two explicit flags before reading the deployed restaurant, run only `GET`/`OPTIONS` after OAuth, and render sanitized results.
 
 **Tech Stack:** Python 3.9 standard library (`json`, `urllib`, `hashlib`, `re`, `time`), nbformat 4.5 JSON, pytest 8.4.2 through `/usr/bin/python3`, and ephemeral `uv` packages (`nbconvert`, `ipykernel`) for notebook execution.
 
@@ -13,10 +13,11 @@
 - Read the approved design first: `docs/superpowers/specs/2026-07-10-alipos-table-booking-discovery-design.md`.
 - Work in the current checkout. Do not create a worktree: the source test notebook is untracked and exists only in this workspace.
 - Load official AliPOS authentication values from the ignored project `.env`; never display or persist them.
-- Treat `.env`'s `ALIPOS_RESTAURANT_ID` only as a deny value. Never send it in a route.
-- Extract dummy IDs only from saved cells 4 and 10 of `notebooks/alipos_support_report_ru_uz.ipynb`; never execute that notebook.
+- The saved test restaurant ID equals `.env`'s deployed restaurant ID. The user explicitly authorized read-only deployed probes on 2026-07-10.
+- Require both `ALLOW_LIVE_ALIPOS_READS=1` and `ALLOW_DEPLOYED_ALIPOS_READS=1` before any deployed request. Both flags remain off in the saved notebook and dry run.
+- Extract the target restaurant and test-order IDs only from saved cells 4 and 10 of `notebooks/alipos_support_report_ru_uz.ipynb`; never execute that notebook.
 - Permit exactly one mutating-method request: OAuth `POST /security/oauth/token`. After authentication, allow only `GET` and `OPTIONS`.
-- Keep `ALLOW_LIVE_ALIPOS_READS` off by default; only the live execution process may set it to `1`.
+- Keep both live-read flags off by default; only the explicitly approved live execution process may set them to `1`.
 - Run requests sequentially, wait at least 250 milliseconds between them, use a 15-second timeout, make no retries, and cap post-authentication requests at 120 including `OPTIONS`.
 - Reject redirects and any URL whose origin differs from the configured AliPOS origin.
 - Keep raw payloads in kernel memory only. Notebook outputs may contain only sanitized summaries.
@@ -1439,6 +1440,38 @@ git commit -m "feat: add read-only AliPOS probe client"
 - Consumes: all helpers and route builders from Tasks 1-4.
 - Produces: ordered `probe-live` cells, `render_markdown_report(results, dry_routes=())`, `REPORT`, and sanitized saved output.
 
+**Approved authorization amendment (2026-07-10):** The saved restaurant ID is
+the deployed restaurant ID. Before the existing Task 5 steps, add a failing
+regression proving that equality is harmless in dry mode but live construction
+requires the second explicit flag. Then add
+`DEPLOYED_LIVE_FLAG_NAME = "ALLOW_DEPLOYED_ALIPOS_READS"`, include
+`deployed_reads_enabled` in `build_probe_config`, and change the equality guard
+to:
+
+```python
+target_is_deployed = deployed_id.casefold() == dummy_id.casefold()
+if target_is_deployed and require_live and not bool(config.get("deployed_reads_enabled")):
+    raise ProbeSafetyError("Deployed restaurant reads require explicit authorization")
+```
+
+Use this regression test:
+
+```python
+def test_deployed_target_requires_second_live_flag_but_dry_run_is_allowed() -> None:
+    namespace = load_probe_namespace()
+    config = valid_config(namespace)
+    config["dummy_restaurant_id"] = DEPLOYED_RESTAURANT_ID
+    config["live_enabled"] = True
+    config["deployed_reads_enabled"] = False
+
+    namespace["validate_probe_config"](config, require_live=False)
+    with pytest.raises(namespace["ProbeSafetyError"], match="explicit authorization"):
+        namespace["validate_probe_config"](config, require_live=True)
+
+    config["deployed_reads_enabled"] = True
+    namespace["validate_probe_config"](config, require_live=True)
+```
+
 - [ ] **Step 1: Add failing report-redaction and live-cell method tests**
 
 Append:
@@ -1514,7 +1547,7 @@ def render_markdown_report(
                 "",
                 f"Planned GET routes: {len(dry_routes)}",
                 "",
-                "Live execution requires `ALLOW_LIVE_ALIPOS_READS=1`.",
+                "Live execution requires both explicit AliPOS read flags.",
             ]
         )
         return "\n".join(lines)
@@ -1573,8 +1606,9 @@ Configuration cell (`probe-live`):
 ROOT = find_repo_root()
 CONFIG = build_probe_config(ROOT)
 validate_probe_config(CONFIG, require_live=False)
-print("Configuration loaded; deployed restaurant ID is deny-listed.")
+print("Configuration loaded; deployed target requires the second live-read flag.")
 print("Live reads enabled:", CONFIG["live_enabled"])
+print("Deployed reads enabled:", CONFIG["deployed_reads_enabled"])
 ```
 
 Synthetic self-check cell (`probe-live`):
@@ -1687,7 +1721,7 @@ Expected: all tests PASS.
 Run the notebook with live reads explicitly disabled:
 
 ```bash
-ALLOW_LIVE_ALIPOS_READS=0 uv run --with nbconvert --with ipykernel jupyter nbconvert --to notebook --execute --inplace notebooks/alipos_table_booking_discovery.ipynb --ExecutePreprocessor.timeout=600 --ExecutePreprocessor.kernel_name=python3
+ALLOW_LIVE_ALIPOS_READS=0 ALLOW_DEPLOYED_ALIPOS_READS=0 uv run --with nbconvert --with ipykernel jupyter nbconvert --to notebook --execute --inplace notebooks/alipos_table_booking_discovery.ipynb --ExecutePreprocessor.timeout=600 --ExecutePreprocessor.kernel_name=python3
 ```
 
 Expected: execution succeeds, output says `Dry run`, and no AliPOS authentication request is made.
@@ -1726,7 +1760,7 @@ Expected: all tests PASS. Do not continue to the live run if any test fails.
 Run:
 
 ```bash
-ALLOW_LIVE_ALIPOS_READS=1 uv run --with nbconvert --with ipykernel jupyter nbconvert --to notebook --execute --inplace notebooks/alipos_table_booking_discovery.ipynb --ExecutePreprocessor.timeout=900 --ExecutePreprocessor.kernel_name=python3
+ALLOW_LIVE_ALIPOS_READS=1 ALLOW_DEPLOYED_ALIPOS_READS=1 uv run --with nbconvert --with ipykernel jupyter nbconvert --to notebook --execute --inplace notebooks/alipos_table_booking_discovery.ipynb --ExecutePreprocessor.timeout=900 --ExecutePreprocessor.kernel_name=python3
 ```
 
 Expected: execution exits 0, authentication reports success without a token, the request count is at most 120, and the final Markdown report contains route classifications. If authentication fails, stop and diagnose without printing `.env` values; do not treat the task as complete.
