@@ -60,8 +60,8 @@ SAVED_OUTPUT_PRIVACY_PATTERNS = (
     r"\+?998[0-9 ()-]{9,16}",
     r"(?i)\bBearer\s+",
     r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-    r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b",
-    r"(?i)\b(?:token|access[_-]?token|refresh[_-]?token|id[_-]?token|jwt|api[_-]?key|client[_-]?secret|password|credentials?)\b[\\\"']*\s*(?::|=)",
+    r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*(?![A-Za-z0-9_-])",
+    r"(?i)\b(?:token|access[_-]?token|refresh[_-]?token|id[_-]?token|jwt|api[_-]?key|client[_-]?secret|password|credentials?)\b(?:\s*\[\s*[\\\"']*[A-Za-z0-9_-]+[\\\"']*\s*\])?[\\\"']*\s*(?::|=)",
 )
 
 
@@ -85,23 +85,27 @@ def authentic_live_probe_outputs() -> list[list[dict]]:
     return saved_probe_outputs(load_notebook())
 
 
+def inject_live_route_shape(outputs: list[list[dict]], payload: str) -> None:
+    lines = outputs[5][0]["data"]["text/markdown"]
+    index = next(index for index, line in enumerate(lines) if line.startswith("| GET |"))
+    assert lines[index].endswith("` |\n")
+    lines[index] = f"{lines[index][:-4]} {payload}` |\n"
+
+
 def tamper_saved_probe_outputs(outputs: list[list[dict]], corruption: str) -> None:
-    injections = {
-        "live-plus-one-dry-marker": (
-            2,
-            "Dry run: authentication and all network requests are skipped.\n",
-        ),
-        "dry-plus-one-live-marker": (
-            2,
-            "AliPOS authentication succeeded; token output is suppressed.\n",
-        ),
-        "email-injection": (1, "operator@example.test\n"),
-        "opaque-token-field-injection": (1, "access_token = opaque-value\n"),
-        "jwt-injection": (1, "jwt=eyJhbGciOiJIUzI1NiJ9.payload.signature\n"),
+    route_shape_injections = {
+        "live-plus-one-dry-marker": "Dry run: authentication was skipped.",
+        "email-injection": "operator@example.test",
+        "opaque-token-field-injection": "access_token = opaque-value",
+        "jwt-injection": "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjMifQ.",
+        "bracket-credential-assignment": 'credentials["password"] = exposed-value',
     }
-    if corruption in injections:
-        cell_index, text = injections[corruption]
-        outputs[cell_index][0]["text"].append(text)
+    if corruption in route_shape_injections:
+        inject_live_route_shape(outputs, route_shape_injections[corruption])
+    elif corruption == "dry-plus-one-live-marker":
+        outputs[2][0]["text"].append(
+            "AliPOS authentication succeeded; token output is suppressed.\n"
+        )
     elif corruption == "missing-dry-report":
         outputs[5].clear()
     elif corruption == "appended-raw-body-output":
@@ -114,6 +118,13 @@ def tamper_saved_probe_outputs(outputs: list[list[dict]], corruption: str) -> No
         outputs[5][0].update(output_type="execute_result", execution_count=11)
     elif corruption == "request-count-over-budget":
         outputs[4][0]["text"] = ["Booking discovery completed within request budget: 121\n"]
+    elif corruption == "request-count-zero":
+        outputs[4][0]["text"] = ["Booking discovery completed within request budget: 0\n"]
+    elif corruption == "request-report-count-mismatch":
+        outputs[4][0]["text"] = ["Booking discovery completed within request budget: 112\n"]
+    elif corruption == "removed-route-row":
+        lines = outputs[5][0]["data"]["text/markdown"]
+        lines.pop(next(i for i, line in enumerate(lines) if line.startswith("| GET |")))
     elif corruption == "classification-total-mismatch":
         lines = outputs[5][0]["data"]["text/markdown"]
         index = next(i for i, line in enumerate(lines) if line.startswith("- confirmed:"))
@@ -1160,11 +1171,15 @@ def test_saved_output_contract_accepts_complete_authentic_mode(
         pytest.param("dry", "dry-plus-one-live-marker", id="dry-plus-one-live-marker"),
         pytest.param("live", "email-injection", id="email-injection"),
         pytest.param("live", "opaque-token-field-injection", id="opaque-token-field-injection"),
-        pytest.param("dry", "jwt-injection", id="jwt-injection"),
+        pytest.param("live", "jwt-injection", id="jwt-injection"),
+        pytest.param("live", "bracket-credential-assignment", id="bracket-credential-assignment"),
         pytest.param("live", "appended-raw-body-output", id="appended-raw-body-output"),
         pytest.param("live", "unexpected-mime", id="unexpected-mime"),
         pytest.param("live", "unexpected-output-type", id="unexpected-output-type"),
         pytest.param("live", "request-count-over-budget", id="request-count-over-budget"),
+        pytest.param("live", "request-count-zero", id="request-count-zero"),
+        pytest.param("live", "request-report-count-mismatch", id="request-report-count-mismatch"),
+        pytest.param("live", "removed-route-row", id="removed-route-row"),
         pytest.param("live", "classification-total-mismatch", id="classification-total-mismatch"),
     ),
 )
