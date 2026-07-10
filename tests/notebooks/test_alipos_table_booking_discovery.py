@@ -924,7 +924,7 @@ def test_live_cells_end_in_safe_outputs_and_do_not_display_raw_objects() -> None
             )
 
 
-def test_saved_dry_outputs_contain_no_sensitive_values_or_errors() -> None:
+def test_saved_outputs_use_one_safe_authentic_mode() -> None:
     notebook = load_notebook()
     outputs = [
         output
@@ -934,7 +934,25 @@ def test_saved_dry_outputs_contain_no_sensitive_values_or_errors() -> None:
     ]
     serialized = json.dumps(outputs, ensure_ascii=False)
 
-    assert "Dry run" in serialized
+    dry_mode = all(
+        marker in serialized
+        for marker in (
+            "Dry run: authentication and all network requests are skipped.",
+            "Live reads enabled: False",
+            "Deployed reads enabled: False",
+        )
+    )
+    live_mode = all(
+        marker in serialized
+        for marker in (
+            "AliPOS authentication succeeded; token output is suppressed.",
+            "Live reads enabled: True",
+            "Deployed reads enabled: True",
+            "**Mode:** live read-only probe.",
+        )
+    )
+
+    assert dry_mode != live_mode
     assert re.search(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", serialized) is None
     assert re.search(r"\+?998[0-9 ()-]{9,16}", serialized) is None
     assert re.search(r"(?i)\bBearer\s+", serialized) is None
