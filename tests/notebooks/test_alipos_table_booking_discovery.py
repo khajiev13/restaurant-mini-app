@@ -380,3 +380,146 @@ def test_option_selection_prioritizes_405_then_one_404_per_family() -> None:
     selected = namespace["build_option_routes"](get_results, completed_count=116)
     assert [route["path"] for route in selected] == ["/d", "/a", "/c"]
     assert all(route["method"] == "OPTIONS" for route in selected)
+
+
+from urllib.error import URLError
+
+
+class FakeResponse:
+    def __init__(
+        self,
+        body: bytes,
+        url: str = "https://web.alipos.uz/api/Integration/v1/test",
+        status: int = 200,
+        headers=None,
+    ) -> None:
+        self._body = body
+        self._url = url
+        self.status = status
+        self.headers = headers or {"Content-Type": "application/json"}
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body if size < 0 else self._body[:size]
+
+    def geturl(self) -> str:
+        return self._url
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+
+class FakeOpener:
+    def __init__(self, responses: list) -> None:
+        self.responses = list(responses)
+        self.requests = []
+
+    def open(self, request, timeout: int):
+        self.requests.append((request, timeout))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+def test_client_authenticates_then_sends_only_read_request() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener(
+        [
+            FakeResponse(b'{"access_token":"synthetic-access-token"}', url="https://web.alipos.uz/security/oauth/token"),
+            FakeResponse(b'{"ok":true}'),
+        ]
+    )
+    clock_values = iter([0.0, 0.0, 0.1, 0.2])
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: next(clock_values),
+    )
+
+    client.authenticate()
+    result = client.request("GET", "/api/Integration/v1/test", "test", "documented")
+
+    assert opener.requests[0][0].get_method() == "POST"
+    assert opener.requests[0][0].full_url.endswith("/security/oauth/token")
+    assert opener.requests[1][0].get_method() == "GET"
+    assert opener.requests[1][0].get_header("Authorization") == "Bearer synthetic-access-token"
+    assert result["status"] == 200
+    assert result["payload"] == {"ok": True}
+
+
+def test_client_blocks_mutating_method_before_transport() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener([])
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    with pytest.raises(namespace["UnsafeMethodError"], match="PUT"):
+        client.request("PUT", "/api/Integration/v1/test", "test", "unsafe")
+    assert opener.requests == []
+
+
+def test_client_rejects_cross_origin_final_url() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener(
+        [FakeResponse(b"{}", url="https://example.test/redirected")]
+    )
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    with pytest.raises(namespace["UnsafeRedirectError"]):
+        client.request("GET", "/api/Integration/v1/test", "test", "unsafe")
+
+
+def test_client_does_not_retry_transport_failure() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener([URLError("synthetic failure")])
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    result = client.request("GET", "/api/Integration/v1/test", "test", "documented")
+
+    assert len(opener.requests) == 1
+    assert result["status"] is None
+    assert result["classification"] == "ambiguous"
+
+
+def test_client_stops_all_later_requests_after_rate_limit() -> None:
+    namespace = load_probe_namespace()
+    opener = FakeOpener(
+        [
+            FakeResponse(b'{"error":"rate limited"}', status=429),
+            FakeResponse(b'{"ok":true}'),
+        ]
+    )
+    client = namespace["SafeAliPOSClient"](
+        valid_config(namespace),
+        opener=opener,
+        sleep_fn=lambda seconds: None,
+        monotonic_fn=lambda: 0.0,
+    )
+    client._access_token = "synthetic-access-token"
+
+    result = client.request("GET", "/api/Integration/v1/a", "a", "top_level")
+    assert result["status"] == 429
+    with pytest.raises(namespace["RequestBudgetExceeded"], match="rate limit"):
+        client.request("GET", "/api/Integration/v1/b", "b", "top_level")
+    assert len(opener.requests) == 1
