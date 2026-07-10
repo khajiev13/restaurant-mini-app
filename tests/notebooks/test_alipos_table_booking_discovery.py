@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -14,6 +15,8 @@ TEST_RESTAURANT_ID = "11111111-1111-4111-8111-111111111111"
 DEPLOYED_RESTAURANT_ID = "22222222-2222-4222-8222-222222222222"
 TEST_CASH_ORDER_ID = "33333333-3333-4333-8333-333333333333"
 TEST_ONLINE_ORDER_ID = "44444444-4444-4444-8444-444444444444"
+TEST_UUID_KEY = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+TEST_UUID_V7 = "018f47a0-7b1c-7def-8abc-0123456789ab"
 
 
 def load_notebook() -> dict:
@@ -116,6 +119,35 @@ def test_notebook_has_expected_tagged_layout() -> None:
     }
     assert "probe-library" in tags
     assert "probe-live" in tags
+
+    live_cells = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if "probe-live" in cell.get("metadata", {}).get("tags", [])
+    ]
+    assert len(live_cells) == 6
+    ordered_responsibilities = (
+        "CONFIG = build_probe_config(ROOT)",
+        "_synthetic_config = dict(CONFIG)",
+        "CLIENT = None",
+        "HALL_ID = None",
+        "BOOKING_CANDIDATES = build_booking_routes(",
+        "REPORT = render_markdown_report(",
+    )
+    assert all(
+        responsibility in source
+        for responsibility, source in zip(ordered_responsibilities, live_cells)
+    )
+
+
+def test_notebook_introduction_describes_two_flag_deployed_authorization() -> None:
+    notebook = load_notebook()
+    introduction = "".join(notebook["cells"][0].get("source", []))
+
+    assert "ALLOW_LIVE_ALIPOS_READS=1" in introduction
+    assert "ALLOW_DEPLOYED_ALIPOS_READS=1" in introduction
+    assert "both" in introduction.casefold()
+    assert "block the deployed restaurant ID from all probes" not in introduction
 
 
 def test_extract_dummy_identifiers_from_saved_cell_outputs(tmp_path: Path) -> None:
@@ -781,6 +813,146 @@ def test_rendered_report_contains_no_raw_sensitive_values() -> None:
     assert "confirmed" in report
     assert TEST_RESTAURANT_ID not in report
     assert "+998901234567" not in report
+    assert "Halls and tables alone do not confirm reservation support." in report
+
+
+def test_rendered_report_redacts_uuid_shaped_mapping_keys() -> None:
+    namespace = load_probe_namespace()
+    result = {
+        "name": "unknown_shape",
+        "family": "top_level",
+        "method": "GET",
+        "path": "/api/Integration/v1/unknown",
+        "status": 200,
+        "latency_ms": 1.0,
+        "content_type": "application/json",
+        "allow": "GET",
+        "payload": {TEST_UUID_KEY: [{TEST_UUID_KEY: "safe"}]},
+        "error": "",
+    }
+
+    report = namespace["render_markdown_report"]([result])
+
+    assert TEST_UUID_KEY not in report
+
+
+def test_rendered_report_redacts_uuidv7_values_and_paths() -> None:
+    namespace = load_probe_namespace()
+    result = {
+        "name": "halls_and_tables",
+        "family": "documented",
+        "method": "GET",
+        "path": f"/api/Integration/v1/restaurant/{TEST_UUID_V7}/halls-and-tables",
+        "status": 200,
+        "latency_ms": 1.0,
+        "content_type": "application/json",
+        "allow": "GET",
+        "payload": {
+            "Halls": [{"Id": TEST_UUID_V7, "Title": "Test Hall", "ServicePercent": 12}],
+            "Tables": [],
+        },
+        "error": "",
+    }
+
+    report = namespace["render_markdown_report"]([result])
+
+    assert TEST_UUID_V7 not in report
+
+
+def test_halls_and_tables_report_redacts_non_numeric_service_percent() -> None:
+    namespace = load_probe_namespace()
+    result = {
+        "name": "halls_and_tables",
+        "family": "documented",
+        "method": "GET",
+        "path": "/api/Integration/v1/restaurant/test/halls-and-tables",
+        "status": 200,
+        "latency_ms": 1.0,
+        "content_type": "application/json",
+        "allow": "GET",
+        "payload": {
+            "Halls": [
+                {
+                    "Id": TEST_RESTAURANT_ID,
+                    "Title": "Test Hall",
+                    "ServicePercent": "+998901234567",
+                }
+            ],
+            "Tables": [],
+        },
+        "error": "",
+    }
+
+    report = namespace["render_markdown_report"]([result])
+
+    assert "+998901234567" not in report
+    assert '"servicePercent": "[REDACTED]"' in report
+    assert "Test Hall" in report
+
+
+def test_live_cells_end_in_safe_outputs_and_do_not_display_raw_objects() -> None:
+    notebook = load_notebook()
+    live_sources = [
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if "probe-live" in cell.get("metadata", {}).get("tags", [])
+    ]
+
+    def terminal_statements(statements: list[ast.stmt]) -> list[ast.stmt]:
+        terminal = statements[-1]
+        if isinstance(terminal, ast.If):
+            return terminal_statements(terminal.body) + terminal_statements(terminal.orelse)
+        return [terminal]
+
+    forbidden_raw_names = {"CONFIG", "CLIENT", "RESULTS", "payload", "access_token"}
+    for source in live_sources:
+        tree = ast.parse(source)
+        for terminal in terminal_statements(tree.body):
+            assert isinstance(terminal, ast.Expr)
+            assert isinstance(terminal.value, ast.Call)
+            assert isinstance(terminal.value.func, ast.Name)
+            assert terminal.value.func.id in {"display", "print"}
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id not in {"display", "print"}:
+                continue
+            assert all(
+                not isinstance(argument, ast.Name) or argument.id not in forbidden_raw_names
+                for argument in node.args
+            )
+
+
+def test_saved_dry_outputs_contain_no_sensitive_values_or_errors() -> None:
+    notebook = load_notebook()
+    outputs = [
+        output
+        for cell in notebook["cells"]
+        if "probe-live" in cell.get("metadata", {}).get("tags", [])
+        for output in cell.get("outputs", [])
+    ]
+    serialized = json.dumps(outputs, ensure_ascii=False)
+
+    assert "Dry run" in serialized
+    assert re.search(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", serialized) is None
+    assert re.search(r"\+?998[0-9 ()-]{9,16}", serialized) is None
+    assert re.search(r"(?i)\bBearer\s+", serialized) is None
+    assert "secret" not in serialized.casefold()
+    assert "error" not in serialized.casefold()
+    assert all(output.get("output_type") != "error" for output in outputs)
+
+
+def test_notebook_constructs_exactly_one_oauth_post() -> None:
+    notebook = load_notebook()
+    source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    )
+
+    assert source.count('self._build_url("/security/oauth/token")') == 1
+    assert len(re.findall(r"method\s*=\s*['\"]POST['\"]", source)) == 1
 
 
 def test_live_cells_do_not_call_mutating_discovery_methods() -> None:
