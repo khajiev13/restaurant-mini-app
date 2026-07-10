@@ -172,6 +172,62 @@ def test_redaction_removes_sensitive_values_and_masks_identifiers() -> None:
     assert redacted["customer"]["id"].startswith("id:")
 
 
+def test_recursive_redaction_covers_extended_privacy_key_families() -> None:
+    namespace = load_probe_namespace()
+    sensitive_values = {
+        "client_id": "private-client-id",
+        "credentials": {"username": "private-user"},
+        "customerName": "Private Customer",
+        "payment": {"provider": "private-provider"},
+        "number": "private-number",
+        "card-number": "4111111111111111",
+        "CVV": "123",
+        "lat": 41.3111,
+        "lng": 69.2401,
+        "coordinates": [41.3111, 69.2401],
+    }
+    payload = {"outer": [{"private": sensitive_values}]}
+
+    redacted = namespace["redact_value"](payload)
+
+    assert redacted["outer"][0]["private"] == {
+        key: "[REDACTED]" for key in sensitive_values
+    }
+
+
+def test_sensitive_key_matching_keeps_safe_fields_and_fingerprints_uuid() -> None:
+    namespace = load_probe_namespace()
+    payload = {
+        "platform": "web",
+        "company": "AliPOS",
+        "hall": {
+            "title": "Main Hall",
+            "servicePercent": 12,
+            "id": TEST_CASH_ORDER_ID,
+        },
+        "table": {
+            "title": "T-1",
+            "id": TEST_ONLINE_ORDER_ID,
+        },
+    }
+
+    redacted = namespace["redact_value"](payload)
+
+    assert redacted == {
+        "platform": "web",
+        "company": "AliPOS",
+        "hall": {
+            "title": "Main Hall",
+            "servicePercent": 12,
+            "id": namespace["fingerprint_identifier"](TEST_CASH_ORDER_ID),
+        },
+        "table": {
+            "title": "T-1",
+            "id": namespace["fingerprint_identifier"](TEST_ONLINE_ORDER_ID),
+        },
+    }
+
+
 def test_halls_and_tables_summary_keeps_only_safe_fields() -> None:
     namespace = load_probe_namespace()
     hall_id = "55555555-5555-4555-8555-555555555555"
@@ -203,6 +259,9 @@ def test_halls_and_tables_summary_keeps_only_safe_fields() -> None:
     assert selected_table == table_id
     assert summary["collections"]["Halls"]["count"] == 1
     assert summary["collections"]["Tables"]["count"] == 1
+    assert summary["preview"]["halls"][0]["title"] == "Test Hall"
+    assert summary["preview"]["halls"][0]["servicePercent"] == 12
+    assert summary["preview"]["tables"][0]["title"] == "T-1"
     assert "Test Hall" in serialized
     assert hall_id not in serialized
     assert table_id not in serialized
@@ -236,3 +295,29 @@ def test_result_classification(
         "error": "",
     }
     assert namespace["classify_result"](result) == expected
+
+
+def test_result_summary_replaces_arbitrary_errors_with_a_generic_marker() -> None:
+    namespace = load_probe_namespace()
+    private_detail = "synthetic-internal-detail"
+    errors = [
+        f"Upstream failure: {private_detail}",
+        {"message": private_detail},
+        [private_detail],
+    ]
+
+    summaries = [
+        namespace["summarize_result"](
+            {
+                "status": 500,
+                "content_type": "text/plain",
+                "payload": None,
+                "error": error,
+            }
+        )
+        for error in errors
+    ]
+
+    assert [summary["error"] for summary in summaries] == ["[REDACTED]"] * len(errors)
+    assert all(private_detail not in json.dumps(summary) for summary in summaries)
+    assert namespace["summarize_result"]({"error": ""})["error"] == ""
