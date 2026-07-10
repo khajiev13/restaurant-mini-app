@@ -145,3 +145,94 @@ def test_validate_probe_config_requires_explicit_live_flag() -> None:
     namespace["validate_probe_config"](config, require_live=False)
     with pytest.raises(namespace["LiveProbesDisabled"]):
         namespace["validate_probe_config"](config, require_live=True)
+
+
+def test_redaction_removes_sensitive_values_and_masks_identifiers() -> None:
+    namespace = load_probe_namespace()
+    payload = {
+        "access_token": "synthetic-token-value",
+        "phoneNumber": "+998901234567",
+        "deliveryAddress": "Synthetic street 10",
+        "customer": {
+            "email": "person@example.test",
+            "id": TEST_CASH_ORDER_ID,
+        },
+        "title": "Main Hall",
+    }
+
+    redacted = namespace["redact_value"](payload)
+    serialized = json.dumps(redacted, ensure_ascii=False)
+
+    assert "synthetic-token-value" not in serialized
+    assert "+998901234567" not in serialized
+    assert "Synthetic street 10" not in serialized
+    assert "person@example.test" not in serialized
+    assert TEST_CASH_ORDER_ID not in serialized
+    assert redacted["title"] == "Main Hall"
+    assert redacted["customer"]["id"].startswith("id:")
+
+
+def test_halls_and_tables_summary_keeps_only_safe_fields() -> None:
+    namespace = load_probe_namespace()
+    hall_id = "55555555-5555-4555-8555-555555555555"
+    table_id = "66666666-6666-4666-8666-666666666666"
+    payload = {
+        "Halls": [
+            {
+                "Id": hall_id,
+                "Title": "Test Hall",
+                "ServicePercent": 12,
+                "phoneNumber": "+998901234567",
+            }
+        ],
+        "Tables": [
+            {
+                "Id": table_id,
+                "Title": "T-1",
+                "HallId": hall_id,
+                "clientName": "Synthetic Person",
+            }
+        ],
+    }
+
+    summary = namespace["summarize_payload"](payload, "halls_and_tables")
+    selected_hall, selected_table = namespace["extract_hall_table_ids"](payload)
+    serialized = json.dumps(summary, ensure_ascii=False)
+
+    assert selected_hall == hall_id
+    assert selected_table == table_id
+    assert summary["collections"]["Halls"]["count"] == 1
+    assert summary["collections"]["Tables"]["count"] == 1
+    assert "Test Hall" in serialized
+    assert hall_id not in serialized
+    assert table_id not in serialized
+    assert "+998901234567" not in serialized
+    assert "Synthetic Person" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("status", "content_type", "allow", "expected"),
+    [
+        (200, "application/json", "", "confirmed"),
+        (404, "application/json", "", "unsupported"),
+        (405, "application/json", "POST", "unsupported"),
+        (401, "application/json", "", "unauthorized/forbidden"),
+        (422, "application/json", "", "invalid test data"),
+        (500, "text/html", "", "ambiguous"),
+    ],
+)
+def test_result_classification(
+    status: int,
+    content_type: str,
+    allow: str,
+    expected: str,
+) -> None:
+    namespace = load_probe_namespace()
+    result = {
+        "status": status,
+        "content_type": content_type,
+        "allow": allow,
+        "payload": {} if "json" in content_type else None,
+        "error": "",
+    }
+    assert namespace["classify_result"](result) == expected
