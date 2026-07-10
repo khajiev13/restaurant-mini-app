@@ -321,3 +321,62 @@ def test_result_summary_replaces_arbitrary_errors_with_a_generic_marker() -> Non
     assert [summary["error"] for summary in summaries] == ["[REDACTED]"] * len(errors)
     assert all(private_detail not in json.dumps(summary) for summary in summaries)
     assert namespace["summarize_result"]({"error": ""})["error"] == ""
+
+
+def test_documented_routes_match_vendor_documentation() -> None:
+    namespace = load_probe_namespace()
+    routes = namespace["build_documented_routes"](TEST_RESTAURANT_ID)
+    assert [route["path"] for route in routes] == [
+        "/restaurants",
+        "/api/Integration/v1/paymentMethod/all",
+        f"/api/Integration/v1/menu/{TEST_RESTAURANT_ID}/composition",
+        f"/api/Integration/v1/restaurant/{TEST_RESTAURANT_ID}/halls-and-tables",
+    ]
+    assert all(route["method"] == "GET" for route in routes)
+
+
+def test_booking_matrix_covers_every_term_and_is_unique() -> None:
+    namespace = load_probe_namespace()
+    hall_id = "55555555-5555-4555-8555-555555555555"
+    table_id = "66666666-6666-4666-8666-666666666666"
+    routes = namespace["build_booking_routes"](
+        TEST_RESTAURANT_ID,
+        hall_id=hall_id,
+        table_id=table_id,
+    )
+    paths = [route["path"] for route in routes]
+
+    assert len(paths) == len(set(paths))
+    for term in namespace["BOOKING_TERMS"]:
+        assert f"/api/Integration/v1/{term}" in paths
+        assert f"/api/Integration/v1/restaurant/{TEST_RESTAURANT_ID}/{term}" in paths
+        assert f"/api/Integration/v1/{term}/{TEST_RESTAURANT_ID}" in paths
+        assert f"/api/Integration/v1/menu/{TEST_RESTAURANT_ID}/{term}" in paths
+        assert f"/api/Integration/v1/{term}/{table_id}" in paths
+        assert f"/api/Integration/v1/restaurant/{TEST_RESTAURANT_ID}/{term}/{table_id}" in paths
+        assert f"/api/Integration/v1/{term}/{hall_id}" in paths
+        assert f"/api/Integration/v1/restaurant/{TEST_RESTAURANT_ID}/{term}/{hall_id}" in paths
+
+
+def test_get_selection_reserves_twelve_requests_for_options() -> None:
+    namespace = load_probe_namespace()
+    candidates = [
+        {"name": f"route_{index}", "family": "top_level", "method": "GET", "path": f"/r/{index}"}
+        for index in range(200)
+    ]
+    selected = namespace["select_get_routes"](candidates, completed_count=8)
+    assert len(selected) == 100
+    assert selected == candidates[:100]
+
+
+def test_option_selection_prioritizes_405_then_one_404_per_family() -> None:
+    namespace = load_probe_namespace()
+    get_results = [
+        {"name": "a", "family": "top_level", "method": "GET", "path": "/a", "status": 404},
+        {"name": "b", "family": "top_level", "method": "GET", "path": "/b", "status": 404},
+        {"name": "c", "family": "restaurant_scoped", "method": "GET", "path": "/c", "status": 404},
+        {"name": "d", "family": "argument", "method": "GET", "path": "/d", "status": 405},
+    ]
+    selected = namespace["build_option_routes"](get_results, completed_count=116)
+    assert [route["path"] for route in selected] == ["/d", "/a", "/c"]
+    assert all(route["method"] == "OPTIONS" for route in selected)
