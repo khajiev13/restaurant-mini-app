@@ -85,6 +85,40 @@ def authentic_live_probe_outputs() -> list[list[dict]]:
     return saved_probe_outputs(load_notebook())
 
 
+def coherent_live_probe_outputs(request_count: int) -> list[list[dict]]:
+    outputs = authentic_live_probe_outputs()
+    outputs[4][0]["text"] = [
+        f"Booking discovery completed within request budget: {request_count}\n"
+    ]
+
+    lines = outputs[5][0]["data"]["text/markdown"]
+    route_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith(("| GET |", "| OPTIONS |"))
+    ]
+    route_rows = [lines[index] for index in route_indexes]
+    selected_rows = (route_rows * 2)[:request_count]
+    lines[route_indexes[0] : route_indexes[-1] + 1] = selected_rows
+
+    for classification in (
+        "confirmed",
+        "unsupported",
+        "unauthorized/forbidden",
+        "invalid test data",
+        "ambiguous",
+        "skipped",
+    ):
+        index = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(f"- {classification}:")
+        )
+        count = sum(f"| {classification} |" in row for row in selected_rows)
+        lines[index] = f"- {classification}: {count}\n"
+    return outputs
+
+
 def inject_live_route_shape(outputs: list[list[dict]], payload: str) -> None:
     lines = outputs[5][0]["data"]["text/markdown"]
     index = next(index for index, line in enumerate(lines) if line.startswith("| GET |"))
@@ -98,6 +132,7 @@ def tamper_saved_probe_outputs(outputs: list[list[dict]], corruption: str) -> No
         "email-injection": "operator@example.test",
         "opaque-token-field-injection": "access_token = opaque-value",
         "jwt-injection": "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjMifQ.",
+        "signed-jwt-injection": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
         "bracket-credential-assignment": 'credentials["password"] = exposed-value',
     }
     if corruption in route_shape_injections:
@@ -1163,6 +1198,15 @@ def test_saved_output_contract_accepts_complete_authentic_mode(
     assert validate_saved_probe_outputs(outputs_factory()) == expected_mode
 
 
+@pytest.mark.parametrize("request_count", (1, 120), ids=("minimum", "maximum"))
+def test_saved_output_contract_accepts_live_request_count_boundaries(
+    request_count: int,
+) -> None:
+    outputs = coherent_live_probe_outputs(request_count)
+
+    assert validate_saved_probe_outputs(outputs) == "live"
+
+
 @pytest.mark.parametrize(
     ("base_mode", "corruption"),
     (
@@ -1172,6 +1216,7 @@ def test_saved_output_contract_accepts_complete_authentic_mode(
         pytest.param("live", "email-injection", id="email-injection"),
         pytest.param("live", "opaque-token-field-injection", id="opaque-token-field-injection"),
         pytest.param("live", "jwt-injection", id="jwt-injection"),
+        pytest.param("live", "signed-jwt-injection", id="signed-jwt-injection"),
         pytest.param("live", "bracket-credential-assignment", id="bracket-credential-assignment"),
         pytest.param("live", "appended-raw-body-output", id="appended-raw-body-output"),
         pytest.param("live", "unexpected-mime", id="unexpected-mime"),
