@@ -9,10 +9,11 @@ help future agents build, review, test, and design user interfaces for the
 external AliPOS Integration API without inventing capabilities that have not
 worked in this repository.
 
-The skill will cover only operations with positive live evidence. It will also
-contain a frontend UI/UX handoff for the verified hall-and-table directory.
-Because no native reservation API was confirmed, the handoff will describe a
-truthful read-only venue experience rather than a booking flow.
+The skill will cover only operations with positive live evidence. Frontend
+design guidance will not be part of the skill. Instead, the task will also
+produce a standalone prompt for a UI/UX designer. That prompt will describe
+the hall/table pages, their behavior, and how the venue experience must differ
+from the existing delivery UI.
 
 The skill is not a replacement for AliPOS vendor documentation. It is an
 evidence-controlled project reference derived from:
@@ -36,8 +37,8 @@ hardcoded tenant-specific payment identifiers will be copied into the skill.
   IDs.
 - Prevent automatic retries of uncertain order-creation requests.
 - Clearly distinguish menu availability from table availability.
-- Give frontend designers a concrete hall/table page brief that matches the
-  current Telegram Mini App.
+- Produce a separate frontend-designer prompt for a hall/table experience that
+  matches the current Telegram Mini App and is visually distinct from delivery.
 - Stop agents from inventing reservation, table-slot, capacity, in-place-order,
   cancellation, webhook, or delivery-completion behavior.
 - Make the skill testable with realistic baseline and skill-enabled scenarios.
@@ -50,8 +51,9 @@ hardcoded tenant-specific payment identifiers will be copied into the skill.
 - Treating an operation as working because it appears only in code or a PDF.
 - Publishing raw notebook outputs that contain customer, restaurant, order,
   hall, table, payment, or credential identifiers.
-- Designing a reservation confirmation, booking history, rescheduling,
-  cancellation, deposit, or reminder flow.
+- Loading frontend design instructions as part of the API skill.
+- Presenting reservation confirmation, booking history, rescheduling,
+  cancellation, deposits, or reminders as currently working behavior.
 
 ## Evidence rule
 
@@ -114,7 +116,7 @@ Create the skill at:
 ├── references/
 │   ├── verified-capabilities.md
 │   ├── delivery-orders.md
-│   └── halls-tables-ui.md
+│   └── halls-and-tables.md
 └── evals/
     └── evals.json
 ```
@@ -123,6 +125,16 @@ This structure follows the repository's modular Multicard skill pattern while
 avoiding its embedded-credential anti-pattern. `SKILL.md` will route agents to
 the minimum relevant reference instead of loading every detailed schema for
 every AliPOS task.
+
+Create the separate designer prompt at:
+
+```text
+docs/prompts/alipos-halls-tables-ui-designer.md
+```
+
+The prompt is a project artifact, not a bundled skill reference. Agents using
+the API skill will not load UI instructions unless the user separately asks to
+work with the designer prompt.
 
 ## Skill metadata
 
@@ -149,7 +161,7 @@ Keep `SKILL.md` concise and use it as a router. It will contain:
 
 1. The evidence-first working-capability rule.
 2. A compact verified endpoint matrix.
-3. Task routing to the three reference files.
+3. Task routing to the three API reference files.
 4. Credential and identifier safety rules.
 5. Mutation and retry boundaries.
 6. The unsupported-capability boundary.
@@ -158,7 +170,7 @@ Keep `SKILL.md` concise and use it as a router. It will contain:
 The workflow will tell agents to:
 
 1. Classify the request as capability lookup, delivery integration, or
-   halls/tables UI work.
+   hall/table API work.
 2. Read the corresponding reference file.
 3. Resolve IDs dynamically from configuration or verified API responses.
 4. Keep OAuth credentials and tokens server-side.
@@ -267,122 +279,159 @@ The successful response shape is `result` plus `orderId`.
 - Do not claim that local staff delivery completion was synchronized to
   AliPOS.
 
-## `halls-tables-ui.md` design
+## `halls-and-tables.md` design
 
-This reference will be a direct handoff to frontend UI/UX designers and React
-implementers.
+This skill reference will document the live-verified external API contract,
+not frontend design.
 
-### Product truth
+It will include:
 
-The current API supplies a static hall/table directory. It does not supply live
-availability, reservations, occupancy, capacity, time slots, party size,
-coordinates, or floor-plan geometry.
+- `GET /api/Integration/v1/restaurant/{restaurantId}/halls-and-tables`.
+- The top-level `halls` and `tables` collections.
+- Hall fields `id`, `title`, and `servicePercent`.
+- Table fields `id`, `title`, and `hallId`.
+- The relationship between a table's `hallId` and its parent hall.
+- The observed one-hall and 29-table counts as dated evidence only.
+- Server-side credential handling and a recommended backend read proxy.
+- The distinction between static directory data and live availability.
 
-### Production page inventory
+It will explicitly say that the API response does not contain:
 
-The skill will direct the designer to create only:
+- Occupancy or availability.
+- Capacity or party size.
+- Reservation time slots.
+- Booking identifiers or booking state.
+- Floor-plan coordinates, geometry, photos, or amenities.
+
+The reference will not prescribe React components, routes, page layouts, or UI
+copy. Those belong only in the separate designer prompt.
+
+## Standalone UI-designer prompt design
+
+Create `docs/prompts/alipos-halls-tables-ui-designer.md` as a ready-to-send
+prompt for a frontend UI/UX designer. It will be understandable without loading
+the AliPOS skill.
+
+### Designer objective
+
+Ask the designer to create a distinct dine-in venue-discovery experience using
+only the static hall/table fields currently available. The result should not
+look or behave like a renamed delivery checkout.
+
+### Required comparison with delivery UI
+
+The prompt will explain that the current delivery UI centers on:
+
+- Menu and cart.
+- Customer phone number.
+- Delivery address and map coordinates.
+- Courier instructions.
+- Delivery fee and payment method.
+- Delivery order placement and tracking.
+
+The hall/table experience must instead center on:
+
+- Restaurant spaces and hall hierarchy.
+- Service percentage at hall level.
+- Table names grouped by hall.
+- Browsing and understanding physical venue options.
+- Clear disclosure that live availability and reservations are unavailable.
+
+The designer must not reuse delivery-specific address, courier, shipping,
+delivery-fee, or order-tracking patterns on the venue pages.
+
+### Pages to design
+
+The prompt will request:
 
 1. A `Halls & tables` entry card on the customer menu/home experience.
 2. A mobile-first `/tables` directory page.
 3. A table-information bottom sheet or dialog.
 
-It will not request a booking form, confirmation page, booking history, or
-reservation-management page.
-
-### Navigation and visual fit
-
-- Reuse `ArtisanLayout`, its top bar, colors, typography, and icons.
-- Do not add a fifth bottom-navigation item.
-- Enter through a secondary card or action from the customer menu.
-- Use a focused back-navigation page. The existing bottom navigation may remain
-  visible unless a sheet or focused subflow requires otherwise.
-- Match the existing terracotta accent, white cards, `#f6f6f6` background,
-  12-pixel card radius, and Telegram safe-area behavior.
+It will ask the designer to show how these pages fit the current Telegram Mini
+App without adding a fifth bottom-navigation item.
 
 ### Directory behavior
 
-- Show a persistent banner: `This is the restaurant's table list, not live
+The prompt will require:
+
+- A persistent banner: `This is the restaurant's table list, not live
   availability. Online reservations are not available yet.`
-- With one hall, show the hall title as a heading and avoid a redundant filter.
-- With multiple halls, use horizontally scrollable accessible hall chips or
-  tabs.
-- Show `Service charge: {servicePercent}%` only when supplied.
-- Group tables by `hallId` and sort table titles naturally.
-- Render neutral table cards with table title and hall context.
-- Let a table card open an information sheet.
-- Do not show a selected, reserved, occupied, free, or available state.
-- Do not expose raw hall or table IDs.
-- Do not draw a floor plan.
+- One hall rendered as a section heading without redundant filter controls.
+- Multiple halls rendered as accessible, horizontally scrollable chips or tabs.
+- `Service charge: {servicePercent}%` shown only when supplied.
+- Tables grouped by `hallId` and naturally sorted by their displayed titles.
+- Neutral table cards that open an information sheet.
+- No raw hall or table IDs.
+- No fabricated floor plan.
 
 ### Information sheet
 
-Show only:
+The prompt will request only:
 
 - Table title.
 - Hall title.
-- Hall service percentage when present.
+- Service percentage when present.
 - `Live availability is not shown.`
 - `This table cannot be reserved in the app yet.`
 - A `Close` or `Back to menu` action.
 
-An optional `Contact restaurant` action is allowed only when the application
-already has a verified contact channel. Opening that channel must not be
-presented as a successful reservation.
+An optional `Contact restaurant` action may be designed only when another
+verified source supplies the contact channel. It cannot imply a completed
+reservation.
 
 ### Required states
 
-- Loading skeletons for hall controls and table cards.
+- Loading skeletons.
 - Loaded directory.
 - Empty restaurant response.
 - Empty hall.
-- Fetch failure with a manual retry.
-- Cached list with a refresh-warning banner.
-- Removed table handling.
-- Authentication retry using the app's existing shell.
+- Fetch failure with manual retry.
+- Cached list with refresh warning.
+- Removed-table handling.
+- Authentication retry using the existing application shell.
 
-The page will not add its own retry loop because the existing Axios client
-already retries an eligible transient `GET` once.
+The prompt will note that the existing Axios client already performs one
+eligible transient `GET` retry, so the page should not add another automatic
+retry loop.
 
 ### Accessibility and responsive behavior
 
-- Use semantic buttons and tabs rather than clickable `div` elements.
-- Use at least 44-by-44-pixel touch targets.
-- Move focus to the page heading after navigation.
-- Trap and restore focus for the information sheet.
-- Announce errors and refresh results through a polite live region.
-- Never communicate state through color alone.
-- Support long labels and larger system text.
-- Test 320, 375, and 430-pixel widths.
-- Test Uzbek, Russian, and English translations.
-- Respect Telegram viewport and safe-area variables.
+- Semantic buttons and tabs rather than clickable `div` elements.
+- Minimum 44-by-44-pixel touch targets.
+- Focus moved to the page heading after navigation.
+- Correct focus trap and restoration for the information sheet.
+- Polite live-region announcements for failures and refreshed content.
+- No information communicated by color alone.
+- Support for long names and larger system text.
+- Designs for 320, 375, and 430-pixel widths.
+- Uzbek, Russian, and English content behavior.
+- Telegram viewport and safe-area support.
 
-### Future capability gate
+### Unsupported future controls
 
-The skill will instruct designers not to activate these elements until a
-verified backend contract exists:
+The designer prompt will identify these as unavailable and exclude them from
+the current production flow:
 
 - Date and time pickers.
 - Party-size input.
-- Availability or occupancy badges.
-- Table selection for a submitted action.
-- `Book`, `Reserve`, or `Use this table` actions.
-- Booking confirmation and reservation numbers.
-- Booking history, rescheduling, cancellation, reminders, or deposits.
-- Dine-in ordering using `tableId`.
+- Availability, free, occupied, or reserved badges.
+- A submitted table-selection action.
+- `Book`, `Reserve`, or `Use this table` buttons.
+- Booking confirmation or reservation numbers.
+- Booking history, rescheduling, cancellation, reminders, and deposits.
+- Dine-in ordering with `tableId`.
 
-## Backend boundary for the UI
+If the designer explores future booking concepts, those frames must be labeled
+concept-only and kept separate from the production-ready directory.
 
-The frontend must not call AliPOS directly. A future implementation will need a
-backend read-only proxy that:
+### Backend truth included in the prompt
 
-- Authenticates to AliPOS server-side.
-- Fetches halls and tables together.
-- Returns only the fields required by the page.
-- Does not leak raw credentials or tokens.
-- Defines caching without converting cached inventory into availability.
-
-The skill may describe this boundary but will not claim that the proxy already
-exists. The current backend has no hall/table helper or frontend endpoint.
+The prompt will tell the designer that the browser cannot call AliPOS directly.
+A future implementation needs a server-side read proxy that returns the halls
+and tables together. The current backend and frontend do not yet expose that
+proxy, so the designer should define data/loading states without claiming the
+feature is already connected.
 
 ## Evaluation design
 
@@ -393,7 +442,7 @@ skill.
 Use these five scenarios:
 
 1. Implement cash delivery-order creation and status polling.
-2. Design an AliPOS table-booking page.
+2. Implement native table reservations using AliPOS.
 3. Use menu availability to mark tables occupied.
 4. Create an in-place order with `tableId`.
 5. List every currently supported AliPOS operation.
@@ -409,9 +458,17 @@ Objective assertions will verify that outputs:
 - Do not interpret menu availability as table availability.
 - Do not teach cancellation, webhooks, in-place orders, or delivery completion
   as working.
-- Produce neutral, truthful hall/table UI language.
-- Include loading, empty, error, retry, accessibility, localization, and mobile
-  states in the designer handoff.
+
+Evaluate the standalone designer prompt separately with a read-only review
+checklist. The reviewer will confirm that the prompt:
+
+- Is not stored inside the skill directory or referenced as required skill
+  context.
+- Clearly differentiates hall/table browsing from delivery checkout.
+- Requests only the approved production pages and states.
+- Excludes active reservation and dine-in-order controls.
+- Includes accessibility, localization, mobile, Telegram, and backend-boundary
+  requirements.
 
 ## Verification and packaging
 
@@ -424,7 +481,8 @@ Before handoff:
 5. Check frontmatter, trigger description, paths, word counts, and links.
 6. Scan the entire skill for credentials, tokens, raw UUIDs, phone numbers, and
    unsupported endpoint claims.
-7. Package the skill only after the evaluation and review gates pass.
+7. Review the standalone designer prompt against its own checklist.
+8. Package the skill only after the evaluation and review gates pass.
 
 ## Acceptance criteria
 
@@ -434,11 +492,14 @@ Before handoff:
 - The working endpoint matrix contains exactly the nine verified operations.
 - Delivery guidance contains a complete placeholder-only payload and safe
   lifecycle behavior.
-- UI guidance produces a hall/table directory without implying booking or live
-  availability.
+- The skill contains API guidance only and does not bundle frontend design
+  instructions.
+- A standalone designer prompt explains the hall/table pages and how their
+  information architecture differs from delivery UI.
+- The standalone prompt does not imply booking or live table availability.
 - Unsupported operations are absent from implementation instructions and are
   explicitly blocked when users request them.
 - No credentials, tokens, raw tenant IDs, customer data, or hardcoded payment
   IDs appear in the skill.
 - Baseline-versus-skill evaluations show that the skill prevents unsupported
-  AliPOS claims and produces the required frontend handoff.
+  AliPOS claims.
