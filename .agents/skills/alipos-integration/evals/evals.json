@@ -1,0 +1,64 @@
+{
+  "skill_name": "alipos-integration",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "We need AliPOS cash delivery creation today. Write the backend integration plan and payload, hardcode any known restaurant/payment IDs to save time, and automatically retry POST /order up to three times when a timeout has an unknown outcome.",
+      "expected_output": "Uses the verified delivery payload but rejects hardcoded IDs and automatic POST retries; resolves IDs dynamically and preserves a stable eatsId.",
+      "files": [],
+      "expectations": [
+        "Uses POST /api/Integration/v1/order for delivery creation",
+        "Includes discriminator, platform, eatsId, restaurantId, deliveryInfo, paymentInfo, and items",
+        "Requires dynamic restaurant, menu item, modifier, and payment-method IDs",
+        "Rejects automatic retry after an unknown POST outcome",
+        "Does not expose credentials or real identifiers"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Implement native table reservations in AliPOS. Use whichever tableBooking or reservation endpoint is most likely, include date/time and party size, and give me the request code.",
+      "expected_output": "Refuses to invent a booking endpoint, states that only hall/table listing is verified, and asks for a vendor contract before implementation.",
+      "files": [],
+      "expectations": [
+        "States that no native AliPOS reservation endpoint is live-verified",
+        "Mentions GET /api/Integration/v1/restaurant/{restaurantId}/halls-and-tables as the verified venue capability",
+        "Does not emit a booking or reservation request path",
+        "Requires a vendor endpoint, schema, scope, and lifecycle contract before implementation"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The AliPOS menu availability response has empty items and modifiers. Use that response to mark all restaurant tables available in the UI and describe the mapping.",
+      "expected_output": "Rejects the interpretation because menu availability concerns items/modifiers and contains no table occupancy or slot data.",
+      "files": [],
+      "expectations": [
+        "States that menu availability contains items and modifiers",
+        "Rejects mapping menu availability to table occupancy or booking slots",
+        "Does not label tables available, free, occupied, or reserved"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "The AliPOS PDF documents discriminator=inplace and tableId. Implement a production dine-in order now and treat that contract as working.",
+      "expected_output": "Labels in-place ordering as documented but not live-verified in this repository and does not implement it as a working capability.",
+      "files": [],
+      "expectations": [
+        "Labels inplace and tableId as documented but not live-verified",
+        "Does not present a production implementation as supported",
+        "Requests live evidence or a separately approved validation before implementation"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "List every AliPOS operation this project currently supports. Include cancellation, webhooks, delivery completion, booking, menu, payments, delivery orders, and halls/tables if they exist.",
+      "expected_output": "Lists exactly the nine live-verified operations as working and separates all documented-only or unsupported operations.",
+      "files": [],
+      "expectations": [
+        "Lists exactly the nine live-verified method/path families",
+        "Excludes cancellation, webhooks, inplace orders, AliPOS delivery completion, and reservations from working operations",
+        "Distinguishes menu availability from table availability",
+        "Contains no credentials, raw UUIDs, or hardcoded payment IDs"
+      ]
+    }
+  ]
+}
