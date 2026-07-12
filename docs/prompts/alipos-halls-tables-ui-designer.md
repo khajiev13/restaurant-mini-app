@@ -4,12 +4,18 @@ You are designing a mobile-first customer experience for the OLOT SOMSA Telegram
 
 ## Product truth
 
-The connected AliPOS response currently supplies only:
+The verified AliPOS hall/table relationship contract includes:
 
-- Halls: `title`, `servicePercent`.
-- Tables: `title`, linked to a hall.
+- Halls: `id`, `title`, `servicePercent`.
+- Tables: `id`, `title`, `hallId`.
+
+The `id` and `hallId` values are implementation-only relationship fields. Never display them. The production UI may show hall and table titles, plus the service percentage when supplied.
 
 It does not supply live availability, occupancy, capacity, time slots, party-size rules, booking IDs, floor-plan geometry, or reservation actions. Do not imply that a displayed table is free or reservable.
+
+## Implementation boundary
+
+The browser cannot call AliPOS directly. A future implementation requires a server-side read proxy that returns halls and tables together. The current backend and frontend do not expose this proxy, so define data, loading, empty, and error states without claiming that the feature is connected today.
 
 ## How this must differ from delivery UI
 
@@ -20,7 +26,7 @@ The halls/tables experience must center on restaurant spaces, hall hierarchy, ha
 ## Pages to design
 
 1. A `Halls & tables` entry card on the customer menu/home experience.
-2. A mobile-first halls-and-tables directory.
+2. A mobile-first `/tables` directory page.
 3. A table-information bottom sheet or dialog.
 
 Do not add a fifth bottom-navigation item. Show how the user enters from the existing customer menu and returns naturally.
@@ -31,7 +37,7 @@ Do not add a fifth bottom-navigation item. Show how the user enters from the exi
 - If there is one hall, use its title as a section heading without redundant tabs.
 - If there are multiple halls, use accessible horizontally scrollable hall chips or tabs.
 - Show `Service charge: {servicePercent}%` only when supplied.
-- Group tables by hall and sort displayed table names naturally.
+- Group tables by the implementation-only `hallId` relationship and sort displayed table names naturally.
 - Use neutral cards; never use green/red availability colors.
 - Table cards may open the information sheet but cannot imply selection, holding, or reservation.
 - Never expose raw IDs or fabricate a floor plan.
