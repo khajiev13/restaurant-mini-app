@@ -15,6 +15,7 @@ from app.schemas.order import OrderCreate
 from app.services import alipos_api
 from app.services.menu_catalog_service import PricedCart
 from app.services.order_service import (
+    CustomerOrderError,
     OrderSubmissionRejected,
     create_customer_order,
     expire_due_payment_orders,
@@ -80,6 +81,26 @@ def _body(
         table_access_token="signed-table-token",
         comment="Iltimos, piyozsiz",
         client_request_id=client_request_id,
+    )
+
+
+def _delivery_body(payment_method: str = "rahmat") -> OrderCreate:
+    return OrderCreate(
+        items=[
+            {
+                "id": PRICED_CART.items[0]["id"],
+                "name": "Untrusted name",
+                "quantity": 2,
+                "price": 1,
+                "modifications": [],
+            }
+        ],
+        phone_number="+998901112233",
+        payment_method=payment_method,
+        discriminator="delivery",
+        delivery_address="Yakkasaray District, Shota Rustaveli 45",
+        latitude="41.2995",
+        longitude="69.2401",
     )
 
 
@@ -156,8 +177,10 @@ def test_alipos_integration_total_preserves_delivery_total():
 
 
 @pytest.mark.asyncio
-async def test_online_inplace_order_waits_for_verified_payment(db_session):
+async def test_online_inplace_order_waits_for_verified_payment(db_session, monkeypatch):
     user = await _customer(db_session)
+    monkeypatch.setattr(settings, "inplace_online_payment_enabled", False)
+    monkeypatch.setattr(settings, "inplace_online_payment_test_telegram_ids", "7301")
     create_mock = AsyncMock()
     invoice_mock = AsyncMock(
         return_value={
@@ -192,6 +215,120 @@ async def test_online_inplace_order_waits_for_verified_payment(db_session):
     assert order.status == "AWAITING_PAYMENT"
     assert order.payment_status == "pending"
     assert order.alipos_sync_status == "awaiting_payment"
+
+
+@pytest.mark.asyncio
+async def test_disabled_online_inplace_order_is_rejected_before_side_effects(
+    db_session,
+    monkeypatch,
+):
+    user = await _customer(db_session)
+    monkeypatch.setattr(settings, "inplace_online_payment_enabled", False)
+    monkeypatch.setattr(settings, "inplace_online_payment_test_telegram_ids", "")
+    resolve_table = AsyncMock(return_value=TABLE)
+    price = AsyncMock(return_value=PRICED_CART)
+    invoice = AsyncMock(
+        return_value={
+            "uuid": "unexpected-invoice-uuid",
+            "checkout_url": "https://pay.example/unexpected-checkout",
+        }
+    )
+
+    with (
+        patch(
+            "app.services.order_service.table_access.resolve_access_token",
+            new=resolve_table,
+        ),
+        patch("app.services.order_service.price_cart", new=price),
+        patch("app.services.order_service.multicard_api.create_invoice", new=invoice),
+    ):
+        with pytest.raises(
+            CustomerOrderError,
+            match="Online payment is not available for table orders",
+        ):
+            await create_customer_order(db_session, user, _body("rahmat"))
+
+    resolve_table.assert_not_awaited()
+    price.assert_not_awaited()
+    invoice.assert_not_awaited()
+    result = await db_session.execute(
+        select(Order).where(Order.user_id == user.telegram_id)
+    )
+    assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_online_payment_remains_available(db_session, monkeypatch):
+    user = await _customer(db_session)
+    monkeypatch.setattr(settings, "inplace_online_payment_enabled", False)
+    monkeypatch.setattr(settings, "inplace_online_payment_test_telegram_ids", "")
+    invoice = AsyncMock(
+        return_value={
+            "uuid": "delivery-invoice-uuid",
+            "checkout_url": "https://pay.example/delivery-checkout",
+        }
+    )
+
+    with (
+        patch(
+            "app.services.order_service.price_cart",
+            new=AsyncMock(return_value=PRICED_CART),
+        ),
+        patch("app.services.order_service.multicard_api.create_invoice", new=invoice),
+    ):
+        order = await create_customer_order(
+            db_session,
+            user,
+            _delivery_body(),
+        )
+
+    invoice.assert_awaited_once()
+    assert order.discriminator == "delivery"
+    assert order.payment_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_existing_online_inplace_order_is_returned_after_capability_disabled(
+    db_session,
+    monkeypatch,
+):
+    user = await _customer(db_session)
+    request_id = uuid.uuid4()
+    monkeypatch.setattr(settings, "inplace_online_payment_enabled", True)
+    monkeypatch.setattr(settings, "inplace_online_payment_test_telegram_ids", "")
+    resolve_table = AsyncMock(return_value=TABLE)
+    price = AsyncMock(return_value=PRICED_CART)
+    invoice = AsyncMock(
+        return_value={
+            "uuid": "invoice-uuid",
+            "checkout_url": "https://pay.example/checkout",
+        }
+    )
+
+    with (
+        patch(
+            "app.services.order_service.table_access.resolve_access_token",
+            new=resolve_table,
+        ),
+        patch("app.services.order_service.price_cart", new=price),
+        patch("app.services.order_service.multicard_api.create_invoice", new=invoice),
+    ):
+        first = await create_customer_order(
+            db_session,
+            user,
+            _body("rahmat", client_request_id=request_id),
+        )
+        monkeypatch.setattr(settings, "inplace_online_payment_enabled", False)
+        second = await create_customer_order(
+            db_session,
+            user,
+            _body("rahmat", client_request_id=request_id),
+        )
+
+    assert second.id == first.id
+    invoice.assert_awaited_once()
+    resolve_table.assert_awaited_once()
+    price.assert_awaited_once()
 
 
 @pytest.mark.asyncio

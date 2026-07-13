@@ -69,6 +69,13 @@ class PaymentRetryConflict(RuntimeError):
     pass
 
 
+def can_use_inplace_online_payment(user: User) -> bool:
+    return (
+        settings.inplace_online_payment_enabled
+        or user.telegram_id in settings.inplace_online_payment_test_ids
+    )
+
+
 def _normalize_payment_title(value: str) -> str:
     return " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split())
 
@@ -681,6 +688,10 @@ async def retry_customer_order_payment(
     )
     if not can_retry:
         raise PaymentRetryConflict("This online payment cannot be retried safely")
+    if not can_use_inplace_online_payment(current_user):
+        raise PaymentRetryConflict(
+            "Online payment is not available for table orders"
+        )
     return await _create_order_invoice(db, order)
 
 
@@ -741,6 +752,13 @@ async def create_customer_order(
                     return submitted
                 await db.refresh(existing)
             return existing
+
+    if (
+        body.discriminator == "inplace"
+        and body.payment_method == "rahmat"
+        and not can_use_inplace_online_payment(current_user)
+    ):
+        raise CustomerOrderError("Online payment is not available for table orders")
 
     selected_address = None
     table = None
