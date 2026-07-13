@@ -114,6 +114,33 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _alipos_integration_total(order: Order) -> Decimal:
+    if order.discriminator == "inplace":
+        return Decimal(str(order.items_cost))
+    return Decimal(str(order.total_amount))
+
+
+def _alipos_log_fields(order: Order) -> dict[str, object]:
+    return {
+        "local_order_id": str(order.id),
+        "discriminator": order.discriminator,
+        "payment_kind": "cash" if order.payment_method == "cash" else "online",
+        "items_cost": float(order.items_cost),
+        "payable_total": float(order.total_amount),
+        "integration_total": float(_alipos_integration_total(order)),
+        "service_percent": float(order.service_percent or 0),
+    }
+
+
+def _queue_paid_submission_refund(order: Order) -> bool:
+    if order.payment_status != "paid" or order.refund_sync_status is not None:
+        return False
+    order.payment_status = "refund_pending"
+    order.refund_sync_status = "queued"
+    order.refund_sync_error = None
+    return True
+
+
 def _alipos_items(items: list[dict]) -> list[dict]:
     return [
         {
@@ -148,7 +175,7 @@ async def _build_alipos_payload(order: Order) -> dict:
         "paymentInfo": {
             "paymentId": payment_id,
             "itemsCost": float(order.items_cost),
-            "total": float(order.total_amount),
+            "total": float(_alipos_integration_total(order)),
             "deliveryFee": float(order.delivery_fee),
         },
         "items": _alipos_items(order.items),
@@ -165,12 +192,17 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
         order.alipos_sync_status = "failed"
         order.alipos_sync_error = str(exc)
         order.status = "SUBMISSION_FAILED"
+        should_refund = _queue_paid_submission_refund(order)
         await db.commit()
+        logger.warning("alipos_submit_rejected", extra=_alipos_log_fields(order))
+        if should_refund:
+            await _dispatch_queued_refund(db, order.id)
         raise OrderSubmissionRejected(str(exc)) from exc
 
     order.alipos_sync_status = "sending"
     order.alipos_sync_error = None
     await db.commit()
+    logger.info("alipos_submit_start", extra=_alipos_log_fields(order))
 
     try:
         response = await alipos_api.create_order(payload)
@@ -178,14 +210,21 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
         order.alipos_sync_status = "failed"
         order.alipos_sync_error = str(exc)
         order.status = "SUBMISSION_FAILED"
+        should_refund = _queue_paid_submission_refund(order)
         await db.commit()
+        logger.warning(
+            "alipos_submit_rejected",
+            extra={**_alipos_log_fields(order), "http_status": exc.status_code},
+        )
+        if should_refund:
+            await _dispatch_queued_refund(db, order.id)
         raise OrderSubmissionRejected(str(exc)) from exc
     except Exception:
-        logger.exception("AliPOS order outcome unknown for local order %s", order.id)
         order.alipos_sync_status = "unknown"
         order.alipos_sync_error = "AliPOS order create outcome is unknown"
         order.status = "SYNC_UNKNOWN"
         await db.commit()
+        logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
         return
 
     alipos_order_id = response.get("orderId")
@@ -195,12 +234,17 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
         order.alipos_sync_status = "failed"
         order.alipos_sync_error = "AliPOS response did not include a valid orderId"
         order.status = "SUBMISSION_FAILED"
+        should_refund = _queue_paid_submission_refund(order)
         await db.commit()
+        logger.warning("alipos_submit_rejected", extra=_alipos_log_fields(order))
+        if should_refund:
+            await _dispatch_queued_refund(db, order.id)
         raise OrderSubmissionRejected(order.alipos_sync_error) from exc
     order.alipos_sync_status = "synced"
     order.alipos_sync_error = None
     order.status = "NEW"
     await db.commit()
+    logger.info("alipos_submit_synced", extra=_alipos_log_fields(order))
 
 
 def _ready_for_alipos_clause():
@@ -215,6 +259,26 @@ async def list_recoverable_alipos_order_ids(db: AsyncSession) -> list[uuid.UUID]
         )
     )
     return list(result.scalars())
+
+
+async def recover_interrupted_alipos_orders(db: AsyncSession) -> int:
+    """Mark interrupted create attempts unknown without repeating the mutation."""
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.alipos_sync_status == "sending",
+            Order.alipos_order_id.is_(None),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    interrupted = list(result.scalars())
+    for order in interrupted:
+        order.alipos_sync_status = "unknown"
+        order.alipos_sync_error = "AliPOS order create outcome is unknown"
+        order.status = "SYNC_UNKNOWN"
+        logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
+    await db.commit()
+    return len(interrupted)
 
 
 async def _submit_queued_alipos_order(
@@ -252,6 +316,7 @@ async def dispatch_queued_alipos_order(order_id: uuid.UUID) -> None:
 async def recover_queued_alipos_orders() -> None:
     """Schedule only never-attempted cash or paid orders after a restart."""
     async with async_session() as db:
+        await recover_interrupted_alipos_orders(db)
         order_ids = await list_recoverable_alipos_order_ids(db)
     for order_id in order_ids:
         asyncio.create_task(dispatch_queued_alipos_order(order_id))

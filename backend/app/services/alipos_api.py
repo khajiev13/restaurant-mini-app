@@ -30,6 +30,10 @@ _tables_cache_expires_at: float = 0
 class AliPOSRejected(RuntimeError):
     """AliPOS returned a definite HTTP error before accepting the order."""
 
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"AliPOS rejected the order (HTTP {status_code})")
+
 
 class AliPOSUnknownOutcome(RuntimeError):
     """The create request may have reached AliPOS, so it must not be retried."""
@@ -197,10 +201,7 @@ async def create_order(order_payload: dict) -> dict:
             )
             resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        detail = _format_alipos_error(exc.response)
-        raise AliPOSRejected(
-            f"AliPOS returned {exc.response.status_code}: {detail}"
-        ) from exc
+        raise AliPOSRejected(exc.response.status_code) from exc
     except httpx.RequestError as exc:
         raise AliPOSUnknownOutcome("AliPOS order create outcome is unknown") from exc
     return resp.json()
