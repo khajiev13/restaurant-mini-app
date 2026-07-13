@@ -135,4 +135,12 @@ export const getOrderStatus = (
   id: string,
 ): Promise<AxiosResponse<ApiResponse<OrderStatus>>> => api.get(`/orders/${id}/status`);
 
+export const cancelOrder = (
+  id: string,
+): Promise<AxiosResponse<ApiResponse<Order>>> => api.delete(`/orders/${id}`);
+
+export const switchOrderToCash = (
+  id: string,
+): Promise<AxiosResponse<ApiResponse<Order>>> => api.post(`/orders/${id}/switch-to-cash`);
+
 export default api;

@@ -16,8 +16,11 @@ from app.services.order_service import (
     CustomerOrderNotFound,
     OrderSubmissionRejected,
     PaymentCheckoutError,
+    PaymentSwitchConflict,
+    PaymentSwitchError,
     cancel_customer_order,
     create_customer_order,
+    switch_customer_order_to_cash,
 )
 from app.services.order_status_service import apply_alipos_status_update_for_order
 from app.services.table_access_service import InvalidTableEntry
@@ -164,5 +167,43 @@ async def get_order_status(
             payment_status=order.payment_status,
             payment_expires_at=order.payment_expires_at,
             multicard_receipt_url=order.multicard_receipt_url,
+            table_title=order.table_title,
+            hall_title=order.hall_title,
+            service_percent=float(order.service_percent),
+            alipos_sync_status=order.alipos_sync_status,
         ).model_dump(mode="json"),
+    )
+
+
+@router.post("/{order_id}/switch-to-cash")
+async def switch_order_to_cash(
+    order_id: uuid.UUID,
+    current_user: CurrentUserDep,
+    db: DbDep,
+) -> ApiResponse:
+    try:
+        order = await switch_customer_order_to_cash(db, current_user, order_id)
+    except CustomerOrderNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PaymentSwitchConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except PaymentSwitchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    except OrderSubmissionRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    return ApiResponse(
+        success=True,
+        data=OrderResponse.model_validate(order).model_dump(mode="json"),
     )

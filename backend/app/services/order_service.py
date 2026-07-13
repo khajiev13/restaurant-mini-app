@@ -55,6 +55,14 @@ class CancellationError(RuntimeError):
     pass
 
 
+class PaymentSwitchConflict(RuntimeError):
+    pass
+
+
+class PaymentSwitchError(RuntimeError):
+    pass
+
+
 def _normalize_payment_title(value: str) -> str:
     return " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split())
 
@@ -250,14 +258,22 @@ async def cancel_customer_order(
         and order.payment_status == "pending"
         and order.alipos_order_id is None
     ):
+        if not order.multicard_invoice_uuid:
+            raise CancellationConflict(
+                "The online invoice cannot be safely cancelled; please ask staff"
+            )
+        try:
+            await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
+        except Exception as exc:
+            raise CancellationError(
+                "Could not confirm that the online payment was cancelled"
+            ) from exc
         order.status = "CANCELLED"
         order.payment_status = "cancelled"
         order.cancel_requested_at = datetime.datetime.now(datetime.UTC).replace(
             tzinfo=None
         )
         await db.commit()
-        if order.multicard_invoice_uuid:
-            await multicard_api.cancel_invoice(order.multicard_invoice_uuid)
         return order
 
     if order.alipos_order_id is None or order.alipos_sync_status != "synced":
@@ -321,6 +337,60 @@ async def cancel_customer_order(
         order.payment_status = "refunded"
         order.payment_error = None
     await db.commit()
+    return order
+
+
+async def switch_customer_order_to_cash(
+    db: AsyncSession,
+    current_user: User,
+    order_id: uuid.UUID,
+) -> Order:
+    """Safely invalidate an unpaid invoice before submitting the order as cash."""
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.id == order_id,
+            Order.user_id == current_user.telegram_id,
+        )
+        .with_for_update()
+    )
+    order = result.scalar_one_or_none()
+    if order is None:
+        raise CustomerOrderNotFound("Order not found")
+    if order.discriminator != "inplace":
+        raise PaymentSwitchConflict("Only table orders can switch to cash here")
+    if not (
+        order.payment_method == "rahmat"
+        and order.payment_status == "pending"
+        and order.status == "AWAITING_PAYMENT"
+        and order.alipos_order_id is None
+        and order.alipos_sync_status == "awaiting_payment"
+    ):
+        raise PaymentSwitchConflict("This order can no longer switch to cash")
+    if not order.multicard_invoice_uuid:
+        raise PaymentSwitchConflict(
+            "The online invoice cannot be safely cancelled; please ask staff"
+        )
+
+    try:
+        await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
+    except Exception as exc:
+        raise PaymentSwitchError(
+            "Could not confirm that the online payment was cancelled"
+        ) from exc
+
+    order.payment_method = "cash"
+    order.payment_provider = None
+    order.payment_status = None
+    order.payment_expires_at = None
+    order.payment_error = None
+    order.multicard_checkout_url = None
+    order.alipos_sync_status = "queued"
+    order.alipos_sync_error = None
+    order.status = "NEW"
+    await db.commit()
+
+    await submit_order_to_alipos(db, order)
     return order
 
 

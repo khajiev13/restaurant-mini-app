@@ -134,6 +134,10 @@ export interface OrderStatus {
   payment_status: string | null;
   payment_expires_at: string | null;
   multicard_receipt_url: string | null;
+  table_title: string | null;
+  hall_title: string | null;
+  service_percent: number;
+  alipos_sync_status: string | null;
 }
 
 export interface CartItem extends MenuItem {

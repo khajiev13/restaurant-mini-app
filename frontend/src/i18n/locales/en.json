@@ -106,14 +106,43 @@
     "payment_method": "Payment",
     "item_format": "Item",
     "updating": "Updating every 15 seconds...",
-    "order_number": "Order #"
+    "order_number": "Order #",
+    "cancel_order": "Cancel order",
+    "cancel_confirm": "Cancel this order?",
+    "cancel_too_late": "The restaurant has already accepted this order, so it can no longer be cancelled in the app.",
+    "action_failed": "This action could not be completed. Please ask a staff member.",
+    "payment_changed": "The payment state changed. Refresh and check the order again.",
+    "switch_cash_failed": "The online payment could not be safely cancelled, so the order was not switched to cash.",
+    "order_more": "Order more",
+    "sync_help": "We could not automatically confirm that the restaurant received this order. Please show it to a staff member.",
+    "open_telegram": "Open this order inside Telegram",
+    "open_telegram_action": "Open in Telegram",
+    "not_found": "Order not found"
   },
   "status": {
     "placed": "Order Placed",
     "preparing": "Being Prepared",
     "ready": "Ready for Pickup",
     "on_the_way": "On the Way",
-    "cancelled": "Cancelled"
+    "cancelled": "Cancelled",
+    "awaiting_payment": "Awaiting payment",
+    "payment_failed": "Payment failed",
+    "sync_unknown": "Checking your order",
+    "submission_failed": "Order not submitted"
+  },
+  "payment": {
+    "cash": "Cash",
+    "paid_online": "Paid online",
+    "awaiting": "Online payment pending",
+    "awaiting_desc": "Complete payment before the order is sent",
+    "confirmed_desc": "Payment confirmed and the order was sent to the restaurant",
+    "status_updated": "Payment status updated",
+    "retry_online": "Retry online payment",
+    "switch_to_cash": "Switch to cash",
+    "view_receipt": "View receipt",
+    "refund_pending": "Refund in progress",
+    "refunded": "Refunded",
+    "refund_failed": "Refund needs assistance"
   },
   "profile": {
     "title": "Profile",

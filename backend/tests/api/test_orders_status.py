@@ -40,6 +40,39 @@ async def _table_order(db_session, *, paid: bool = False) -> tuple[User, Order]:
     return user, order
 
 
+async def _pending_online_table_order(db_session) -> tuple[User, Order]:
+    telegram_id = 9_000_000_000 + uuid.uuid4().int % 1_000_000_000
+    user = User(
+        telegram_id=telegram_id,
+        first_name="Table customer",
+        last_name=None,
+        username=None,
+    )
+    order = Order(
+        user_id=telegram_id,
+        items=[],
+        delivery_info={"clientName": "Table customer", "phoneNumber": "+998900000000"},
+        items_cost=36000,
+        total_amount=39600,
+        delivery_fee=0,
+        payment_method="rahmat",
+        payment_provider="multicard",
+        payment_status="pending",
+        payment_expires_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        + datetime.timedelta(minutes=10),
+        multicard_invoice_uuid="invoice-uuid",
+        multicard_checkout_url="https://pay.example/checkout",
+        discriminator="inplace",
+        table_id=uuid.uuid4(),
+        alipos_eats_id=f"switch-{uuid.uuid4().hex}",
+        alipos_sync_status="awaiting_payment",
+        status="AWAITING_PAYMENT",
+    )
+    db_session.add_all([user, order])
+    await db_session.commit()
+    return user, order
+
+
 @pytest.mark.asyncio
 async def test_order_status_poll_does_not_overwrite_local_delivered(client, db_session):
     user = User(
@@ -224,3 +257,116 @@ async def test_paid_table_order_refunds_after_alipos_cancel(client, db_session):
     assert order.status == "CANCELLED"
     assert order.payment_status == "refunded"
     assert response.json()["data"]["payment_status"] == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_pending_online_table_order_can_switch_to_cash(client, db_session):
+    user, order = await _pending_online_table_order(db_session)
+    cancel_invoice = AsyncMock()
+    submit = AsyncMock()
+    token = create_jwt(user.telegram_id)
+
+    with (
+        patch(
+            "app.services.order_service.multicard_api.cancel_invoice_strict",
+            new=cancel_invoice,
+        ),
+        patch(
+            "app.services.order_service.submit_order_to_alipos",
+            new=submit,
+        ),
+    ):
+        response = await client.post(
+            f"/api/orders/{order.id}/switch-to-cash",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    cancel_invoice.assert_awaited_once_with("invoice-uuid")
+    submit.assert_awaited_once()
+    assert order.payment_method == "cash"
+    assert order.payment_provider is None
+    assert order.payment_status is None
+    assert order.multicard_checkout_url is None
+    assert order.status == "NEW"
+    assert order.alipos_sync_status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_pending_online_table_order_cancels_invoice_before_local_order(
+    client,
+    db_session,
+):
+    user, order = await _pending_online_table_order(db_session)
+    cancel_invoice = AsyncMock()
+    token = create_jwt(user.telegram_id)
+
+    with patch(
+        "app.services.order_service.multicard_api.cancel_invoice_strict",
+        new=cancel_invoice,
+    ):
+        response = await client.delete(
+            f"/api/orders/{order.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    cancel_invoice.assert_awaited_once_with("invoice-uuid")
+    assert order.status == "CANCELLED"
+    assert order.payment_status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_pending_online_order_stays_payable_when_invoice_cancel_is_unknown(
+    client,
+    db_session,
+):
+    user, order = await _pending_online_table_order(db_session)
+    token = create_jwt(user.telegram_id)
+
+    with patch(
+        "app.services.order_service.multicard_api.cancel_invoice_strict",
+        new=AsyncMock(side_effect=RuntimeError("Multicard unavailable")),
+    ):
+        response = await client.delete(
+            f"/api/orders/{order.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 502
+    assert order.status == "AWAITING_PAYMENT"
+    assert order.payment_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_switch_to_cash_keeps_online_order_when_invoice_cancel_is_unknown(
+    client,
+    db_session,
+):
+    user, order = await _pending_online_table_order(db_session)
+    token = create_jwt(user.telegram_id)
+
+    with (
+        patch(
+            "app.services.order_service.multicard_api.cancel_invoice_strict",
+            new=AsyncMock(side_effect=RuntimeError("Multicard unavailable")),
+        ),
+        patch(
+            "app.services.order_service.submit_order_to_alipos",
+            new=AsyncMock(),
+        ) as submit,
+    ):
+        response = await client.post(
+            f"/api/orders/{order.id}/switch-to-cash",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 502
+    submit.assert_not_awaited()
+    assert order.payment_method == "rahmat"
+    assert order.payment_status == "pending"
+    assert order.status == "AWAITING_PAYMENT"

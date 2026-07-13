@@ -14,6 +14,7 @@ const STATUS_LABELS_MAP: Record<string, { label: string; color: string; bg: stri
   READY: { label: 'Ready', color: '#047857', bg: '#d1fae5', dot: '#059669' },
   TAKEN_BY_COURIER: { label: 'On the Way', color: '#7c3aed', bg: '#ede9fe', dot: '#8b5cf6' },
   CANCELED: { label: 'Cancelled', color: '#b91c1c', bg: '#fef2f2', dot: '#dc2626' },
+  CANCELLED: { label: 'Cancelled', color: '#b91c1c', bg: '#fef2f2', dot: '#dc2626' },
 };
 
 export default function ArtisanOrdersPage() {
@@ -83,14 +84,35 @@ export default function ArtisanOrdersPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {orders.map((order) => {
               const st = STATUS_LABELS_MAP[order.status] || STATUS_LABELS_MAP.NEW;
+              const isTableOrder = order.discriminator === 'inplace';
+              const statusLabel = order.status === 'NEW'
+                ? t('status.placed')
+                : order.status === 'ACCEPTED_BY_RESTAURANT'
+                  ? t('status.preparing')
+                  : order.status === 'READY'
+                    ? t('status.ready')
+                    : order.status === 'CANCELED' || order.status === 'CANCELLED'
+                      ? t('status.cancelled')
+                      : isTableOrder ? t('status.placed') : st.label;
+              const paymentLabel = order.payment_status === 'refunded'
+                ? t('payment.refunded')
+                : order.payment_status === 'refund_pending'
+                  ? t('payment.refund_pending')
+                  : order.payment_status === 'paid'
+                    ? t('payment.paid_online')
+                    : order.payment_method === 'cash'
+                      ? t('payment.cash')
+                      : t('payment.awaiting');
               return (
-                <div
+                <button
+                  type="button"
                   key={order.id}
                   onClick={() => navigate(`/order/${order.id}`)}
                   style={{
                     backgroundColor: COLORS.surfaceContainerLowest, padding: 16, borderRadius: 16,
                     display: 'flex', flexDirection: 'column', gap: 12, cursor: 'pointer',
-                    transition: 'transform 0.1s ease',
+                    transition: 'transform 0.1s ease', border: 'none', width: '100%', textAlign: 'left',
+                    fontFamily: FONTS.body,
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -108,9 +130,21 @@ export default function ArtisanOrdersPage() {
                       borderRadius: 9999, fontSize: 12, fontWeight: 700,
                     }}>
                       <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: st.dot }} />
-                      {st.label}
+                      {statusLabel}
                     </div>
                   </div>
+                  {isTableOrder && order.table_title && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12, borderRadius: 12, background: '#fff7ed' }}>
+                      <Icon name="table_restaurant" size={20} style={{ color: COLORS.primary }} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 800, color: COLORS.onSurface }}>{order.table_title}</div>
+                        {order.hall_title && <div style={{ fontSize: 11, color: COLORS.secondary, marginTop: 1 }}>{order.hall_title}</div>}
+                      </div>
+                      <span style={{ fontSize: 11, color: COLORS.primary, fontWeight: 800, background: '#fff', padding: '5px 8px', borderRadius: 999 }}>
+                        {paymentLabel}
+                      </span>
+                    </div>
+                  )}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: `1px solid ${COLORS.surfaceContainer}` }}>
                     <p style={{ fontSize: 13, color: COLORS.secondary, margin: 0 }}>
                       {order.items?.map((i) => `${i.quantity}x ${i.name || 'Item'}`).join(', ')}
@@ -119,7 +153,7 @@ export default function ArtisanOrdersPage() {
                       {formatPrice(order.total_amount, i18n.language)}
                     </p>
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>

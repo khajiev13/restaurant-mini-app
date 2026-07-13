@@ -106,14 +106,43 @@
     "payment_method": "To'lov",
     "item_format": "Mahsulot",
     "updating": "Har 15 soniyada yangilanmoqda...",
-    "order_number": "Buyurtma #"
+    "order_number": "Buyurtma #",
+    "cancel_order": "Buyurtmani bekor qilish",
+    "cancel_confirm": "Buyurtmani bekor qilmoqchimisiz?",
+    "cancel_too_late": "Restoran buyurtmani qabul qilib bo'lgan. Endi uni ilovada bekor qilib bo'lmaydi.",
+    "action_failed": "Amalni bajarib bo'lmadi. Xodimga murojaat qiling.",
+    "payment_changed": "To'lov holati o'zgargan. Sahifani yangilab, qayta tekshiring.",
+    "switch_cash_failed": "Onlayn to'lovni xavfsiz bekor qilib bo'lmadi. Naqd pulga o'tkazilmadi.",
+    "order_more": "Yana buyurtma berish",
+    "sync_help": "Buyurtma restoranga yetib borganini avtomatik tasdiqlab bo'lmadi. Iltimos, xodimga ko'rsating.",
+    "open_telegram": "Buyurtmani Telegram ichida oching",
+    "open_telegram_action": "Telegramda ochish",
+    "not_found": "Buyurtma topilmadi"
   },
   "status": {
     "placed": "Buyurtma qabul qilindi",
     "preparing": "Tayyorlanmoqda",
     "ready": "Tayyor",
     "on_the_way": "Yo'lda",
-    "cancelled": "Bekor qilindi"
+    "cancelled": "Bekor qilindi",
+    "awaiting_payment": "To'lov kutilmoqda",
+    "payment_failed": "To'lov amalga oshmadi",
+    "sync_unknown": "Buyurtma tekshirilmoqda",
+    "submission_failed": "Buyurtma yuborilmadi"
+  },
+  "payment": {
+    "cash": "Naqd pul",
+    "paid_online": "Onlayn to'langan",
+    "awaiting": "Onlayn to'lov kutilmoqda",
+    "awaiting_desc": "Buyurtmani yuborish uchun to'lovni yakunlang",
+    "confirmed_desc": "To'lov tasdiqlandi va buyurtma restoranga yuborildi",
+    "status_updated": "To'lov holati yangilandi",
+    "retry_online": "Online to'lovni qayta ochish",
+    "switch_to_cash": "Naqd pulga o'tish",
+    "view_receipt": "Chekni ko'rish",
+    "refund_pending": "Pul qaytarilmoqda",
+    "refunded": "Pul qaytarildi",
+    "refund_failed": "Pulni qaytarib bo'lmadi"
   },
   "profile": {
     "title": "Profil",
