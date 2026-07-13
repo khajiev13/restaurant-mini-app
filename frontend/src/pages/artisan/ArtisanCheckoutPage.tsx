@@ -78,6 +78,11 @@ export default function ArtisanCheckoutPage() {
   const grandTotal = total + serviceCharge;
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authenticate = useAuthStore((s) => s.authenticate);
+  const inplaceOnlinePaymentEnabled = useAuthStore((s) => s.user?.inplace_online_payment_enabled === true);
+  const canPayOnline = !isTableOrder || inplaceOnlinePaymentEnabled;
+  const paymentMethods = canPayOnline
+    ? PAYMENT_METHODS
+    : PAYMENT_METHODS.filter((method) => method.key === 'cash');
   const navigate = useNavigate();
 
   const [phone, setPhone] = useState('');
@@ -95,6 +100,9 @@ export default function ArtisanCheckoutPage() {
   const clientRequestId = useRef(createClientRequestId());
   const showToast = (msg: string): void => { setToast(msg); haptic?.notificationOccurred('error'); };
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
+  useEffect(() => {
+    if (!canPayOnline && paymentMethod === 'rahmat') setPaymentMethod('cash');
+  }, [canPayOnline, paymentMethod]);
 
   const stateRef = useRef({ phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability });
   stateRef.current = { phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability };
@@ -480,7 +488,7 @@ export default function ArtisanCheckoutPage() {
               {t('checkout.payment_method_label', '💳 Payment Method')}
             </h2>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
-              {PAYMENT_METHODS.map((pm) => {
+              {paymentMethods.map((pm) => {
                 const active = paymentMethod === pm.key;
                 return (
                   <button

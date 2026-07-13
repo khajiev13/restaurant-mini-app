@@ -9,6 +9,7 @@ export interface AuthResponse {
 
 export interface User {
   telegram_id: number;
+  inplace_online_payment_enabled: boolean;
   first_name: string;
   last_name: string | null;
   username: string | null;
