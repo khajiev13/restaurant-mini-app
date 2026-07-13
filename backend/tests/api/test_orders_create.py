@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import Address, Order, User
@@ -190,3 +191,85 @@ async def test_create_order_rejected_response_does_not_expose_alipos_body(
     assert "AliPOS" not in response.text
     assert "400" not in response.text
     assert "customer-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_order_payload_build_error_is_bounded_in_state_logs_and_api(
+    client,
+    db_session,
+    caplog,
+):
+    user = User(
+        telegram_id=6203,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+        phone_number="+998901112233",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    address = Address(
+        user_id=user.telegram_id,
+        label="Home",
+        full_address="Yakkasaray District, Shota Rustaveli 45",
+        latitude="41.2995",
+        longitude="69.2401",
+    )
+    db_session.add(address)
+    await db_session.commit()
+    arbitrary_error = "payload-secret-" + "x" * 200
+
+    with (
+        patch(
+            "app.services.order_service.price_cart",
+            new=AsyncMock(
+                return_value=PricedCart(
+                    items=[
+                        {
+                            "id": "menu-item-1",
+                            "name": "Classic Somsa",
+                            "quantity": 2.0,
+                            "price": 18000.0,
+                            "modifications": [],
+                        }
+                    ],
+                    items_cost=Decimal("36000"),
+                )
+            ),
+        ),
+        patch(
+            "app.services.order_service._build_alipos_payload",
+            new=AsyncMock(side_effect=RuntimeError(arbitrary_error)),
+        ),
+        caplog.at_level("INFO", logger="app.services.order_service"),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "address_id": str(address.id),
+                "items": [
+                    {
+                        "id": "menu-item-1",
+                        "name": "Classic Somsa",
+                        "quantity": 2,
+                        "price": 18000,
+                        "modifications": [],
+                    }
+                ],
+                "phone_number": "+998901112233",
+                "payment_method": "cash",
+                "discriminator": "delivery",
+            },
+        )
+
+    result = await db_session.execute(
+        select(Order).where(Order.user_id == user.telegram_id)
+    )
+    order = result.scalar_one()
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Could not submit the order to the restaurant"
+    assert order.alipos_sync_error == "AliPOS order payload could not be prepared"
+    assert arbitrary_error not in response.text
+    assert arbitrary_error not in caplog.text
+    assert arbitrary_error not in order.alipos_sync_error

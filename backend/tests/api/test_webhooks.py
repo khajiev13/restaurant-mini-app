@@ -200,7 +200,11 @@ async def _pending_online_order(db_session) -> Order:
 
 
 def _signed_callback(
-    order: Order, *, amount: int | None = None, store_id: int = 42
+    order: Order,
+    *,
+    amount: int | None = None,
+    store_id: int = 42,
+    payment_uuid: str = "payment-uuid",
 ) -> dict:
     callback_amount = amount if amount is not None else int(order.total_amount * 100)
     raw = f"{store_id}{order.id}{callback_amount}{settings.multicard_secret}"
@@ -209,7 +213,7 @@ def _signed_callback(
         "invoice_id": str(order.id),
         "amount": callback_amount,
         "sign": hashlib.md5(raw.encode()).hexdigest(),
-        "uuid": "payment-uuid",
+        "uuid": payment_uuid,
         "receipt_url": "https://pay.example/receipt",
         "card_pan": "8600********1234",
         "ps": "UZCARD",
@@ -246,6 +250,104 @@ async def test_multicard_callback_queues_exact_paid_order_once(
     assert order.status == "PAID_AWAITING_RESTAURANT"
     assert order.alipos_sync_status == "queued"
     dispatch.assert_awaited_once_with(order.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payment_status", "refund_sync_status"),
+    [("refund_pending", "queued"), ("refunded", "refunded")],
+)
+async def test_multicard_callback_acknowledges_refund_lifecycle_duplicate(
+    client,
+    webhook_db_session,
+    monkeypatch,
+    payment_status,
+    refund_sync_status,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = payment_status
+    order.multicard_payment_uuid = "payment-uuid"
+    order.refund_sync_status = refund_sync_status
+    order.alipos_sync_status = "failed"
+    order.status = "SUBMISSION_FAILED"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    refund = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+    monkeypatch.setattr(webhooks_router.multicard_api, "refund_payment", refund)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 200
+    assert response.json() == {}
+    assert order.payment_status == payment_status
+    assert order.refund_sync_status == refund_sync_status
+    assert order.alipos_sync_status == "failed"
+    assert order.status == "SUBMISSION_FAILED"
+    dispatch.assert_not_awaited()
+    refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multicard_processed_callback_rejects_mismatched_payment_uuid(
+    client,
+    webhook_db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = "refunded"
+    order.multicard_payment_uuid = "payment-uuid"
+    order.refund_sync_status = "refunded"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order, payment_uuid="different-payment-uuid"),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Payment identifier does not match order"
+    assert order.payment_status == "refunded"
+    assert order.refund_sync_status == "refunded"
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multicard_paid_duplicate_still_validates_expected_amount(
+    client,
+    webhook_db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = "paid"
+    order.multicard_payment_uuid = "payment-uuid"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order, amount=int(order.total_amount * 100) + 1),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Payment amount does not match order"
+    assert order.payment_status == "paid"
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio

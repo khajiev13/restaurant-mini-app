@@ -18,9 +18,12 @@ class UserResponse(BaseModel):
     phone_number: str | None = None
     language: str = "uz"
     role: str = "customer"
-    inplace_online_payment_enabled: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class SelfProfileResponse(UserResponse):
+    inplace_online_payment_enabled: bool = False
 
 
 class UserUpdate(BaseModel):

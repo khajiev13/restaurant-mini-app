@@ -15,6 +15,21 @@ _mc_token: str | None = None
 _mc_token_expires_at: float = 0
 
 
+class RefundRejected(RuntimeError):
+    """Multicard definitely rejected a refund request."""
+
+    def __init__(self, status_code: int | None = None):
+        message = "Multicard refund was rejected"
+        if status_code is not None:
+            message += f" (HTTP {status_code})"
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class RefundOutcomeUnknown(RuntimeError):
+    """A refund may have completed, so the payment must be reconciled."""
+
+
 async def _get_token() -> str:
     """Get a valid Multicard access token, refreshing if near-expired."""
     global _mc_token, _mc_token_expires_at
@@ -183,23 +198,38 @@ async def cancel_invoice_strict(invoice_uuid: str) -> None:
 async def refund_payment(payment_uuid: str) -> dict[str, Any]:
     """Request one full refund for a completed Multicard payment."""
     token = await _get_token()
-    async with httpx.AsyncClient() as client:
-        response = await client.delete(
-            f"{settings.multicard_api_base_url}/payment/{payment_uuid}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-Access-Token": token,
-            },
-            timeout=30,
-        )
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(
+                f"{settings.multicard_api_base_url}/payment/{payment_uuid}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Access-Token": token,
+                },
+                timeout=30,
+            )
+    except httpx.RequestError as exc:
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
+
+    try:
         response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        if 400 <= response.status_code < 500:
+            raise RefundRejected(response.status_code) from exc
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
+
+    try:
         payload = response.json()
-    if not payload.get("success"):
-        error = payload.get("error") or {}
-        raise RuntimeError(
-            f"Multicard refund failed: {error.get('code')} — {error.get('details')}"
-        )
-    return payload.get("data") or payload
+    except (TypeError, ValueError) as exc:
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        if isinstance(payload, dict) and payload.get("success") is False:
+            raise RefundRejected(response.status_code)
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown")
+    refund = payload.get("data")
+    if not isinstance(refund, dict) or str(refund.get("status") or "").casefold() != "revert":
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown")
+    return refund
 
 
 async def get_payment(payment_uuid: str) -> dict[str, Any]:

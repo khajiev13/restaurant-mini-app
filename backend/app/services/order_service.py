@@ -21,6 +21,7 @@ from app.services.order_status_service import normalize_order_status
 from app.services.table_access_service import TableAccessService
 
 logger = logging.getLogger(__name__)
+ALIPOS_PAYLOAD_BUILD_ERROR = "AliPOS order payload could not be prepared"
 
 table_access = TableAccessService(
     secret=settings.effective_table_access_secret,
@@ -196,15 +197,23 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
     try:
         payload = await _build_alipos_payload(order)
     except Exception as exc:
+        safe_error = (
+            str(exc)
+            if isinstance(
+                exc,
+                (PaymentMethodUnavailable, alipos_api.AliPOSPreSubmitError),
+            )
+            else ALIPOS_PAYLOAD_BUILD_ERROR
+        )
         order.alipos_sync_status = "failed"
-        order.alipos_sync_error = str(exc)
+        order.alipos_sync_error = safe_error
         order.status = "SUBMISSION_FAILED"
         should_refund = _queue_paid_submission_refund(order)
         await db.commit()
         logger.warning("alipos_submit_rejected", extra=_alipos_log_fields(order))
         if should_refund:
             await _dispatch_queued_refund(db, order.id)
-        raise OrderSubmissionRejected(str(exc)) from exc
+        raise OrderSubmissionRejected(safe_error) from None
 
     order.alipos_sync_status = "sending"
     order.alipos_sync_error = None
@@ -368,17 +377,17 @@ async def _dispatch_queued_refund(db: AsyncSession, order_id: uuid.UUID) -> Orde
     await db.commit()
     try:
         await multicard_api.refund_payment(order.multicard_payment_uuid)
-    except httpx.RequestError:
-        logger.exception("Multicard refund outcome unknown for local order %s", order.id)
-        order.refund_sync_status = "unknown"
-        order.refund_sync_error = "Provider refund outcome is unknown"
-        order.payment_error = "The refund is being verified"
-    except Exception:
+    except multicard_api.RefundRejected:
         logger.exception("Multicard refund rejected for local order %s", order.id)
         order.payment_status = "refund_failed"
         order.refund_sync_status = "failed"
         order.refund_sync_error = "Provider rejected the refund request"
         order.payment_error = "The online refund needs staff assistance"
+    except Exception:
+        logger.exception("Multicard refund outcome unknown for local order %s", order.id)
+        order.refund_sync_status = "unknown"
+        order.refund_sync_error = "Provider refund outcome is unknown"
+        order.payment_error = "The refund is being verified"
     else:
         order.payment_status = "refunded"
         order.refund_sync_status = "refunded"

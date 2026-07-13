@@ -252,13 +252,6 @@ async def multicard_callback(
                 detail="Order not found",
             )
 
-        # Idempotency: already processed
-        if order.payment_status == "paid":
-            logger.info(
-                "Multicard callback: order %s already paid, skipping", order_uuid
-            )
-            return {}
-
         if not payment_uuid:
             logger.warning(
                 "Multicard callback missing payment UUID for order=%s", order_uuid
@@ -278,6 +271,29 @@ async def multicard_callback(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Payment amount does not match order",
             )
+
+        processed_payment_states = {
+            "paid",
+            "refund_pending",
+            "refunded",
+            "refund_failed",
+        }
+        if order.payment_status in processed_payment_states:
+            if order.multicard_payment_uuid != str(payment_uuid):
+                logger.warning(
+                    "Multicard callback payment mismatch for processed order=%s",
+                    order_uuid,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Payment identifier does not match order",
+                )
+            logger.info(
+                "Multicard callback: order %s already processed, skipping",
+                order_uuid,
+            )
+            return {}
+
         valid_payment_state = (
             order.payment_method == "rahmat"
             and order.status in {"AWAITING_PAYMENT", "PAYMENT_REVIEW"}

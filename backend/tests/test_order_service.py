@@ -12,11 +12,12 @@ from sqlalchemy.exc import IntegrityError
 from app.config import settings
 from app.models.models import Order, User
 from app.schemas.order import OrderCreate
-from app.services import alipos_api
+from app.services import alipos_api, multicard_api
 from app.services.menu_catalog_service import PricedCart
 from app.services.order_service import (
     CustomerOrderError,
     OrderSubmissionRejected,
+    _dispatch_queued_refund,
     create_customer_order,
     expire_due_payment_orders,
     list_recoverable_alipos_order_ids,
@@ -546,6 +547,125 @@ async def test_unknown_refund_is_reconciled_without_repeating_delete(db_session)
     assert order.refund_sync_status == "refunded"
 
 
+@pytest.mark.asyncio
+async def test_malformed_refund_success_is_unknown_without_repeating_delete(
+    db_session,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="refund_pending",
+    )
+    order.refund_sync_status = "queued"
+    order.multicard_payment_uuid = "payment-uuid"
+    await db_session.commit()
+
+    response = httpx.Response(
+        200,
+        content=b"not-json",
+        request=httpx.Request("DELETE", "https://multicard.example/payment/payment-uuid"),
+    )
+    client = Mock()
+    client.delete = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        await _dispatch_queued_refund(db_session, order.id)
+        await _dispatch_queued_refund(db_session, order.id)
+
+    await db_session.refresh(order)
+    client.delete.assert_awaited_once()
+    assert order.payment_status == "refund_pending"
+    assert order.refund_sync_status == "unknown"
+    assert order.refund_sync_error == "Provider refund outcome is unknown"
+
+
+@pytest.mark.asyncio
+async def test_refund_http_rejection_uses_explicit_definite_outcome():
+    response = httpx.Response(
+        400,
+        json={"success": False, "error": {"details": "customer-secret"}},
+        request=httpx.Request("DELETE", "https://multicard.example/payment/payment-uuid"),
+    )
+    client = Mock()
+    client.delete = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.RefundRejected) as exc_info:
+            await multicard_api.refund_payment("payment-uuid")
+
+    client.delete.assert_awaited_once()
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "customer-secret" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_refund_success_without_revert_status_is_unknown():
+    response = httpx.Response(
+        200,
+        json={"success": True, "data": {"status": "success"}},
+        request=httpx.Request("DELETE", "https://multicard.example/payment/payment-uuid"),
+    )
+    client = Mock()
+    client.delete = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.RefundOutcomeUnknown):
+            await multicard_api.refund_payment("payment-uuid")
+
+    client.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_refund_server_error_is_unknown_after_single_delete():
+    response = httpx.Response(
+        500,
+        json={"success": False, "error": {"code": "ERROR_UNKNOWN"}},
+        request=httpx.Request("DELETE", "https://multicard.example/payment/payment-uuid"),
+    )
+    client = Mock()
+    client.delete = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.RefundOutcomeUnknown):
+            await multicard_api.refund_payment("payment-uuid")
+
+    client.delete.assert_awaited_once()
+
+
 async def _expired_online_order(db_session, user: User) -> Order:
     order = Order(
         user_id=user.telegram_id,
@@ -854,7 +974,10 @@ async def test_paid_payment_method_lookup_error_is_sanitized_and_refunded_once(
 
 
 @pytest.mark.asyncio
-async def test_paid_payload_build_failure_dispatches_one_refund(db_session):
+async def test_paid_payload_build_failure_is_sanitized_and_dispatches_one_refund(
+    db_session,
+    caplog,
+):
     user = await _customer(db_session)
     order = await _queued_order(
         db_session,
@@ -865,24 +988,30 @@ async def test_paid_payload_build_failure_dispatches_one_refund(db_session):
     order.multicard_payment_uuid = "payment-uuid"
     await db_session.commit()
     refund = AsyncMock()
+    arbitrary_error = "payload-secret-" + "x" * 200
 
     with (
         patch(
             "app.services.order_service._build_alipos_payload",
-            new=AsyncMock(side_effect=RuntimeError("payload build failed")),
+            new=AsyncMock(side_effect=RuntimeError(arbitrary_error)),
         ),
         patch(
             "app.services.order_service.multicard_api.refund_payment",
             new=refund,
         ),
+        caplog.at_level("INFO", logger="app.services.order_service"),
     ):
-        with pytest.raises(OrderSubmissionRejected):
+        with pytest.raises(OrderSubmissionRejected) as exc_info:
             await submit_order_to_alipos(db_session, order)
 
     await db_session.refresh(order)
     refund.assert_awaited_once_with("payment-uuid")
     assert order.payment_status == "refunded"
     assert order.refund_sync_status == "refunded"
+    assert order.alipos_sync_error == "AliPOS order payload could not be prepared"
+    assert str(exc_info.value) == "AliPOS order payload could not be prepared"
+    assert arbitrary_error not in caplog.text
+    assert arbitrary_error not in order.alipos_sync_error
 
 
 @pytest.mark.asyncio
