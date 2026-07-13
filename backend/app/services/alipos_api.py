@@ -22,6 +22,14 @@ _tables_cache: dict | None = None
 _tables_cache_expires_at: float = 0
 
 
+class AliPOSRejected(RuntimeError):
+    """AliPOS returned a definite HTTP error before accepting the order."""
+
+
+class AliPOSUnknownOutcome(RuntimeError):
+    """The create request may have reached AliPOS, so it must not be retried."""
+
+
 def _format_alipos_error(response: httpx.Response) -> str:
     try:
         payload = response.json()
@@ -147,12 +155,30 @@ async def get_halls_and_tables() -> dict:
 
 
 async def create_order(order_payload: dict) -> dict:
-    """Send an order to AliPOS and return the response."""
-    resp = await _api_request(
-        "POST",
-        "/api/Integration/v1/order",
-        json=order_payload,
-    )
+    """Send one order create attempt; an unknown outcome is never retried."""
+    token = await _get_token()
+    path = "/api/Integration/v1/order"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.request(
+                "POST",
+                f"{settings.alipos_api_base_url}{path}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+                json=order_payload,
+                timeout=30,
+                follow_redirects=True,
+            )
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = _format_alipos_error(exc.response)
+        raise AliPOSRejected(
+            f"AliPOS returned {exc.response.status_code}: {detail}"
+        ) from exc
+    except httpx.RequestError as exc:
+        raise AliPOSUnknownOutcome("AliPOS order create outcome is unknown") from exc
     return resp.json()
 
 

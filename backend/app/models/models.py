@@ -93,6 +93,7 @@ class Order(Base):
     assigned_at: Mapped[datetime.datetime | None] = mapped_column()
     delivered_at: Mapped[datetime.datetime | None] = mapped_column()
     items: Mapped[dict] = mapped_column(JSONB)
+    delivery_info: Mapped[dict | None] = mapped_column(JSONB)
     items_cost: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     total_amount: Mapped[float] = mapped_column(Numeric(12, 2))
     delivery_fee: Mapped[float] = mapped_column(Numeric(12, 2), default=0)

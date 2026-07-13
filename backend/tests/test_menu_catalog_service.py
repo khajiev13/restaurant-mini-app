@@ -7,8 +7,11 @@ import pytest
 from app.config import settings
 from app.models.models import Stoplist
 from app.services import alipos_api
-from app.services.menu_catalog_service import CartConflict, get_customer_menu, price_cart
-
+from app.services.menu_catalog_service import (
+    CartConflict,
+    get_customer_menu,
+    price_cart,
+)
 
 ITEM_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 OTHER_ITEM_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")

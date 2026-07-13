@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS orders (
     assigned_at            TIMESTAMP,
     delivered_at           TIMESTAMP,
     items                  JSONB NOT NULL,
+    delivery_info          JSONB,
     items_cost             NUMERIC(12, 2) NOT NULL DEFAULT 0,
     total_amount           NUMERIC(12, 2) NOT NULL,
     delivery_fee           NUMERIC(12, 2) NOT NULL DEFAULT 0,
@@ -125,6 +126,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_staff_id BIGINT REFERENCES 
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS items_cost NUMERIC(12, 2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_info JSONB;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_id UUID;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_title VARCHAR(100);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS hall_id UUID;

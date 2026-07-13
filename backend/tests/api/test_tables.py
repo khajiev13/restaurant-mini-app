@@ -7,7 +7,6 @@ from app.middleware.telegram_auth import create_jwt
 from app.models.models import User
 from app.routers.tables import table_access
 
-
 TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 HALL_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 DIRECTORY_RESPONSE = {
@@ -88,6 +87,4 @@ async def test_table_manifest_requires_admin_and_returns_deep_links(client, db_s
     item = allowed.json()["data"][0]
     assert item["table_title"] == "Stol 12"
     assert item["manual_code"] == table_access.build_manual_code(TABLE_ID)
-    assert item["deep_link"].startswith(
-        "https://t.me/olotsomsa_zakaz_bot?startapp=t_"
-    )
+    assert item["deep_link"].startswith("https://t.me/olotsomsa_zakaz_bot?startapp=t_")

@@ -1,10 +1,12 @@
 import uuid
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import Address, Order, User
+from app.services.menu_catalog_service import PricedCart
 
 
 @pytest.mark.asyncio
@@ -34,6 +36,32 @@ async def test_create_order_preserves_item_display_name(client, db_session):
     with patch(
         "app.routers.orders.alipos_api.create_order",
         new=AsyncMock(return_value={"orderId": str(alipos_order_id)}),
+    ), patch(
+        "app.routers.orders.alipos_api.get_payment_methods",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "id": "59FFAC8D-ACE5-4758-8FB7-6C1F69713C37",
+                    "title": "Наличные",
+                }
+            ]
+        ),
+    ), patch(
+        "app.services.order_service.price_cart",
+        new=AsyncMock(
+            return_value=PricedCart(
+                items=[
+                    {
+                        "id": "menu-item-1",
+                        "name": "Classic Somsa",
+                        "quantity": 2.0,
+                        "price": 18000.0,
+                        "modifications": [],
+                    }
+                ],
+                items_cost=Decimal("36000"),
+            )
+        ),
     ):
         response = await client.post(
             "/api/orders",

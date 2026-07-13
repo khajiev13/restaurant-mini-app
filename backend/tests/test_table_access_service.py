@@ -11,7 +11,6 @@ from app.services.table_access_service import (
     TableDirectoryEntry,
 )
 
-
 TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 HALL_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 
@@ -57,7 +56,9 @@ def test_access_token_round_trip_and_expiry():
     issued_at = datetime.datetime(2026, 7, 13, 8, 0, tzinfo=datetime.UTC)
     token = service.issue_access_token(_entry(), now=issued_at)
 
-    claims = service.verify_access_token(token, now=issued_at + datetime.timedelta(hours=1))
+    claims = service.verify_access_token(
+        token, now=issued_at + datetime.timedelta(hours=1)
+    )
 
     assert claims.table_id == TABLE_ID
     assert claims.expires_at == issued_at + datetime.timedelta(hours=8)
@@ -74,4 +75,3 @@ def test_resolve_code_returns_safe_table_context():
     assert resolution.hall_title == "Asosiy zal"
     assert resolution.service_percent == Decimal("10")
     assert str(TABLE_ID) not in resolution.access_token
-

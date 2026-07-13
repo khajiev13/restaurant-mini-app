@@ -8,7 +8,7 @@ async def test_get_menu(client):
     """Test the /menu endpoint correctly retrieves mocked data."""
     mock_menu_data = {
         "categories": [{"id": "c1", "name": "Drinks"}],
-        "items": [{"id": "i1", "categoryId": "c1", "name": "Cola", "price": 10.0}]
+        "items": [{"id": "i1", "categoryId": "c1", "name": "Cola", "price": 10.0}],
     }
 
     for item in mock_menu_data["items"]:
@@ -17,8 +17,7 @@ async def test_get_menu(client):
     with patch(
         "app.routers.menu.get_customer_menu",
         new=AsyncMock(return_value=mock_menu_data),
-    ) as mock_get_menu:
-
+    ):
         response = await client.get("/api/menu")
 
         assert response.status_code == 200

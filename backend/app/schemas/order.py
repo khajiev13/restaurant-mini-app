@@ -1,7 +1,8 @@
 import datetime
 import uuid
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 
 class OrderItemModifier(BaseModel):
@@ -16,20 +17,27 @@ class OrderItem(BaseModel):
     name: str | None = None
     quantity: float
     price: float
-    modifications: list[OrderItemModifier] = []
+    modifications: list[OrderItemModifier] = Field(default_factory=list)
 
 
 class OrderCreate(BaseModel):
     address_id: uuid.UUID | None = None
     items: list[OrderItem]
     comment: str | None = None
-    payment_method: str = "cash"
-    discriminator: str = "delivery"
+    payment_method: Literal["cash", "rahmat"] = "cash"
+    discriminator: Literal["delivery", "inplace"] = "delivery"
+    table_access_token: str | None = None
     # For delivery — client info
     phone_number: str
     delivery_address: str | None = None
     latitude: str | None = None
     longitude: str | None = None
+
+    @model_validator(mode="after")
+    def validate_order_context(self):
+        if self.discriminator == "inplace" and not self.table_access_token:
+            raise ValueError("Table access token is required for an inplace order")
+        return self
 
 
 class OrderResponse(BaseModel):

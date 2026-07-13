@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     alipos_api_client_secret: str
     alipos_api_base_url: str = "https://web.alipos.uz"
     alipos_restaurant_id: str
+    alipos_cash_payment_id: str = ""
     alipos_online_order_payment_id: str = "34badec8-4161-47b0-be80-e11843bc496a"
 
     # Multicard / Rahmat
