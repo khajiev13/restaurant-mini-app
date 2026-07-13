@@ -186,5 +186,7 @@ async def test_create_order_rejected_response_does_not_expose_alipos_body(
         )
 
     assert response.status_code == 502
-    assert response.json()["detail"] == "AliPOS rejected the order (HTTP 400)"
+    assert response.json()["detail"] == "Could not submit the order to the restaurant"
+    assert "AliPOS" not in response.text
+    assert "400" not in response.text
     assert "customer-secret" not in response.text

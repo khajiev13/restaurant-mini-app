@@ -206,16 +206,16 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
 
     try:
         response = await alipos_api.create_order(payload)
-    except alipos_api.AliPOSRejected as exc:
+    except (alipos_api.AliPOSRejected, alipos_api.AliPOSPreSubmitError) as exc:
         order.alipos_sync_status = "failed"
         order.alipos_sync_error = str(exc)
         order.status = "SUBMISSION_FAILED"
         should_refund = _queue_paid_submission_refund(order)
         await db.commit()
-        logger.warning(
-            "alipos_submit_rejected",
-            extra={**_alipos_log_fields(order), "http_status": exc.status_code},
-        )
+        log_fields = _alipos_log_fields(order)
+        if exc.status_code is not None:
+            log_fields["http_status"] = exc.status_code
+        logger.warning("alipos_submit_rejected", extra=log_fields)
         if should_refund:
             await _dispatch_queued_refund(db, order.id)
         raise OrderSubmissionRejected(str(exc)) from exc
@@ -227,19 +227,16 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
         logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
         return
 
-    alipos_order_id = response.get("orderId")
     try:
+        alipos_order_id = response.get("orderId") if isinstance(response, dict) else None
         order.alipos_order_id = uuid.UUID(str(alipos_order_id))
-    except (TypeError, ValueError) as exc:
-        order.alipos_sync_status = "failed"
-        order.alipos_sync_error = "AliPOS response did not include a valid orderId"
-        order.status = "SUBMISSION_FAILED"
-        should_refund = _queue_paid_submission_refund(order)
+    except (TypeError, ValueError):
+        order.alipos_sync_status = "unknown"
+        order.alipos_sync_error = "AliPOS order create outcome is unknown"
+        order.status = "SYNC_UNKNOWN"
         await db.commit()
-        logger.warning("alipos_submit_rejected", extra=_alipos_log_fields(order))
-        if should_refund:
-            await _dispatch_queued_refund(db, order.id)
-        raise OrderSubmissionRejected(order.alipos_sync_error) from exc
+        logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
+        return
     order.alipos_sync_status = "synced"
     order.alipos_sync_error = None
     order.status = "NEW"

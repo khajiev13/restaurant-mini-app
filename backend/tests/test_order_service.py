@@ -606,6 +606,117 @@ async def test_paid_definite_submission_rejection_dispatches_one_refund(db_sessi
 
 
 @pytest.mark.asyncio
+async def test_paid_token_failure_is_definite_sanitized_and_refunded_once(
+    db_session,
+    caplog,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="paid",
+    )
+    order.multicard_payment_uuid = "payment-uuid"
+    await db_session.commit()
+    token_request = httpx.Request("POST", "https://alipos.example/oauth/token")
+    token_response = httpx.Response(
+        401,
+        json={"detail": "customer-secret"},
+        request=token_request,
+    )
+    token_error = httpx.HTTPStatusError(
+        "token rejected",
+        request=token_request,
+        response=token_response,
+    )
+    refund = AsyncMock()
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": ONLINE_PAYMENT_ID, "title": "online-order"}]
+            ),
+        ),
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(side_effect=token_error),
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient") as client_factory,
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+        caplog.at_level("INFO"),
+    ):
+        with pytest.raises(OrderSubmissionRejected) as exc:
+            await submit_order_to_alipos(db_session, order)
+
+    await db_session.refresh(order)
+    expected = "AliPOS order submission prerequisite failed (HTTP 401)"
+    assert str(exc.value) == expected
+    assert order.alipos_sync_error == expected
+    assert order.alipos_sync_status == "failed"
+    assert order.status == "SUBMISSION_FAILED"
+    refund.assert_awaited_once_with("payment-uuid")
+    client_factory.assert_not_called()
+    assert "customer-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_paid_payment_method_lookup_error_is_sanitized_and_refunded_once(
+    db_session,
+    caplog,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="paid",
+    )
+    order.multicard_payment_uuid = "payment-uuid"
+    await db_session.commit()
+    response = httpx.Response(
+        400,
+        json={"detail": "customer-secret"},
+        request=httpx.Request("GET", "https://alipos.example/payment-methods"),
+    )
+    request = AsyncMock(return_value=response)
+    client = Mock()
+    client.request = request
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    refund = AsyncMock()
+
+    with (
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+        caplog.at_level("INFO"),
+    ):
+        with pytest.raises(OrderSubmissionRejected) as exc:
+            await submit_order_to_alipos(db_session, order)
+
+    await db_session.refresh(order)
+    expected = "AliPOS order submission prerequisite failed (HTTP 400)"
+    assert str(exc.value) == expected
+    assert order.alipos_sync_error == expected
+    assert order.alipos_sync_status == "failed"
+    assert order.status == "SUBMISSION_FAILED"
+    refund.assert_awaited_once_with("payment-uuid")
+    request.assert_awaited_once()
+    assert "customer-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_paid_payload_build_failure_dispatches_one_refund(db_session):
     user = await _customer(db_session)
     order = await _queued_order(
@@ -638,7 +749,7 @@ async def test_paid_payload_build_failure_dispatches_one_refund(db_session):
 
 
 @pytest.mark.asyncio
-async def test_paid_invalid_alipos_response_dispatches_one_refund(db_session):
+async def test_paid_invalid_alipos_response_is_unknown_without_refund(db_session):
     user = await _customer(db_session)
     order = await _queued_order(
         db_session,
@@ -666,13 +777,15 @@ async def test_paid_invalid_alipos_response_dispatches_one_refund(db_session):
             new=refund,
         ),
     ):
-        with pytest.raises(OrderSubmissionRejected):
-            await submit_order_to_alipos(db_session, order)
+        await submit_order_to_alipos(db_session, order)
 
     await db_session.refresh(order)
-    refund.assert_awaited_once_with("payment-uuid")
-    assert order.payment_status == "refunded"
-    assert order.refund_sync_status == "refunded"
+    refund.assert_not_awaited()
+    assert order.payment_status == "paid"
+    assert order.refund_sync_status is None
+    assert order.alipos_sync_status == "unknown"
+    assert order.status == "SYNC_UNKNOWN"
+    assert order.alipos_sync_error == "AliPOS order create outcome is unknown"
 
 
 @pytest.mark.asyncio
