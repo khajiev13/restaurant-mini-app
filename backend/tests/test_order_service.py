@@ -590,10 +590,68 @@ async def test_malformed_refund_success_is_unknown_without_repeating_delete(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "ERROR_UNKNOWN",
+        "ERROR_CALLBACK_TIMEOUT",
+        "ERROR_DEBIT_UNKNOWN",
+        "ERROR_TRANS_NOT_READY",
+    ],
+)
+async def test_ambiguous_refund_4xx_is_unknown_without_repeating_delete(
+    db_session,
+    error_code,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="refund_pending",
+    )
+    order.refund_sync_status = "queued"
+    order.multicard_payment_uuid = "payment-uuid"
+    await db_session.commit()
+
+    response = httpx.Response(
+        400,
+        json={
+            "success": False,
+            "error": {"code": error_code, "details": "provider-secret"},
+        },
+        request=httpx.Request("DELETE", "https://multicard.example/payment/payment-uuid"),
+    )
+    client = Mock()
+    client.delete = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        await _dispatch_queued_refund(db_session, order.id)
+        await _dispatch_queued_refund(db_session, order.id)
+
+    await db_session.refresh(order)
+    client.delete.assert_awaited_once()
+    assert order.payment_status == "refund_pending"
+    assert order.refund_sync_status == "unknown"
+    assert order.refund_sync_error == "Provider refund outcome is unknown"
+
+
+@pytest.mark.asyncio
 async def test_refund_http_rejection_uses_explicit_definite_outcome():
     response = httpx.Response(
         400,
-        json={"success": False, "error": {"details": "customer-secret"}},
+        json={
+            "success": False,
+            "error": {"code": "ERROR_FIELDS", "details": "customer-secret"},
+        },
         request=httpx.Request("DELETE", "https://multicard.example/payment/payment-uuid"),
     )
     client = Mock()

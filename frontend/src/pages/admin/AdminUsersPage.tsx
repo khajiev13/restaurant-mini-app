@@ -3,11 +3,11 @@ import StaffLayout from '../../components/staff/StaffLayout';
 import { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import { searchAdminUsers, updateAdminUserRole } from '../../services/adminApi';
 import { useAuthStore } from '../../stores/authStore';
-import type { User } from '../../types/api';
+import type { AdminUser } from '../../types/api';
 
-const ROLE_OPTIONS: ReadonlyArray<User['role']> = ['customer', 'staff', 'admin'];
+const ROLE_OPTIONS: ReadonlyArray<AdminUser['role']> = ['customer', 'staff', 'admin'];
 
-function getDisplayName(user: User): string {
+function getDisplayName(user: AdminUser): string {
   return `${user.first_name} ${user.last_name ?? ''}`.trim() || `Telegram ${user.telegram_id}`;
 }
 
@@ -25,8 +25,8 @@ export default function AdminUsersPage() {
   const currentAuthUser = useAuthStore((state) => state.user);
   const refreshMe = useAuthStore((state) => state.refreshMe);
   const [query, setQuery] = useState('');
-  const [users, setUsers] = useState<User[]>([]);
-  const [selectedRoles, setSelectedRoles] = useState<Record<number, User['role']>>({});
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [selectedRoles, setSelectedRoles] = useState<Record<number, AdminUser['role']>>({});
   const [isSearching, setIsSearching] = useState(false);
   const [savingUserId, setSavingUserId] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -59,13 +59,13 @@ export default function AdminUsersPage() {
     void runSearch();
   };
 
-  const handleRoleChange = (telegramId: number, role: User['role']) => {
+  const handleRoleChange = (telegramId: number, role: AdminUser['role']) => {
     setSelectedRoles((current) => ({ ...current, [telegramId]: role }));
     setMessage(null);
     setError(null);
   };
 
-  const handleSaveRole = async (user: User) => {
+  const handleSaveRole = async (user: AdminUser) => {
     const role = selectedRoles[user.telegram_id] ?? user.role;
     setSavingUserId(user.telegram_id);
     setError(null);
@@ -215,7 +215,10 @@ export default function AdminUsersPage() {
                       aria-label={`Role for ${displayName}`}
                       value={selectedRole}
                       onChange={(event) =>
-                        handleRoleChange(user.telegram_id, event.target.value as User['role'])
+                        handleRoleChange(
+                          user.telegram_id,
+                          event.target.value as AdminUser['role'],
+                        )
                       }
                       style={{
                         height: 44,

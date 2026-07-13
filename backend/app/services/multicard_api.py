@@ -30,6 +30,28 @@ class RefundOutcomeUnknown(RuntimeError):
     """A refund may have completed, so the payment must be reconciled."""
 
 
+_AMBIGUOUS_REFUND_ERROR_CODES = frozenset(
+    {
+        "ERROR_UNKNOWN",
+        "ERROR_CALLBACK_TIMEOUT",
+        "ERROR_DEBIT_UNKNOWN",
+        "ERROR_TRANS_NOT_READY",
+    }
+)
+
+
+def _refund_error_code(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return None
+    return code.strip().upper()
+
+
 async def _get_token() -> str:
     """Get a valid Multicard access token, refreshing if near-expired."""
     global _mc_token, _mc_token_expires_at
@@ -214,7 +236,15 @@ async def refund_payment(payment_uuid: str) -> dict[str, Any]:
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        if 400 <= response.status_code < 500:
+        try:
+            error_code = _refund_error_code(response.json())
+        except (TypeError, ValueError):
+            error_code = None
+        if (
+            400 <= response.status_code < 500
+            and error_code is not None
+            and error_code not in _AMBIGUOUS_REFUND_ERROR_CODES
+        ):
             raise RefundRejected(response.status_code) from exc
         raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
 
@@ -223,7 +253,13 @@ async def refund_payment(payment_uuid: str) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
     if not isinstance(payload, dict) or payload.get("success") is not True:
-        if isinstance(payload, dict) and payload.get("success") is False:
+        error_code = _refund_error_code(payload)
+        if (
+            isinstance(payload, dict)
+            and payload.get("success") is False
+            and error_code is not None
+            and error_code not in _AMBIGUOUS_REFUND_ERROR_CODES
+        ):
             raise RefundRejected(response.status_code)
         raise RefundOutcomeUnknown("Multicard refund outcome is unknown")
     refund = payload.get("data")
