@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCartStore } from '../../stores/cartStore';
 import { useTableOrderStore } from '../../stores/tableOrderStore';
+import type { CreateOrderPayload } from '../../types/api';
 import ArtisanCheckoutPage from './ArtisanCheckoutPage';
 
 const apiMocks = vi.hoisted(() => ({
@@ -115,5 +116,53 @@ describe('ArtisanCheckoutPage table mode', () => {
       payment_method: 'rahmat',
     });
     open.mockRestore();
+  });
+
+  it('reuses one client request ID when a timed-out checkout is retried', async () => {
+    const user = userEvent.setup();
+    apiMocks.createOrder
+      .mockRejectedValueOnce({ code: 'ECONNABORTED' })
+      .mockResolvedValueOnce({
+        data: { data: { id: 'order-recovered', payment_method: 'cash', multicard_checkout_url: null } },
+      });
+    render(
+      <MemoryRouter>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    const placeOrder = await screen.findByRole('button', { name: /place order|buyurtmani qabul qilish/i });
+    await user.click(placeOrder);
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(1));
+    await user.click(placeOrder);
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+    const secondPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    const firstId = firstPayload.client_request_id;
+    const secondId = secondPayload.client_request_id;
+    expect(firstId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(secondId).toBe(firstId);
+  });
+
+  it('lets a first-time table customer enter a phone number inline', async () => {
+    const user = userEvent.setup();
+    apiMocks.getMe.mockResolvedValue({ data: { data: { phone_number: null } } });
+    apiMocks.createOrder.mockResolvedValue({
+      data: { data: { id: 'order-first-time', payment_method: 'cash', multicard_checkout_url: null } },
+    });
+    render(
+      <MemoryRouter>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    const phone = await screen.findByRole('textbox', { name: /telefon|phone/i });
+    await user.type(phone, '+998901234567');
+    await user.click(screen.getByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
+
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(1));
+    const payload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+    expect(payload.phone_number).toBe('+998901234567');
   });
 });

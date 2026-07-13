@@ -6,7 +6,9 @@ import uuid
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
-from sqlalchemy import select
+import httpx
+from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -60,6 +62,10 @@ class PaymentSwitchConflict(RuntimeError):
 
 
 class PaymentSwitchError(RuntimeError):
+    pass
+
+
+class PaymentRetryConflict(RuntimeError):
     pass
 
 
@@ -197,41 +203,207 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
     await db.commit()
 
 
-async def dispatch_queued_alipos_order(order_id: uuid.UUID) -> None:
-    """Claim one paid order for a single AliPOS create attempt."""
-    async with async_session() as db:
-        result = await db.execute(
-            select(Order)
-            .where(
-                Order.id == order_id,
-                Order.alipos_sync_status == "queued",
-                Order.payment_status == "paid",
-            )
-            .with_for_update(skip_locked=True)
+def _ready_for_alipos_clause():
+    return or_(Order.payment_method == "cash", Order.payment_status == "paid")
+
+
+async def list_recoverable_alipos_order_ids(db: AsyncSession) -> list[uuid.UUID]:
+    result = await db.execute(
+        select(Order.id).where(
+            Order.alipos_sync_status == "queued",
+            _ready_for_alipos_clause(),
         )
-        order = result.scalar_one_or_none()
-        if order is None:
-            return
-        order.alipos_sync_status = "sending"
-        await db.commit()
+    )
+    return list(result.scalars())
+
+
+async def _submit_queued_alipos_order(
+    db: AsyncSession,
+    order_id: uuid.UUID,
+) -> Order | None:
+    """Atomically claim a never-attempted cash or paid order and submit it once."""
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.id == order_id,
+            Order.alipos_sync_status == "queued",
+            _ready_for_alipos_clause(),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    order = result.scalar_one_or_none()
+    if order is None:
+        return None
+    order.alipos_sync_status = "sending"
+    await db.commit()
+    await submit_order_to_alipos(db, order)
+    return order
+
+
+async def dispatch_queued_alipos_order(order_id: uuid.UUID) -> None:
+    """Claim one never-attempted cash or paid order for one AliPOS create attempt."""
+    async with async_session() as db:
         try:
-            await submit_order_to_alipos(db, order)
+            await _submit_queued_alipos_order(db, order_id)
         except OrderSubmissionRejected:
-            logger.exception("AliPOS rejected paid local order %s", order_id)
+            logger.exception("AliPOS rejected queued local order %s", order_id)
 
 
 async def recover_queued_alipos_orders() -> None:
-    """Schedule only never-attempted paid orders after a process restart."""
+    """Schedule only never-attempted cash or paid orders after a restart."""
     async with async_session() as db:
-        result = await db.execute(
-            select(Order.id).where(
-                Order.alipos_sync_status == "queued",
-                Order.payment_status == "paid",
-            )
-        )
-        order_ids = list(result.scalars())
+        order_ids = await list_recoverable_alipos_order_ids(db)
     for order_id in order_ids:
         asyncio.create_task(dispatch_queued_alipos_order(order_id))
+
+
+async def list_recoverable_refund_order_ids(db: AsyncSession) -> list[uuid.UUID]:
+    """Return refunds that were durably queued but never attempted."""
+    result = await db.execute(
+        select(Order.id).where(
+            Order.payment_status == "refund_pending",
+            Order.refund_sync_status == "queued",
+        )
+    )
+    return list(result.scalars())
+
+
+async def _dispatch_queued_refund(db: AsyncSession, order_id: uuid.UUID) -> Order | None:
+    """Claim and attempt one never-attempted refund.
+
+    Transport failures are deliberately recorded as unknown: retrying DELETE after
+    a timeout could refund twice if the provider processed the first request.
+    """
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.id == order_id,
+            Order.payment_status == "refund_pending",
+            Order.refund_sync_status == "queued",
+        )
+        .with_for_update(skip_locked=True)
+    )
+    order = result.scalar_one_or_none()
+    if order is None:
+        return None
+    if not order.multicard_payment_uuid:
+        order.payment_status = "refund_failed"
+        order.refund_sync_status = "failed"
+        order.refund_sync_error = "Missing payment reference"
+        order.payment_error = "The online refund needs staff assistance"
+        await db.commit()
+        return order
+
+    order.refund_sync_status = "sending"
+    order.refund_sync_error = None
+    await db.commit()
+    try:
+        await multicard_api.refund_payment(order.multicard_payment_uuid)
+    except httpx.RequestError:
+        logger.exception("Multicard refund outcome unknown for local order %s", order.id)
+        order.refund_sync_status = "unknown"
+        order.refund_sync_error = "Provider refund outcome is unknown"
+        order.payment_error = "The refund is being verified"
+    except Exception:
+        logger.exception("Multicard refund rejected for local order %s", order.id)
+        order.payment_status = "refund_failed"
+        order.refund_sync_status = "failed"
+        order.refund_sync_error = "Provider rejected the refund request"
+        order.payment_error = "The online refund needs staff assistance"
+    else:
+        order.payment_status = "refunded"
+        order.refund_sync_status = "refunded"
+        order.refund_sync_error = None
+        order.payment_error = None
+    await db.commit()
+    return order
+
+
+async def dispatch_queued_refund(order_id: uuid.UUID) -> None:
+    async with async_session() as db:
+        await _dispatch_queued_refund(db, order_id)
+
+
+async def reconcile_unknown_refunds(db: AsyncSession) -> int:
+    """Confirm completed refunds after a timeout or process interruption.
+
+    Non-refunded provider states remain unknown for staff review; this function
+    never repeats a potentially completed refund request.
+    """
+    result = await db.execute(
+        select(Order).where(
+            Order.payment_status == "refund_pending",
+            Order.refund_sync_status.in_(["sending", "unknown"]),
+            Order.multicard_payment_uuid.is_not(None),
+        )
+    )
+    reconciled = 0
+    for order in result.scalars():
+        try:
+            payment = await multicard_api.get_payment(order.multicard_payment_uuid)
+        except Exception:
+            order.refund_sync_status = "unknown"
+            order.refund_sync_error = "Could not verify provider refund state"
+            continue
+        provider_status = str(
+            payment.get("status") or payment.get("payment_status") or ""
+        ).casefold()
+        if provider_status in {"revert", "reverted", "refunded", "refund"}:
+            order.payment_status = "refunded"
+            order.refund_sync_status = "refunded"
+            order.refund_sync_error = None
+            order.payment_error = None
+            reconciled += 1
+        else:
+            order.refund_sync_status = "unknown"
+            order.refund_sync_error = "Provider does not report a completed refund"
+    await db.commit()
+    return reconciled
+
+
+async def recover_refund_operations() -> None:
+    """Resume safe queued refunds and reconcile ambiguous attempts on startup."""
+    async with async_session() as db:
+        order_ids = await list_recoverable_refund_order_ids(db)
+        await reconcile_unknown_refunds(db)
+    for order_id in order_ids:
+        asyncio.create_task(dispatch_queued_refund(order_id))
+
+
+async def expire_due_payment_orders(
+    db: AsyncSession,
+    now: datetime.datetime,
+) -> int:
+    """Expire only invoices whose cancellation Multicard confirms while row-locked."""
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.payment_status == "pending",
+            Order.payment_expires_at.is_not(None),
+            Order.payment_expires_at <= now,
+            Order.alipos_order_id.is_(None),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    expired_count = 0
+    for order in result.scalars():
+        if not order.multicard_invoice_uuid:
+            logger.error("Expired order %s has no cancellable invoice UUID", order.id)
+            continue
+        try:
+            await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
+        except Exception:
+            logger.warning(
+                "Invoice cancellation was not confirmed for expired order %s",
+                order.id,
+            )
+            continue
+        order.payment_status = "expired"
+        order.status = "CANCELLED"
+        order.payment_error = "Payment timeout — invoice cancellation confirmed"
+        expired_count += 1
+    await db.commit()
+    return expired_count
 
 
 async def cancel_customer_order(
@@ -318,26 +490,14 @@ async def cancel_customer_order(
     should_refund = order.payment_status == "paid"
     if should_refund:
         order.payment_status = "refund_pending"
+        order.refund_sync_status = "queued"
+        order.refund_sync_error = None
     await db.commit()
 
     if not should_refund:
         return order
-    if not order.multicard_payment_uuid:
-        order.payment_status = "refund_failed"
-        order.payment_error = "Missing Multicard payment reference"
-        await db.commit()
-        return order
-    try:
-        await multicard_api.refund_payment(order.multicard_payment_uuid)
-    except Exception:
-        logger.exception("Multicard refund failed for local order %s", order.id)
-        order.payment_status = "refund_failed"
-        order.payment_error = "The online refund could not be completed"
-    else:
-        order.payment_status = "refunded"
-        order.payment_error = None
-    await db.commit()
-    return order
+    refunded = await _dispatch_queued_refund(db, order.id)
+    return refunded or order
 
 
 async def switch_customer_order_to_cash(
@@ -359,25 +519,30 @@ async def switch_customer_order_to_cash(
         raise CustomerOrderNotFound("Order not found")
     if order.discriminator != "inplace":
         raise PaymentSwitchConflict("Only table orders can switch to cash here")
-    if not (
-        order.payment_method == "rahmat"
-        and order.payment_status == "pending"
-        and order.status == "AWAITING_PAYMENT"
-        and order.alipos_order_id is None
-        and order.alipos_sync_status == "awaiting_payment"
-    ):
+    if order.payment_method != "rahmat" or order.alipos_order_id is not None:
         raise PaymentSwitchConflict("This order can no longer switch to cash")
-    if not order.multicard_invoice_uuid:
-        raise PaymentSwitchConflict(
-            "The online invoice cannot be safely cancelled; please ask staff"
-        )
-
-    try:
-        await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
-    except Exception as exc:
-        raise PaymentSwitchError(
-            "Could not confirm that the online payment was cancelled"
-        ) from exc
+    pending_invoice = (
+        order.payment_status == "pending"
+        and order.status == "AWAITING_PAYMENT"
+        and order.alipos_sync_status == "awaiting_payment"
+    )
+    definitively_inactive = (
+        (order.payment_status == "failed" and order.status == "PAYMENT_FAILED")
+        or (order.payment_status == "expired" and order.status == "CANCELLED")
+    )
+    if not pending_invoice and not definitively_inactive:
+        raise PaymentSwitchConflict("This order can no longer switch to cash")
+    if pending_invoice:
+        if not order.multicard_invoice_uuid:
+            raise PaymentSwitchConflict(
+                "The online invoice cannot be safely cancelled; please ask staff"
+            )
+        try:
+            await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
+        except Exception as exc:
+            raise PaymentSwitchError(
+                "Could not confirm that the online payment was cancelled"
+            ) from exc
 
     order.payment_method = "cash"
     order.payment_provider = None
@@ -390,8 +555,71 @@ async def switch_customer_order_to_cash(
     order.status = "NEW"
     await db.commit()
 
-    await submit_order_to_alipos(db, order)
+    submitted = await _submit_queued_alipos_order(db, order.id)
+    return submitted or order
+
+
+async def _create_order_invoice(db: AsyncSession, order: Order) -> Order:
+    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    order.payment_status = "pending"
+    order.payment_expires_at = now + datetime.timedelta(
+        seconds=settings.rahmat_payment_timeout_seconds
+    )
+    order.payment_error = None
+    order.multicard_invoice_uuid = None
+    order.multicard_checkout_url = None
+    order.alipos_sync_status = "awaiting_payment"
+    order.status = "AWAITING_PAYMENT"
+    await db.commit()
+    try:
+        invoice = await multicard_api.create_invoice(
+            amount_tiyin=int(order.total_amount * 100),
+            invoice_id=str(order.id),
+            return_url=settings.telegram_order_deep_link(str(order.id)),
+            ttl=settings.rahmat_payment_timeout_seconds,
+        )
+        order.multicard_invoice_uuid = invoice.get("uuid")
+        order.multicard_checkout_url = invoice["checkout_url"]
+    except httpx.RequestError:
+        order.payment_status = "invoice_unknown"
+        order.payment_error = "The payment link outcome needs verification"
+        order.status = "PAYMENT_REVIEW"
+    except Exception:
+        order.payment_status = "failed"
+        order.payment_error = "Could not create the online payment"
+        order.status = "PAYMENT_FAILED"
+    await db.commit()
     return order
+
+
+async def retry_customer_order_payment(
+    db: AsyncSession,
+    current_user: User,
+    order_id: uuid.UUID,
+) -> Order:
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.id == order_id,
+            Order.user_id == current_user.telegram_id,
+        )
+        .with_for_update()
+    )
+    order = result.scalar_one_or_none()
+    if order is None:
+        raise CustomerOrderNotFound("Order not found")
+    can_retry = (
+        order.discriminator == "inplace"
+        and order.payment_method == "rahmat"
+        and order.alipos_order_id is None
+        and (
+            (order.payment_status == "failed" and order.status == "PAYMENT_FAILED")
+            or (order.payment_status == "expired" and order.status == "CANCELLED")
+        )
+    )
+    if not can_retry:
+        raise PaymentRetryConflict("This online payment cannot be retried safely")
+    return await _create_order_invoice(db, order)
 
 
 async def _resolve_delivery(
@@ -436,6 +664,22 @@ async def create_customer_order(
     current_user: User,
     body: OrderCreate,
 ) -> Order:
+    if body.client_request_id:
+        result = await db.execute(
+            select(Order).where(
+                Order.user_id == current_user.telegram_id,
+                Order.client_request_id == body.client_request_id,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            if existing.alipos_sync_status == "queued":
+                submitted = await _submit_queued_alipos_order(db, existing.id)
+                if submitted is not None:
+                    return submitted
+                await db.refresh(existing)
+            return existing
+
     selected_address = None
     table = None
     delivery_address = None
@@ -444,7 +688,9 @@ async def create_customer_order(
             db, current_user, body
         )
     else:
-        table = await table_access.resolve_access_token(body.table_access_token or "")
+        table_token = body.table_access_token or ""
+        table_claims = table_access.verify_access_token(table_token)
+        table = await table_access.resolve_access_token(table_token)
 
     priced = await price_cart(db, body.items)
     items_cost = _money(priced.items_cost)
@@ -465,6 +711,7 @@ async def create_customer_order(
     order = Order(
         id=order_id,
         user_id=current_user.telegram_id,
+        client_request_id=body.client_request_id,
         address_id=selected_address.id if selected_address else body.address_id,
         items=priced.items,
         delivery_info=delivery_info,
@@ -481,36 +728,41 @@ async def create_customer_order(
         hall_id=table.hall_id if table else None,
         hall_title=table.hall_title if table else None,
         service_percent=service_percent,
+        table_access_expires_at=(
+            table_claims.expires_at.astimezone(datetime.UTC).replace(tzinfo=None)
+            if table
+            else None
+        ),
         alipos_eats_id=f"mrpub-{uuid.uuid4().hex[:12]}",
         alipos_sync_status="awaiting_payment" if online else "queued",
         status="AWAITING_PAYMENT" if online else "NEW",
     )
     db.add(order)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        if not body.client_request_id:
+            raise
+        result = await db.execute(
+            select(Order).where(
+                Order.user_id == current_user.telegram_id,
+                Order.client_request_id == body.client_request_id,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            raise
+        if existing.alipos_sync_status == "queued":
+            submitted = await _submit_queued_alipos_order(db, existing.id)
+            if submitted is not None:
+                return submitted
+            await db.refresh(existing)
+        return existing
     await db.refresh(order)
 
     if not online:
-        await submit_order_to_alipos(db, order)
-        return order
+        submitted = await _submit_queued_alipos_order(db, order.id)
+        return submitted or order
 
-    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-    order.payment_expires_at = now + datetime.timedelta(
-        seconds=settings.rahmat_payment_timeout_seconds
-    )
-    try:
-        invoice = await multicard_api.create_invoice(
-            amount_tiyin=int(total * 100),
-            invoice_id=str(order.id),
-            return_url=settings.telegram_order_deep_link(str(order.id)),
-            ttl=settings.rahmat_payment_timeout_seconds,
-        )
-        order.multicard_invoice_uuid = invoice.get("uuid")
-        order.multicard_checkout_url = invoice["checkout_url"]
-    except Exception as exc:
-        order.payment_status = "failed"
-        order.payment_error = "Could not create the online payment"
-        order.status = "PAYMENT_FAILED"
-        await db.commit()
-        raise PaymentCheckoutError("Could not create the online payment") from exc
-    await db.commit()
-    return order
+    return await _create_order_invoice(db, order)

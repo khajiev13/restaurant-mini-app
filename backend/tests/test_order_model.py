@@ -23,6 +23,7 @@ def test_order_contract_declares_table_pricing_and_sync_fields():
         "hall_id",
         "hall_title",
         "service_percent",
+        "table_access_expires_at",
         "items_cost",
         "alipos_sync_status",
         "alipos_sync_error",
@@ -30,10 +31,32 @@ def test_order_contract_declares_table_pricing_and_sync_fields():
     }
 
     assert expected_model_fields <= set(Order.__table__.columns.keys())
-    assert expected_model_fields - {"cancel_requested_at"} <= set(OrderResponse.model_fields)
+    assert {
+        "table_title",
+        "hall_title",
+        "service_percent",
+        "items_cost",
+        "alipos_sync_status",
+    } <= set(OrderResponse.model_fields)
+    assert {
+        "table_id",
+        "hall_id",
+        "alipos_order_id",
+        "alipos_eats_id",
+        "alipos_sync_error",
+    }.isdisjoint(OrderResponse.model_fields)
     assert {
         "table_title",
         "hall_title",
         "service_percent",
         "alipos_sync_status",
     } <= set(OrderStatusResponse.model_fields)
+
+
+def test_order_metadata_declares_customer_request_idempotency_index():
+    index = next(
+        idx for idx in Order.__table__.indexes if idx.name == "uq_orders_user_request"
+    )
+
+    assert index.unique is True
+    assert [column.name for column in index.columns] == ["user_id", "client_request_id"]

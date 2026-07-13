@@ -83,6 +83,7 @@ class Order(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
+    client_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     address_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("addresses.id", ondelete="SET NULL")
     )
@@ -112,6 +113,7 @@ class Order(Base):
     hall_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     hall_title: Mapped[str | None] = mapped_column(String(100))
     service_percent: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
+    table_access_expires_at: Mapped[datetime.datetime | None] = mapped_column()
     alipos_order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     alipos_eats_id: Mapped[str | None] = mapped_column(String(255))
     alipos_sync_status: Mapped[str | None] = mapped_column(String(32))
@@ -120,6 +122,8 @@ class Order(Base):
     multicard_checkout_url: Mapped[str | None] = mapped_column(Text)
     multicard_receipt_url: Mapped[str | None] = mapped_column(Text)
     multicard_payment_uuid: Mapped[str | None] = mapped_column(String(64))
+    refund_sync_status: Mapped[str | None] = mapped_column(String(32))
+    refund_sync_error: Mapped[str | None] = mapped_column(Text)
     alipos_cancel_status: Mapped[str | None] = mapped_column(String(50))
     alipos_cancel_error: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(50), default="NEW")
@@ -146,6 +150,13 @@ class Order(Base):
 
     __table_args__ = (
         Index("idx_orders_user_id", "user_id"),
+        Index(
+            "uq_orders_user_request",
+            "user_id",
+            "client_request_id",
+            unique=True,
+            postgresql_where=text("client_request_id IS NOT NULL"),
+        ),
         Index("idx_orders_alipos_order_id", "alipos_order_id"),
         Index("idx_orders_alipos_eats_id", "alipos_eats_id"),
         Index("idx_orders_table_id", "table_id"),
@@ -153,6 +164,7 @@ class Order(Base):
         Index("idx_orders_payment_status", "payment_status"),
         Index("idx_orders_payment_expires_at", "payment_expires_at"),
         Index("idx_orders_multicard_payment_uuid", "multicard_payment_uuid"),
+        Index("idx_orders_refund_sync_status", "refund_sync_status"),
         Index("idx_orders_assigned_staff_id", "assigned_staff_id"),
         Index("idx_orders_delivered_at", "delivered_at"),
         Index("idx_orders_staff_available", "status", "assigned_staff_id", "discriminator"),

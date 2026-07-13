@@ -17,6 +17,11 @@ _menu_cache: dict | None = None
 _menu_cache_expires_at: float = 0
 _MENU_TTL = 300
 
+# Availability changes more frequently than menu composition.
+_availability_cache: dict | None = None
+_availability_cache_expires_at: float = 0
+_AVAILABILITY_TTL = 30
+
 # Halls/tables cache (5 minute TTL)
 _tables_cache: dict | None = None
 _tables_cache_expires_at: float = 0
@@ -140,6 +145,23 @@ async def get_menu() -> dict:
     _menu_cache = resp.json()
     _menu_cache_expires_at = time.monotonic() + _MENU_TTL
     return _menu_cache
+
+
+async def get_menu_availability() -> dict:
+    """Fetch live item/modifier availability, cached briefly."""
+    global _availability_cache, _availability_cache_expires_at
+    if (
+        _availability_cache is not None
+        and time.monotonic() < _availability_cache_expires_at
+    ):
+        return _availability_cache
+    resp = await _api_request(
+        "GET",
+        f"/api/Integration/v1/menu/{settings.alipos_restaurant_id}/availability",
+    )
+    _availability_cache = resp.json()
+    _availability_cache_expires_at = time.monotonic() + _AVAILABILITY_TTL
+    return _availability_cache
 
 
 async def get_halls_and_tables() -> dict:

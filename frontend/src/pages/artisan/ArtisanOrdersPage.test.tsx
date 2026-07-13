@@ -23,7 +23,6 @@ const order: Order = {
   payment_expires_at: null,
   multicard_checkout_url: null,
   multicard_receipt_url: null,
-  alipos_order_id: null,
   alipos_sync_status: 'synced',
   table_title: 'Stol 12',
   hall_title: 'Asosiy zal',

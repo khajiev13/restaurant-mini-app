@@ -8,19 +8,20 @@ from pydantic import BaseModel, Field, model_validator
 class OrderItemModifier(BaseModel):
     id: str
     name: str | None = None
-    quantity: float
+    quantity: float = Field(ge=0.01, le=100)
     price: float
 
 
 class OrderItem(BaseModel):
     id: str
     name: str | None = None
-    quantity: float
+    quantity: float = Field(ge=0.01, le=100)
     price: float
     modifications: list[OrderItemModifier] = Field(default_factory=list)
 
 
 class OrderCreate(BaseModel):
+    client_request_id: uuid.UUID | None = None
     address_id: uuid.UUID | None = None
     items: list[OrderItem]
     comment: str | None = None
@@ -54,15 +55,10 @@ class OrderResponse(BaseModel):
     multicard_checkout_url: str | None = None
     multicard_receipt_url: str | None = None
     discriminator: str
-    table_id: uuid.UUID | None = None
     table_title: str | None = None
-    hall_id: uuid.UUID | None = None
     hall_title: str | None = None
     service_percent: float = 0
-    alipos_order_id: uuid.UUID | None = None
-    alipos_eats_id: str | None = None
     alipos_sync_status: str | None = None
-    alipos_sync_error: str | None = None
     status: str
     order_number: str | None = None
     status_updated_at: datetime.datetime | None = None
@@ -74,7 +70,6 @@ class OrderResponse(BaseModel):
 class OrderStatusResponse(BaseModel):
     status: str
     order_number: str | None = None
-    alipos_order_id: uuid.UUID | None = None
     payment_status: str | None = None
     payment_expires_at: datetime.datetime | None = None
     multicard_receipt_url: str | None = None

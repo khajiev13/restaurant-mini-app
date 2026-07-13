@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCartStore } from '../../stores/cartStore';
+import { useTableOrderStore } from '../../stores/tableOrderStore';
 import type { Order } from '../../types/api';
 import ArtisanOrderStatusPage from './ArtisanOrderStatusPage';
 
@@ -11,9 +12,13 @@ const apiMocks = vi.hoisted(() => ({
   getOrder: vi.fn(),
   getOrderStatus: vi.fn(),
   switchOrderToCash: vi.fn(),
+  retryOrderPayment: vi.fn(),
+  restoreTable: vi.fn(),
 }));
 
 vi.mock('../../services/api', () => apiMocks);
+
+const telegramOpenLink = vi.fn();
 
 const tableOrder: Order = {
   id: '11111111-1111-4111-8111-111111111111',
@@ -31,7 +36,6 @@ const tableOrder: Order = {
   payment_expires_at: null,
   multicard_checkout_url: null,
   multicard_receipt_url: null,
-  alipos_order_id: '22222222-2222-4222-8222-222222222222',
   alipos_sync_status: 'synced',
   table_title: 'Stol 12',
   hall_title: 'Asosiy zal',
@@ -60,7 +64,7 @@ describe('ArtisanOrderStatusPage table mode', () => {
           initData: 'telegram-init-data',
           BackButton: { onClick: vi.fn(), offClick: vi.fn(), show: vi.fn(), hide: vi.fn() },
           HapticFeedback: { notificationOccurred: vi.fn() },
-          openLink: vi.fn(),
+          openLink: telegramOpenLink,
         },
       },
     });
@@ -70,7 +74,6 @@ describe('ArtisanOrderStatusPage table mode', () => {
         data: {
           status: 'NEW',
           order_number: '42',
-          alipos_order_id: tableOrder.alipos_order_id,
           payment_status: null,
           payment_expires_at: null,
           multicard_receipt_url: null,
@@ -82,6 +85,13 @@ describe('ArtisanOrderStatusPage table mode', () => {
       },
     });
     useCartStore.setState({ items: [] });
+    useTableOrderStore.setState({ context: null, isResolving: false, error: null });
+    apiMocks.restoreTable.mockResolvedValue({
+      data: { data: {
+        table_title: 'Stol 12', hall_title: 'Asosiy zal', service_percent: 10,
+        manual_code: 'A7K2P9', access_token: 'restored-token',
+      } },
+    });
   });
 
   it('shows table tracking without delivery or internal identifiers', async () => {
@@ -95,6 +105,7 @@ describe('ArtisanOrderStatusPage table mode', () => {
     expect(screen.queryByText(/alipos/i)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /bekor qilish|cancel order/i })).toBeVisible();
     expect(screen.getByRole('button', { name: /yana buyurtma|order more/i })).toBeVisible();
+    expect(apiMocks.restoreTable).not.toHaveBeenCalled();
   });
 
   it('cancels a new table order after confirmation', async () => {
@@ -120,7 +131,6 @@ describe('ArtisanOrderStatusPage table mode', () => {
       payment_provider: 'multicard',
       payment_status: 'pending',
       multicard_checkout_url: 'https://pay.example/checkout',
-      alipos_order_id: null,
       alipos_sync_status: 'awaiting_payment',
     } satisfies Order;
     apiMocks.getOrder.mockResolvedValue({ data: { data: pending } });
@@ -150,7 +160,55 @@ describe('ArtisanOrderStatusPage table mode', () => {
 
     await user.click(await screen.findByRole('button', { name: /yana buyurtma|order more/i }));
 
+    await waitFor(() => expect(apiMocks.restoreTable).toHaveBeenCalledWith(tableOrder.id));
     expect(useCartStore.getState().items).toEqual([]);
+    expect(screen.getByText('Menu destination')).toBeVisible();
+  });
+
+  it('creates and opens a fresh checkout after a definite payment failure', async () => {
+    const user = userEvent.setup();
+    const failed = {
+      ...tableOrder,
+      status: 'PAYMENT_FAILED',
+      payment_method: 'rahmat',
+      payment_provider: 'multicard',
+      payment_status: 'failed',
+      multicard_checkout_url: null,
+      alipos_sync_status: 'awaiting_payment',
+    } satisfies Order;
+    apiMocks.getOrder.mockResolvedValue({ data: { data: failed } });
+    apiMocks.getOrderStatus.mockResolvedValue({ data: { data: failed } });
+    apiMocks.retryOrderPayment.mockResolvedValue({
+      data: { data: {
+        ...failed,
+        status: 'AWAITING_PAYMENT',
+        payment_status: 'pending',
+        multicard_checkout_url: 'https://pay.example/fresh',
+      } },
+    });
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: /online.*qayta|retry online/i }));
+
+    await waitFor(() => expect(apiMocks.retryOrderPayment).toHaveBeenCalledWith(tableOrder.id));
+    expect(telegramOpenLink).toHaveBeenCalledWith('https://pay.example/fresh');
+  });
+
+  it('requires a fresh scan when the original table session has expired', async () => {
+    const user = userEvent.setup();
+    useTableOrderStore.setState({
+      context: {
+        tableTitle: 'Wrong table', hallTitle: 'Other hall', servicePercent: 0,
+        accessToken: 'other-session-token',
+      },
+    });
+    apiMocks.restoreTable.mockRejectedValue({ response: { status: 404 } });
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: /yana buyurtma|order more/i }));
+
+    await waitFor(() => expect(apiMocks.restoreTable).toHaveBeenCalledWith(tableOrder.id));
+    expect(useTableOrderStore.getState().context).toBeNull();
     expect(screen.getByText('Menu destination')).toBeVisible();
   });
 });

@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { Link, MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
@@ -27,7 +27,7 @@ vi.mock('./stores/tableOrderStore', () => ({
 }));
 
 vi.mock('./pages/artisan/ArtisanMenuPage', () => ({
-  default: () => <div>Artisan menu page</div>,
+  default: () => <div>Artisan menu page <Link to="/checkout">Go to checkout</Link></div>,
 }));
 
 vi.mock('./pages/artisan/ArtisanCheckoutPage', () => ({
@@ -379,5 +379,31 @@ describe('App', () => {
 
     expect(tableOrderState.resolveEntry).toHaveBeenCalledWith('t_A7K2P9_q1w2e3r4t5y6');
     expect(view.getByText('Artisan menu page')).toBeInTheDocument();
+  });
+
+  it('consumes a table start parameter only once so checkout navigation remains usable', async () => {
+    const user = userEvent.setup();
+    const tg = {
+      initDataUnsafe: { start_param: 't_A7K2P9_q1w2e3r4t5y6' },
+      ready: vi.fn(),
+      expand: vi.fn(),
+      setHeaderColor: vi.fn(),
+      setBackgroundColor: vi.fn(),
+      setBottomBarColor: vi.fn(),
+      disableVerticalSwipes: vi.fn(),
+      isVersionAtLeast: vi.fn(() => false),
+    };
+    (window as unknown as { Telegram?: { WebApp: unknown } }).Telegram = { WebApp: tg };
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'Go to checkout' }));
+
+    expect(screen.getByText('Artisan checkout page')).toBeInTheDocument();
+    expect(tableOrderState.resolveEntry).toHaveBeenCalledTimes(1);
   });
 });

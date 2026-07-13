@@ -120,7 +120,6 @@ export interface Order {
   payment_expires_at: string | null;
   multicard_checkout_url: string | null;
   multicard_receipt_url: string | null;
-  alipos_order_id: string | null;
   alipos_sync_status: string | null;
   table_title: string | null;
   hall_title: string | null;
@@ -130,7 +129,6 @@ export interface Order {
 export interface OrderStatus {
   status: string;
   order_number: string | null;
-  alipos_order_id: string | null;
   payment_status: string | null;
   payment_expires_at: string | null;
   multicard_receipt_url: string | null;
@@ -145,6 +143,7 @@ export interface CartItem extends MenuItem {
 }
 
 export interface CreateOrderPayload {
+  client_request_id: string;
   items: Array<{
     id: string;
     name?: string;

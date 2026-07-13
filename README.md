@@ -38,11 +38,14 @@ Then fill in the values:
 ```env
 # Telegram
 TELEGRAM_BOT_TOKEN=8695209419:your-bot-token
+TELEGRAM_BOT_USERNAME=olotsomsa_zakaz_bot
+TABLE_ACCESS_SECRET=generate-a-separate-64-char-hex-secret
 
 # AliPOS API
 ALIPOS_API_CLIENT_ID=your-client-id
 ALIPOS_API_CLIENT_SECRET=your-client-secret
 ALIPOS_API_BASE_URL=https://web.alipos.uz
+ALIPOS_RESTAURANT_ID=your-restaurant-id
 
 # PostgreSQL
 POSTGRES_USER=restaurant_user
@@ -233,7 +236,14 @@ restaurant-mini-app/
 | `GET` | `/api/orders` | JWT | List user's orders |
 | `GET` | `/api/orders/{id}` | JWT | Get order details |
 | `GET` | `/api/orders/{id}/status` | JWT | Get live order status |
+| `DELETE` | `/api/orders/{id}` | JWT | Cancel the customer's new table order |
+| `POST` | `/api/orders/{id}/switch-to-cash` | JWT | Cancel an unpaid invoice, then submit the table order as cash |
+| `POST` | `/api/orders/{id}/retry-payment` | JWT | Create a new checkout after a definite payment failure or confirmed expiry |
+| `POST` | `/api/tables/resolve` | — | Resolve a signed QR entry or six-character manual table code |
+| `POST` | `/api/tables/restore/{order_id}` | JWT | Restore safe table context before its original QR session expires |
+| `GET` | `/api/tables/manifest` | Admin JWT | Generate current table deep links and manual codes |
 | `POST` | `/api/webhooks/order-status` | — | Receive AliPOS status updates |
+| `POST` | `/api/webhooks/stoplist/{product_id}` | — | Receive AliPOS menu availability updates |
 | `POST` | `/api/webhooks/bot` | — | Receive Telegram bot updates |
 | `POST` | `/api/webhooks/multicard/callback` | — | Receive Multicard payment callbacks |
 
@@ -246,6 +256,41 @@ restaurant-mini-app/
 3. Backend validates the HMAC-SHA256 signature using the bot token
 4. Backend creates/updates the user in PostgreSQL and returns a JWT
 5. All subsequent requests use `Authorization: Bearer <token>`
+
+---
+
+## QR Table Ordering
+
+Each physical table gets a Telegram deep link from the admin-only manifest plus its six-character fallback code. Generate the current manifest after the app is configured:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_JWT" \
+  "$PUBLIC_APP_URL/api/tables/manifest"
+```
+
+Encode each item's `deep_link` as the table QR and print its `manual_code` next to it. A scan opens the existing menu with a session-scoped table context. Customers at the same table keep separate carts and orders; they never see a shared table bill.
+
+Payment behavior:
+
+- Cash is the default and the order is submitted to the selected AliPOS table immediately.
+- Online payment opens Multicard first. AliPOS receives the order only after the signed callback confirms the exact amount.
+- A still-unpaid online order can switch to cash only after Multicard confirms invoice cancellation.
+- Definite payment-link failures and confirmed expiries can retry online or switch to cash. Network-ambiguous invoice creation is held for verification and is never retried automatically.
+- A table order can be cancelled only while AliPOS still reports `NEW`; a paid cancellation requests a full refund.
+- Client request IDs prevent duplicate checkout retries. Queued cash/paid orders and queued refunds resume safely after a restart; ambiguous provider outcomes are reconciled instead of blindly repeated.
+- Customer menu reads and checkout repricing merge stop-list webhooks with AliPOS's live item/modifier availability feed.
+- Payment-return restoration is capped to the original QR/manual-code expiry and never extends table access. After expiry, ordering more requires a fresh scan or code.
+
+Before deploying this feature to an existing database, apply the idempotent migration:
+
+```bash
+set -a; source .env; set +a
+docker compose exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  < database/migrations/2026-07-13-qr-table-ordering.sql
+```
+
+Use a separate production `TABLE_ACCESS_SECRET` generated with `openssl rand -hex 32`. Rotating it invalidates printed QR signatures and active table sessions, so regenerate and reprint the manifest after rotation.
 
 ---
 

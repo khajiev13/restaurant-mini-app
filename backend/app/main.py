@@ -106,32 +106,24 @@ async def start_payment_expiry_task() -> None:
 
 @app.on_event("startup")
 async def recover_paid_alipos_queue() -> None:
-    from app.services.order_service import recover_queued_alipos_orders
+    from app.services.order_service import (
+        recover_queued_alipos_orders,
+        recover_refund_operations,
+    )
 
     await recover_queued_alipos_orders()
+    await recover_refund_operations()
 
 
 async def _expire_pending_payments() -> None:
-    """Background task: expire unpaid Rahmat orders past their payment deadline.
-
-    Runs every `payment_expiry_check_interval_seconds`. For each expired-but-pending
-    order, marks it expired then attempts a best-effort AliPOS cancellation.
-    """
-    from sqlalchemy import select, text
+    """Expire only unpaid invoices whose cancellation Multicard confirms."""
+    from sqlalchemy import text
 
     from app.database import async_session
-    from app.models.models import Order
-    from app.services import alipos_api, multicard_api
+    from app.services.order_service import expire_due_payment_orders
 
     while True:
         await asyncio.sleep(settings.payment_expiry_check_interval_seconds)
-
-        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-
-        # Collect IDs and alipos IDs to process outside the session
-        expired_records: list[
-            tuple[str, str | None, str | None]
-        ] = []  # (order_id, alipos_order_id, mc_invoice_uuid)
 
         try:
             async with async_session() as db:
@@ -142,86 +134,14 @@ async def _expire_pending_payments() -> None:
                 if not bool(lock_result.scalar()):
                     await db.rollback()
                     continue
-
-                result = await db.execute(
-                    select(Order).where(
-                        Order.payment_status == "pending",
-                        Order.payment_expires_at.is_not(None),
-                        Order.payment_expires_at <= now,
-                    )
+                expired_count = await expire_due_payment_orders(
+                    db,
+                    datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
                 )
-                expired = result.scalars().all()
-
-                if not expired:
-                    continue
-
-                for order in expired:
-                    order.payment_status = "expired"
-                    order.status = "CANCELLED"
-                    order.payment_error = (
-                        "Payment timeout — invoice expired after 10 minutes"
-                    )
-                    expired_records.append(
-                        (
-                            str(order.id),
-                            str(order.alipos_order_id)
-                            if order.alipos_order_id
-                            else None,
-                            order.multicard_invoice_uuid,
-                        )
-                    )
-
-                await db.commit()
-
-            logger.info("Expired %d unpaid Rahmat orders", len(expired_records))
+            if expired_count:
+                logger.info("Expired %d unpaid Rahmat orders", expired_count)
         except Exception as exc:
             logger.exception("Error during payment expiry check: %s", exc)
-            continue
-
-        # Best-effort: cancel Multicard invoices and AliPOS orders
-        for order_id, alipos_order_id, mc_invoice_uuid in expired_records:
-            if mc_invoice_uuid:
-                await multicard_api.cancel_invoice(mc_invoice_uuid)
-
-            if alipos_order_id:
-                try:
-                    await alipos_api.cancel_order(
-                        alipos_order_id,
-                        "To'lov muddati tugagani uchun bekor qilindi",
-                    )
-                    cancel_status = "cancelled"
-                    cancel_error = None
-                    logger.info("AliPOS cancel succeeded for order %s", order_id)
-                except Exception as exc:
-                    cancel_status = "failed"
-                    cancel_error = str(exc)[:500]
-                    logger.warning(
-                        "AliPOS cancel failed for order %s: %s", order_id, exc
-                    )
-
-                try:
-                    async with async_session() as db:
-                        import uuid as _uuid
-
-                        from sqlalchemy import select as sel
-
-                        from app.models.models import Order as O
-
-                        result = await db.execute(
-                            sel(O).where(O.id == _uuid.UUID(order_id))
-                        )
-                        o = result.scalar_one_or_none()
-                        if o:
-                            o.alipos_cancel_status = cancel_status
-                            if cancel_error:
-                                o.alipos_cancel_error = cancel_error
-                            await db.commit()
-                except Exception as exc:
-                    logger.exception(
-                        "Failed to save AliPOS cancel status for order %s: %s",
-                        order_id,
-                        exc,
-                    )
 
 
 app.add_middleware(

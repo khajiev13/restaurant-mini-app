@@ -16,10 +16,12 @@ from app.services.order_service import (
     CustomerOrderNotFound,
     OrderSubmissionRejected,
     PaymentCheckoutError,
+    PaymentRetryConflict,
     PaymentSwitchConflict,
     PaymentSwitchError,
     cancel_customer_order,
     create_customer_order,
+    retry_customer_order_payment,
     switch_customer_order_to_cash,
 )
 from app.services.order_status_service import apply_alipos_status_update_for_order
@@ -163,7 +165,6 @@ async def get_order_status(
         data=OrderStatusResponse(
             status=order.status,
             order_number=order.order_number,
-            alipos_order_id=order.alipos_order_id,
             payment_status=order.payment_status,
             payment_expires_at=order.payment_expires_at,
             multicard_receipt_url=order.multicard_receipt_url,
@@ -201,6 +202,30 @@ async def switch_order_to_cash(
     except OrderSubmissionRejected as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    return ApiResponse(
+        success=True,
+        data=OrderResponse.model_validate(order).model_dump(mode="json"),
+    )
+
+
+@router.post("/{order_id}/retry-payment")
+async def retry_order_payment(
+    order_id: uuid.UUID,
+    current_user: CurrentUserDep,
+    db: DbDep,
+) -> ApiResponse:
+    try:
+        order = await retry_customer_order_payment(db, current_user, order_id)
+    except CustomerOrderNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except PaymentRetryConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
     return ApiResponse(

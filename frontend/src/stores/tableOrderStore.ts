@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { resolveTable } from '../services/api';
+import { resolveTable, restoreTable } from '../services/api';
 
 const STORAGE_KEY = 'table-order:v1';
 
@@ -16,6 +16,7 @@ interface TableOrderState {
   error: string | null;
   resolveEntry: (entry: string) => Promise<void>;
   resolveCode: (code: string) => Promise<void>;
+  restoreOrder: (orderId: string) => Promise<void>;
   clearContext: () => void;
   clearError: () => void;
 }
@@ -72,12 +73,12 @@ function errorMessage(error: unknown): string {
 }
 
 async function resolveAndStore(
-  payload: { entry?: string; code?: string },
+  request: ReturnType<typeof resolveTable>,
   set: (partial: Partial<TableOrderState>) => void,
 ): Promise<void> {
   set({ isResolving: true, error: null });
   try {
-    const response = await resolveTable(payload);
+    const response = await request;
     const data = response.data.data;
     const context: TableContext = {
       tableTitle: data.table_title,
@@ -101,12 +102,16 @@ export const useTableOrderStore = create<TableOrderState>((set) => ({
   error: null,
 
   resolveEntry: async (entry) => {
-    await resolveAndStore({ entry }, set);
+    await resolveAndStore(resolveTable({ entry }), set);
   },
 
   resolveCode: async (code) => {
     const normalized = code.toUpperCase().replace(/[\s-]/g, '');
-    await resolveAndStore({ code: normalized }, set);
+    await resolveAndStore(resolveTable({ code: normalized }), set);
+  },
+
+  restoreOrder: async (orderId) => {
+    await resolveAndStore(restoreTable(orderId), set);
   },
 
   clearContext: () => {

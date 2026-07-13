@@ -21,6 +21,7 @@ import type {
 const BACKEND_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 const REQUEST_TIMEOUT_MS = 10000;
 const RETRY_DELAY_MS = 500;
+const ORDER_MUTATION_TIMEOUT_MS = 95000;
 const RETRYABLE_METHODS = new Set(['get', 'head', 'options']);
 
 type RetriableRequestConfig = InternalAxiosRequestConfig & {
@@ -80,6 +81,11 @@ export const resolveTable = (
 ): Promise<AxiosResponse<ApiResponse<TableContextResponse>>> =>
   api.post('/tables/resolve', payload);
 
+export const restoreTable = (
+  orderId: string,
+): Promise<AxiosResponse<ApiResponse<TableContextResponse>>> =>
+  api.post(`/tables/restore/${orderId}`);
+
 export const getMe = (): Promise<AxiosResponse<ApiResponse<User>>> => api.get('/users/me');
 
 export const updateMe = (
@@ -124,7 +130,9 @@ export const updateAddress = (
 
 export const createOrder = (
   data: CreateOrderPayload,
-): Promise<AxiosResponse<ApiResponse<Order>>> => api.post('/orders', data);
+): Promise<AxiosResponse<ApiResponse<Order>>> => api.post('/orders', data, {
+  timeout: ORDER_MUTATION_TIMEOUT_MS,
+});
 
 export const getOrders = (): Promise<AxiosResponse<ApiResponse<Order[]>>> => api.get('/orders');
 
@@ -137,10 +145,20 @@ export const getOrderStatus = (
 
 export const cancelOrder = (
   id: string,
-): Promise<AxiosResponse<ApiResponse<Order>>> => api.delete(`/orders/${id}`);
+): Promise<AxiosResponse<ApiResponse<Order>>> => api.delete(`/orders/${id}`, {
+  timeout: ORDER_MUTATION_TIMEOUT_MS,
+});
 
 export const switchOrderToCash = (
   id: string,
-): Promise<AxiosResponse<ApiResponse<Order>>> => api.post(`/orders/${id}/switch-to-cash`);
+): Promise<AxiosResponse<ApiResponse<Order>>> => api.post(`/orders/${id}/switch-to-cash`, undefined, {
+  timeout: ORDER_MUTATION_TIMEOUT_MS,
+});
+
+export const retryOrderPayment = (
+  id: string,
+): Promise<AxiosResponse<ApiResponse<Order>>> => api.post(`/orders/${id}/retry-payment`, undefined, {
+  timeout: ORDER_MUTATION_TIMEOUT_MS,
+});
 
 export default api;

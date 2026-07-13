@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiMocks = vi.hoisted(() => ({
   resolveTable: vi.fn(),
+  restoreTable: vi.fn(),
 }));
 
 vi.mock('../../services/api', () => apiMocks);
@@ -58,6 +59,26 @@ describe('tableOrderStore', () => {
     const useTableOrderStore = await loadStore();
 
     expect(useTableOrderStore.getState().context?.tableTitle).toBe('Stol 7');
+  });
+
+  it('restores table context from an owned order after a fresh WebView', async () => {
+    apiMocks.restoreTable.mockResolvedValue({
+      data: {
+        data: {
+          table_title: 'Stol 12',
+          hall_title: 'Asosiy zal',
+          service_percent: 10,
+          manual_code: 'A7K2P9',
+          access_token: 'fresh-access-token',
+        },
+      },
+    });
+    const useTableOrderStore = await loadStore();
+
+    await useTableOrderStore.getState().restoreOrder('order-123');
+
+    expect(apiMocks.restoreTable).toHaveBeenCalledWith('order-123');
+    expect(useTableOrderStore.getState().context?.accessToken).toBe('fresh-access-token');
   });
 
   it('clears malformed session data instead of throwing', async () => {

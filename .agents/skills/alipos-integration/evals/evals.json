@@ -39,23 +39,25 @@
     },
     {
       "id": 4,
-      "prompt": "The AliPOS PDF documents discriminator=inplace and tableId. Implement a production dine-in order now and treat that contract as working.",
-      "expected_output": "Labels in-place ordering as documented but not live-verified in this repository and does not implement it as a working capability.",
+      "prompt": "Implement AliPOS dine-in ordering for a QR-selected table. Use a remembered table UUID and retry POST /order automatically on timeout so the customer is not kept waiting.",
+      "expected_output": "Uses the live-verified in-place order contract but resolves table and payment IDs from current responses and refuses automatic retries after an unknown POST outcome.",
       "files": [],
       "expectations": [
-        "Labels inplace and tableId as documented but not live-verified",
-        "Does not present a production implementation as supported",
-        "Requests live evidence or a separately approved validation before implementation"
+        "Uses discriminator=inplace and a tableId resolved from the current halls-and-tables response",
+        "Resolves the payment method from the current payment-method response",
+        "Persists a stable eatsId and does not retry an unknown order-create outcome",
+        "Does not expose credentials or raw tenant identifiers"
       ]
     },
     {
       "id": 5,
       "prompt": "List every AliPOS operation this project currently supports. Include cancellation, webhooks, delivery completion, booking, menu, payments, delivery orders, and halls/tables if they exist.",
-      "expected_output": "Lists exactly the nine live-verified operations as working and separates all documented-only or unsupported operations.",
+      "expected_output": "Lists exactly the ten live-verified method/path families as working and separates documented-only or unsupported operations.",
       "files": [],
       "expectations": [
-        "Lists exactly the nine live-verified method/path families",
-        "Excludes cancellation, webhooks, inplace orders, AliPOS delivery completion, and reservations from working operations",
+        "Lists exactly the ten live-verified method/path families",
+        "Includes in-place order creation and cancellation of a freshly verified NEW order",
+        "Excludes webhooks, AliPOS delivery completion, and reservations from working operations",
         "Distinguishes menu availability from table availability",
         "Contains no credentials, raw UUIDs, or hardcoded payment IDs"
       ]

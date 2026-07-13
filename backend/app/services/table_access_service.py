@@ -132,13 +132,24 @@ class TableAccessService:
         self,
         entry: TableDirectoryEntry,
         now: datetime.datetime | None = None,
+        expires_at: datetime.datetime | None = None,
     ) -> str:
         issued_at = now or datetime.datetime.now(datetime.UTC)
         if issued_at.tzinfo is None:
             issued_at = issued_at.replace(tzinfo=datetime.UTC)
-        expires_at = issued_at + datetime.timedelta(seconds=self._access_ttl_seconds)
+        token_expires_at = expires_at or (
+            issued_at + datetime.timedelta(seconds=self._access_ttl_seconds)
+        )
+        if token_expires_at.tzinfo is None:
+            token_expires_at = token_expires_at.replace(tzinfo=datetime.UTC)
+        if token_expires_at <= issued_at:
+            raise InvalidTableEntry("Table access token expired")
         payload = json.dumps(
-            {"exp": int(expires_at.timestamp()), "tid": entry.table_id.hex, "v": 1},
+            {
+                "exp": int(token_expires_at.timestamp()),
+                "tid": entry.table_id.hex,
+                "v": 1,
+            },
             separators=(",", ":"),
             sort_keys=True,
         ).encode()
@@ -204,6 +215,24 @@ class TableAccessService:
         if entry is None:
             raise InvalidTableEntry("Table is no longer available")
         return entry
+
+    async def restore(
+        self,
+        table_id: uuid.UUID,
+        expires_at: datetime.datetime,
+    ) -> TableResolution:
+        """Issue fresh customer-safe context for a table recorded on an order."""
+        directory = await get_table_directory()
+        entry = next((item for item in directory if item.table_id == table_id), None)
+        if entry is None:
+            raise InvalidTableEntry("Table is no longer available")
+        return TableResolution(
+            table_title=entry.table_title,
+            hall_title=entry.hall_title,
+            service_percent=entry.service_percent,
+            manual_code=self.build_manual_code(entry.table_id),
+            access_token=self.issue_access_token(entry, expires_at=expires_at),
+        )
 
     async def manifest(self) -> list[dict]:
         result: list[dict] = []

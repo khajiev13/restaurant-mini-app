@@ -35,6 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_addresses_user_id ON addresses(user_id);
 CREATE TABLE IF NOT EXISTS orders (
     id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id                BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+    client_request_id      UUID,
     address_id             UUID REFERENCES addresses(id) ON DELETE SET NULL,
     assigned_staff_id      BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL,
     assigned_at            TIMESTAMP,
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS orders (
     hall_id                UUID,
     hall_title             VARCHAR(100),
     service_percent        NUMERIC(5, 2) NOT NULL DEFAULT 0,
+    table_access_expires_at TIMESTAMP,
     alipos_order_id        UUID,
     alipos_eats_id         VARCHAR(255),
     alipos_sync_status     VARCHAR(32),
@@ -67,6 +69,8 @@ CREATE TABLE IF NOT EXISTS orders (
     multicard_checkout_url TEXT,
     multicard_receipt_url  TEXT,
     multicard_payment_uuid VARCHAR(64),
+    refund_sync_status     VARCHAR(32),
+    refund_sync_error      TEXT,
     alipos_cancel_status   VARCHAR(50),
     alipos_cancel_error    TEXT,
     status                 VARCHAR(50) NOT NULL DEFAULT 'NEW',
@@ -78,6 +82,9 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_user_request
+    ON orders(user_id, client_request_id)
+    WHERE client_request_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_orders_alipos_order_id ON orders(alipos_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_alipos_eats_id ON orders(alipos_eats_id);
 CREATE INDEX IF NOT EXISTS idx_orders_table_id ON orders(table_id);
@@ -85,6 +92,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_alipos_sync_status ON orders(alipos_sync_s
 CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status);
 CREATE INDEX IF NOT EXISTS idx_orders_payment_expires_at ON orders(payment_expires_at);
 CREATE INDEX IF NOT EXISTS idx_orders_multicard_payment_uuid ON orders(multicard_payment_uuid);
+CREATE INDEX IF NOT EXISTS idx_orders_refund_sync_status ON orders(refund_sync_status);
 CREATE INDEX IF NOT EXISTS idx_orders_assigned_staff_id ON orders(assigned_staff_id);
 CREATE INDEX IF NOT EXISTS idx_orders_delivered_at ON orders(delivered_at);
 CREATE INDEX IF NOT EXISTS idx_orders_staff_available ON orders(status, assigned_staff_id, discriminator);
@@ -110,6 +118,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(32) NOT NULL DEFAULT 'cu
 
 -- Migration: add Multicard / Rahmat payment columns to existing databases
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_provider       VARCHAR(50);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_request_id      UUID;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status         VARCHAR(50);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_expires_at     TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_paid_at        TIMESTAMP;
@@ -120,6 +129,8 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_invoice_uuid VARCHAR(64);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_checkout_url TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_receipt_url  TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_payment_uuid VARCHAR(64);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_sync_status     VARCHAR(32);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_sync_error      TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_cancel_status   VARCHAR(50);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_cancel_error    TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_staff_id BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL;
@@ -132,6 +143,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_title VARCHAR(100);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS hall_id UUID;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS hall_title VARCHAR(100);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_percent NUMERIC(5, 2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_access_expires_at TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_status VARCHAR(32);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_error TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMP;
@@ -150,6 +162,7 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status);
 CREATE INDEX IF NOT EXISTS idx_orders_payment_expires_at ON orders(payment_expires_at);
 CREATE INDEX IF NOT EXISTS idx_orders_multicard_payment_uuid ON orders(multicard_payment_uuid);
+CREATE INDEX IF NOT EXISTS idx_orders_refund_sync_status ON orders(refund_sync_status);
 CREATE INDEX IF NOT EXISTS idx_orders_assigned_staff_id ON orders(assigned_staff_id);
 CREATE INDEX IF NOT EXISTS idx_orders_delivered_at ON orders(delivered_at);
 CREATE INDEX IF NOT EXISTS idx_orders_staff_available ON orders(status, assigned_staff_id, discriminator);

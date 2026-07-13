@@ -127,6 +127,7 @@
     "cancelled": "Bekor qilindi",
     "awaiting_payment": "To'lov kutilmoqda",
     "payment_failed": "To'lov amalga oshmadi",
+    "payment_review": "To'lov tekshirilmoqda",
     "sync_unknown": "Buyurtma tekshirilmoqda",
     "submission_failed": "Buyurtma yuborilmadi"
   },
@@ -134,6 +135,7 @@
     "cash": "Naqd pul",
     "paid_online": "Onlayn to'langan",
     "awaiting": "Onlayn to'lov kutilmoqda",
+    "verifying": "Onlayn to'lov tekshirilmoqda",
     "awaiting_desc": "Buyurtmani yuborish uchun to'lovni yakunlang",
     "confirmed_desc": "To'lov tasdiqlandi va buyurtma restoranga yuborildi",
     "status_updated": "To'lov holati yangilandi",

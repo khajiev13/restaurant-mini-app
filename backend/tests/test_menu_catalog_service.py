@@ -30,6 +30,15 @@ MENU = {
 }
 
 
+@pytest.fixture(autouse=True)
+def mock_live_availability(monkeypatch):
+    monkeypatch.setattr(
+        alipos_api,
+        "get_menu_availability",
+        AsyncMock(return_value={"items": [], "modifiers": []}),
+    )
+
+
 @pytest.mark.asyncio
 async def test_customer_menu_merges_stoplist_without_mutating_cached_menu(
     db_session,
@@ -85,6 +94,8 @@ async def test_price_cart_uses_current_server_name_and_price(db_session, monkeyp
     [
         ({"id": str(OTHER_ITEM_ID), "quantity": 1}, "missing"),
         ({"id": str(ITEM_ID), "quantity": 0}, "invalid_quantity"),
+        ({"id": str(ITEM_ID), "quantity": 0.001}, "invalid_quantity"),
+        ({"id": str(ITEM_ID), "quantity": 101}, "invalid_quantity"),
     ],
 )
 async def test_price_cart_returns_structured_conflicts(
@@ -126,3 +137,59 @@ async def test_price_cart_rejects_quantity_above_stoplist_count(
             "availableCount": 1,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_customer_menu_merges_live_availability(db_session, monkeypatch):
+    monkeypatch.setattr(alipos_api, "get_menu", AsyncMock(return_value=MENU))
+    monkeypatch.setattr(
+        alipos_api,
+        "get_menu_availability",
+        AsyncMock(return_value={
+            "items": [{"id": str(ITEM_ID), "count": 0}],
+            "modifiers": [],
+        }),
+    )
+
+    result = await get_customer_menu(db_session)
+
+    assert result["items"][0]["available"] is False
+    assert result["items"][0]["availableCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_price_cart_rejects_unavailable_live_modifier(db_session, monkeypatch):
+    modifier_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+    menu = {
+        **MENU,
+        "items": [{
+            **MENU["items"][0],
+            "modifierGroups": [{
+                "id": "group-1",
+                "modifiers": [{"id": str(modifier_id), "name": "Cheese", "price": 2000}],
+            }],
+        }],
+    }
+    monkeypatch.setattr(alipos_api, "get_menu", AsyncMock(return_value=menu))
+    monkeypatch.setattr(
+        alipos_api,
+        "get_menu_availability",
+        AsyncMock(return_value={
+            "items": [],
+            "modifiers": [{"id": str(modifier_id), "count": 0}],
+        }),
+    )
+
+    with pytest.raises(CartConflict) as exc_info:
+        await price_cart(db_session, [{
+            "id": str(ITEM_ID),
+            "quantity": 1,
+            "modifications": [{"id": str(modifier_id), "quantity": 1}],
+        }])
+
+    assert exc_info.value.changes == [{
+        "id": str(ITEM_ID),
+        "modifierId": str(modifier_id),
+        "reason": "modifier_unavailable",
+        "availableCount": 0,
+    }]

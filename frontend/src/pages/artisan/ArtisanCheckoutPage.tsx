@@ -31,6 +31,15 @@ const EMPTY_FORM: AddressFormState = {
   floor: '', doorCode: '', instructions: '', lat: null, lng: null,
 };
 
+function createClientRequestId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
 
 function InputField({ label, placeholder, value, onChange, required, type = 'text' }: {
   label: string; placeholder?: string; value: string;
@@ -83,6 +92,7 @@ export default function ArtisanCheckoutPage() {
   const [form, setForm] = useState<AddressFormState>(EMPTY_FORM);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>('cash');
   const [toast, setToast] = useState('');
+  const clientRequestId = useRef(createClientRequestId());
   const showToast = (msg: string): void => { setToast(msg); haptic?.notificationOccurred('error'); };
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
 
@@ -136,6 +146,7 @@ export default function ArtisanCheckoutPage() {
     setSubmitting(true);
     try {
       const payload: CreateOrderPayload = {
+        client_request_id: clientRequestId.current,
         items: s.items.map((i) => ({
           id: i.id,
           name: i.name,
@@ -175,6 +186,7 @@ export default function ArtisanCheckoutPage() {
       console.error('Order failed:', err);
       const detail = (err as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response;
       if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
+        clientRequestId.current = createClientRequestId();
         await s.refreshMenu();
         const refreshed = useMenuStore.getState().menu;
         if (refreshed) s.reconcileAvailability(refreshed.items);
@@ -274,9 +286,20 @@ export default function ArtisanCheckoutPage() {
               boxShadow: '0 1px 3px rgba(0,0,0,0.04)', border: '1px solid rgba(172,173,173,0.1)',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%' }}>
                 <Icon name="phone_iphone" style={{ color: COLORS.primaryContainer }} />
-                <span style={{ fontWeight: 600, color: COLORS.onSurface }}>{phone || t('checkout.no_phone', 'Not set')}</span>
+                <input
+                  type="tel"
+                  aria-label={t('checkout.phone_label')}
+                  value={phone}
+                  onChange={(event) => setPhone(event.target.value)}
+                  placeholder={t('checkout.phone_placeholder')}
+                  autoComplete="tel"
+                  style={{
+                    flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent',
+                    fontWeight: 600, color: COLORS.onSurface, fontFamily: FONTS.body, fontSize: 16,
+                  }}
+                />
               </div>
             </div>
           </section>

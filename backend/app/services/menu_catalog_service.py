@@ -1,4 +1,5 @@
 import copy
+import logging
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -10,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.models import Stoplist
 from app.services import alipos_api
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,13 +77,69 @@ async def _stoplist_counts(
     return {str(entry.product_id): entry.count for entry in result.scalars()}
 
 
+def _availability_counts(values: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(values, list):
+        return counts
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        identifier = next(
+            (
+                value.get(key)
+                for key in ("id", "itemId", "productId", "modifierId")
+                if value.get(key) is not None
+            ),
+            None,
+        )
+        if identifier is None:
+            continue
+        raw_count = next(
+            (
+                value.get(key)
+                for key in ("count", "availableCount", "balance")
+                if value.get(key) is not None
+            ),
+            None,
+        )
+        if raw_count is None and isinstance(value.get("isAvailable"), bool):
+            raw_count = -1 if value["isAvailable"] else 0
+        try:
+            counts[str(identifier)] = int(raw_count)
+        except (TypeError, ValueError):
+            continue
+    return counts
+
+
+async def _live_availability_counts() -> tuple[dict[str, int], dict[str, int]]:
+    try:
+        payload = await alipos_api.get_menu_availability()
+    except Exception:
+        logger.warning("AliPOS live menu availability is unavailable; using webhooks")
+        return {}, {}
+    return (
+        _availability_counts(payload.get("items")),
+        _availability_counts(payload.get("modifiers")),
+    )
+
+
+def _most_restrictive_count(*values: int | None) -> int | None:
+    finite = [value for value in values if value is not None and value >= 0]
+    return min(finite) if finite else None
+
+
 async def get_customer_menu(db: AsyncSession) -> dict[str, Any]:
     menu = copy.deepcopy(await alipos_api.get_menu())
-    counts = await _stoplist_counts(db)
+    webhook_counts = await _stoplist_counts(db)
+    live_item_counts, _ = await _live_availability_counts()
     for item in menu.get("items", []):
-        count = counts.get(str(item.get("id")))
-        item["available"] = count is None or count == -1 or count > 0
-        item["availableCount"] = count if count is not None and count >= 0 else None
+        item_id = str(item.get("id"))
+        count = _most_restrictive_count(
+            webhook_counts.get(item_id),
+            live_item_counts.get(item_id),
+        )
+        item["available"] = count is None or count > 0
+        item["availableCount"] = count
     return menu
 
 
@@ -94,7 +153,8 @@ async def price_cart(db: AsyncSession, requested_items: Iterable[Any]) -> Priced
             valid_ids.add(uuid.UUID(str(_value(item, "id"))))
         except (TypeError, ValueError):
             continue
-    counts = await _stoplist_counts(db, valid_ids)
+    webhook_counts = await _stoplist_counts(db, valid_ids)
+    live_item_counts, live_modifier_counts = await _live_availability_counts()
 
     changes: list[dict[str, Any]] = []
     priced_items: list[dict[str, Any]] = []
@@ -111,11 +171,14 @@ async def price_cart(db: AsyncSession, requested_items: Iterable[Any]) -> Priced
             continue
 
         quantity = _as_decimal(_value(requested_item, "quantity"))
-        if quantity is None or quantity <= 0:
+        if quantity is None or quantity < Decimal("0.01") or quantity > Decimal("100"):
             changes.append({"id": item_id, "reason": "invalid_quantity"})
             continue
 
-        available_count = counts.get(item_id)
+        available_count = _most_restrictive_count(
+            webhook_counts.get(item_id),
+            live_item_counts.get(item_id),
+        )
         if available_count == 0:
             changes.append(
                 {"id": item_id, "reason": "unavailable", "availableCount": 0}
@@ -144,7 +207,12 @@ async def price_cart(db: AsyncSession, requested_items: Iterable[Any]) -> Priced
             modifier_id = str(_value(requested_modifier, "id", ""))
             modifier = modifier_catalog.get(modifier_id)
             modifier_quantity = _as_decimal(_value(requested_modifier, "quantity"))
-            if not modifier or modifier_quantity is None or modifier_quantity <= 0:
+            if (
+                not modifier
+                or modifier_quantity is None
+                or modifier_quantity < Decimal("0.01")
+                or modifier_quantity > Decimal("100")
+            ):
                 changes.append(
                     {"id": item_id, "modifierId": modifier_id, "reason": "invalid_modifier"}
                 )
@@ -154,6 +222,23 @@ async def price_cart(db: AsyncSession, requested_items: Iterable[Any]) -> Priced
             if modifier_price is None or modifier_price < 0:
                 changes.append(
                     {"id": item_id, "modifierId": modifier_id, "reason": "invalid_modifier"}
+                )
+                invalid_modifier = True
+                continue
+            modifier_available_count = _most_restrictive_count(
+                live_modifier_counts.get(modifier_id)
+            )
+            if modifier_available_count == 0 or (
+                modifier_available_count is not None
+                and modifier_quantity > modifier_available_count
+            ):
+                changes.append(
+                    {
+                        "id": item_id,
+                        "modifierId": modifier_id,
+                        "reason": "modifier_unavailable",
+                        "availableCount": modifier_available_count,
+                    }
                 )
                 invalid_modifier = True
                 continue

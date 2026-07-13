@@ -2,8 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ArtisanLayout, { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
-import { cancelOrder, getOrder, getOrderStatus, switchOrderToCash } from '../../services/api';
+import {
+  cancelOrder,
+  getOrder,
+  getOrderStatus,
+  retryOrderPayment,
+  switchOrderToCash,
+} from '../../services/api';
 import { useCartStore } from '../../stores/cartStore';
+import { useTableOrderStore } from '../../stores/tableOrderStore';
 import { formatPrice } from '../../utils/format';
 import type { Order, OrderStatus } from '../../types/api';
 
@@ -41,10 +48,12 @@ export default function ArtisanOrderStatusPage() {
   const { orderId } = useParams<{ orderId: string }>();
   const navigate = useNavigate();
   const clearCart = useCartStore((state) => state.clearCart);
+  const restoreTableOrder = useTableOrderStore((state) => state.restoreOrder);
+  const clearTableContext = useTableOrderStore((state) => state.clearContext);
   const [order, setOrder] = useState<Order | null>(null);
   const [status, setStatus] = useState<OrderStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [action, setAction] = useState<'cancel' | 'cash' | null>(null);
+  const [action, setAction] = useState<'cancel' | 'cash' | 'online' | 'table' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const previousStatus = useRef<string | null>(null);
   const tg = window.Telegram?.WebApp;
@@ -74,7 +83,7 @@ export default function ArtisanOrderStatusPage() {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [isInsideTelegram, orderId]);
+  }, [isInsideTelegram, orderId, restoreTableOrder]);
 
   useEffect(() => {
     if (!orderId || !isInsideTelegram) return undefined;
@@ -107,7 +116,6 @@ export default function ArtisanOrderStatusPage() {
       ...current,
       status: updated.status,
       order_number: updated.order_number,
-      alipos_order_id: updated.alipos_order_id,
       payment_status: updated.payment_status,
       payment_expires_at: updated.payment_expires_at,
       multicard_receipt_url: updated.multicard_receipt_url,
@@ -160,6 +168,49 @@ export default function ArtisanOrderStatusPage() {
     }
   };
 
+  const openCheckout = (url: string) => {
+    if (tg?.openLink) tg.openLink(url);
+    else window.open(url, '_blank');
+  };
+
+  const handleRetryPayment = async () => {
+    if (!orderId || action) return;
+    if (order?.payment_status === 'pending' && order.multicard_checkout_url) {
+      openCheckout(order.multicard_checkout_url);
+      return;
+    }
+    setAction('online');
+    setActionError(null);
+    try {
+      const response = await retryOrderPayment(orderId);
+      const updated = response.data.data;
+      applyOrderUpdate(updated);
+      if (updated.multicard_checkout_url) openCheckout(updated.multicard_checkout_url);
+    } catch (error) {
+      const details = errorDetail(error);
+      setActionError(details.status === 409
+        ? t('order.payment_changed')
+        : t('order.action_failed'));
+      tg?.HapticFeedback?.notificationOccurred('error');
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const handleOrderMore = async () => {
+    if (!orderId || action) return;
+    clearCart();
+    setAction('table');
+    try {
+      await restoreTableOrder(orderId);
+    } catch {
+      clearTableContext();
+    } finally {
+      navigate('/');
+      setAction(null);
+    }
+  };
+
   if (!isInsideTelegram) {
     return (
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', backgroundColor: COLORS.surface, padding: 24, textAlign: 'center' }}>
@@ -202,16 +253,19 @@ export default function ArtisanOrderStatusPage() {
   const syncStatus = status?.alipos_sync_status ?? order.alipos_sync_status;
   const isCancelled = currentStatus === 'CANCELED' || currentStatus === 'CANCELLED';
   const isPendingPayment = paymentStatus === 'pending' && currentStatus === 'AWAITING_PAYMENT';
+  const isRetryablePayment = paymentStatus === 'failed' || paymentStatus === 'expired';
   const isPaid = paymentStatus === 'paid';
   const steps = isTableOrder ? TABLE_STEPS : DELIVERY_STEPS;
   const currentStep = STATUS_STEP[currentStatus] || 1;
   const canCancel = isTableOrder && (currentStatus === 'NEW' || currentStatus === 'AWAITING_PAYMENT');
-  const canSwitchToCash = isTableOrder && isPendingPayment && !!order.multicard_checkout_url;
+  const canSwitchToCash = isTableOrder
+    && (isRetryablePayment || (isPendingPayment && !!order.multicard_checkout_url));
   const receiptUrl = status?.multicard_receipt_url ?? order.multicard_receipt_url;
 
   const statusLabels: Record<string, string> = {
     AWAITING_PAYMENT: t('status.awaiting_payment'),
     PAYMENT_FAILED: t('status.payment_failed'),
+    PAYMENT_REVIEW: t('status.payment_review'),
     PAID_AWAITING_RESTAURANT: t('status.placed'),
     NEW: t('status.placed'),
     ACCEPTED_BY_RESTAURANT: t('status.preparing'),
@@ -223,7 +277,9 @@ export default function ArtisanOrderStatusPage() {
     CANCELLED: t('status.cancelled'),
   };
 
-  const paymentLabel = paymentStatus === 'refund_pending'
+  const paymentLabel = paymentStatus === 'invoice_unknown'
+    ? t('payment.verifying')
+    : paymentStatus === 'refund_pending'
     ? t('payment.refund_pending')
     : paymentStatus === 'refunded'
       ? t('payment.refunded')
@@ -277,9 +333,9 @@ export default function ArtisanOrderStatusPage() {
                   </div>
                 </div>
               </div>
-              {isPendingPayment && order.multicard_checkout_url && (
-                <button type="button" onClick={() => tg?.openLink ? tg.openLink(order.multicard_checkout_url as string) : window.open(order.multicard_checkout_url as string, '_blank')} style={{ width: '100%', padding: 14, border: 0, backgroundColor: COLORS.primary, color: COLORS.onPrimary, fontWeight: 800, cursor: 'pointer' }}>
-                  {t('payment.retry_online')}
+              {((isPendingPayment && order.multicard_checkout_url) || isRetryablePayment) && (
+                <button type="button" disabled={action !== null} onClick={() => void handleRetryPayment()} style={{ width: '100%', padding: 14, border: 0, backgroundColor: COLORS.primary, color: COLORS.onPrimary, fontWeight: 800, cursor: 'pointer' }}>
+                  {action === 'online' ? t('common.loading') : t('payment.retry_online')}
                 </button>
               )}
               {isPaid && receiptUrl && (
@@ -319,20 +375,6 @@ export default function ArtisanOrderStatusPage() {
           )}
 
           <section style={{ backgroundColor: COLORS.surfaceContainerLowest, borderRadius: 16, padding: 18, display: 'grid', gap: 12 }}>
-            {!isTableOrder && (
-              <>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: COLORS.secondary }}>{t('order.internal_order')}</span>
-                  <strong>{order.id.slice(0, 8)}</strong>
-                </div>
-                {status?.alipos_order_id && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: COLORS.secondary }}>{t('order.alipos_reference')}</span>
-                    <strong>{status.alipos_order_id.slice(0, 8)}</strong>
-                  </div>
-                )}
-              </>
-            )}
             {isTableOrder && servicePercent > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.secondary, fontSize: 13 }}>
                 <span>{t('checkout.service_charge')} ({servicePercent}%)</span>
@@ -365,8 +407,8 @@ export default function ArtisanOrderStatusPage() {
                   {action === 'cash' ? t('common.loading') : t('payment.switch_to_cash')}
                 </button>
               )}
-              <button type="button" onClick={() => { clearCart(); navigate('/'); }} style={{ padding: 15, borderRadius: 12, border: 0, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.primaryContainer})`, color: COLORS.onPrimary, fontWeight: 800, cursor: 'pointer' }}>
-                {t('order.order_more')}
+              <button type="button" disabled={action !== null} onClick={() => void handleOrderMore()} style={{ padding: 15, borderRadius: 12, border: 0, background: `linear-gradient(135deg, ${COLORS.primary}, ${COLORS.primaryContainer})`, color: COLORS.onPrimary, fontWeight: 800, cursor: 'pointer' }}>
+                {action === 'table' ? t('common.loading') : t('order.order_more')}
               </button>
               {canCancel && (
                 <button type="button" disabled={action !== null} onClick={() => void handleCancel()} style={{ padding: 13, borderRadius: 12, border: 0, background: 'transparent', color: COLORS.error, fontWeight: 800, cursor: 'pointer' }}>

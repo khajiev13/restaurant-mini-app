@@ -1,10 +1,11 @@
+import datetime
 import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.middleware.telegram_auth import create_jwt
-from app.models.models import User
+from app.models.models import Order, User
 from app.routers.tables import table_access
 
 TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -88,3 +89,86 @@ async def test_table_manifest_requires_admin_and_returns_deep_links(client, db_s
     assert item["table_title"] == "Stol 12"
     assert item["manual_code"] == table_access.build_manual_code(TABLE_ID)
     assert item["deep_link"].startswith("https://t.me/olotsomsa_zakaz_bot?startapp=t_")
+
+
+@pytest.mark.asyncio
+async def test_restore_table_context_from_owned_order_without_exposing_ids(
+    client,
+    db_session,
+):
+    user = User(
+        telegram_id=7003,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+    )
+    order = Order(
+        user_id=user.telegram_id,
+        items=[],
+        items_cost=10000,
+        total_amount=11000,
+        delivery_fee=0,
+        payment_method="cash",
+        discriminator="inplace",
+        table_id=TABLE_ID,
+        table_title="Stol 12",
+        hall_id=HALL_ID,
+        hall_title="Asosiy zal",
+        service_percent=10,
+        table_access_expires_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        + datetime.timedelta(hours=1),
+        status="NEW",
+    )
+    db_session.add_all([user, order])
+    await db_session.commit()
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=DIRECTORY_RESPONSE),
+    ):
+        response = await client.post(
+            f"/api/tables/restore/{order.id}",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["table_title"] == "Stol 12"
+    assert data["access_token"].startswith("ta1.")
+    restored_claims = table_access.verify_access_token(data["access_token"])
+    expected_expiry = order.table_access_expires_at.replace(tzinfo=datetime.UTC)
+    assert restored_claims.expires_at == expected_expiry.replace(microsecond=0)
+    assert str(TABLE_ID) not in response.text
+    assert str(HALL_ID) not in response.text
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_an_expired_table_session(client, db_session):
+    user = User(
+        telegram_id=7004,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+    )
+    order = Order(
+        user_id=user.telegram_id,
+        items=[],
+        items_cost=10000,
+        total_amount=11000,
+        delivery_fee=0,
+        payment_method="cash",
+        discriminator="inplace",
+        table_id=TABLE_ID,
+        table_access_expires_at=datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        - datetime.timedelta(seconds=1),
+        status="NEW",
+    )
+    db_session.add_all([user, order])
+    await db_session.commit()
+
+    response = await client.post(
+        f"/api/tables/restore/{order.id}",
+        headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+    )
+
+    assert response.status_code == 404

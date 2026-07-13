@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import ArtisanMenuPage from './pages/artisan/ArtisanMenuPage';
@@ -69,6 +69,7 @@ export default function App() {
   const resolveTableEntry = useTableOrderStore((state) => state.resolveEntry);
   const role = user?.role ?? 'customer';
   const navigate = useNavigate();
+  const handledStartParam = useRef<string | null>(null);
   const isResolvingRole = isLoading || !hasResolvedInitialAuth || !hasHydratedUser;
 
   const renderResolvedRoute = (element: ReactNode) => {
@@ -125,6 +126,8 @@ export default function App() {
     // Handle deep link return from Multicard payment
     // Bot deep link: https://t.me/olotsomsa_zakaz_bot?startapp=order_<uuid>
     const startParam = tg.initDataUnsafe?.start_param;
+    if (!startParam || handledStartParam.current === startParam) return;
+    handledStartParam.current = startParam;
     if (startParam?.startsWith('order_')) {
       const orderId = startParam.slice('order_'.length);
       if (orderId) {

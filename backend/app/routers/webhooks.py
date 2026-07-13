@@ -163,7 +163,9 @@ async def multicard_callback(
 
     Multicard POSTs here after a successful hosted-checkout payment.
     We verify the MD5 signature, find the order, and mark it as paid.
-    Must respond HTTP 200 with {"success": true} — any other response triggers payment reversal.
+    Multicard treats an empty HTTP 200 response as acceptance. Rejected callbacks
+    intentionally return non-2xx so a malformed or mismatched payment is not
+    acknowledged as successfully processed.
     """
     body = await request.json()
 
@@ -176,22 +178,30 @@ async def multicard_callback(
         logger.warning(
             "Multicard callback missing required fields: %s", list(body.keys())
         )
-        # Return 200 with success:true — we don't want Multicard to reverse the payment
-        return {"success": True}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required payment callback fields",
+        )
 
     try:
         parsed_store_id = int(store_id)
         parsed_amount = int(amount)
     except (TypeError, ValueError):
         logger.warning("Multicard callback has invalid numeric fields")
-        return {"success": True}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid payment callback fields",
+        ) from None
 
     if parsed_store_id != settings.multicard_store_id:
         logger.warning(
             "Multicard callback store mismatch for invoice_id=%s",
             invoice_id,
         )
-        return {"success": True}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payment store does not match",
+        )
 
     if not multicard_api.verify_callback_signature(
         store_id=parsed_store_id,
@@ -205,8 +215,10 @@ async def multicard_callback(
             store_id,
             amount,
         )
-        # Return 200 with success:true to avoid payment reversal — log for investigation
-        return {"success": True}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid payment callback signature",
+        )
 
     # Parse order ID from invoice_id
     try:
@@ -215,7 +227,10 @@ async def multicard_callback(
         logger.warning(
             "Multicard callback: cannot parse invoice_id as UUID: %s", invoice_id
         )
-        return {"success": True}
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid invoice identifier",
+        ) from None
 
     payment_uuid = body.get("uuid")
     receipt_url = body.get("receipt_url")
@@ -232,14 +247,26 @@ async def multicard_callback(
             logger.warning(
                 "Multicard callback: order not found for invoice_id=%s", invoice_id
             )
-            return {"success": True}
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found",
+            )
 
         # Idempotency: already processed
         if order.payment_status == "paid":
             logger.info(
                 "Multicard callback: order %s already paid, skipping", order_uuid
             )
-            return {"success": True}
+            return {}
+
+        if not payment_uuid:
+            logger.warning(
+                "Multicard callback missing payment UUID for order=%s", order_uuid
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing payment identifier",
+            )
 
         expected_amount = int(order.total_amount * 100)
         if parsed_amount != expected_amount:
@@ -247,18 +274,29 @@ async def multicard_callback(
                 "Multicard callback amount mismatch for order=%s",
                 order_uuid,
             )
-            return {"success": True}
-        if order.payment_method != "rahmat" or order.status != "AWAITING_PAYMENT":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment amount does not match order",
+            )
+        valid_payment_state = (
+            order.payment_method == "rahmat"
+            and order.status in {"AWAITING_PAYMENT", "PAYMENT_REVIEW"}
+            and order.payment_status in {"pending", "invoice_unknown"}
+        )
+        if not valid_payment_state:
             logger.warning(
                 "Multicard callback order is not awaiting online payment: order=%s",
                 order_uuid,
             )
-            return {"success": True}
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Order is not awaiting online payment",
+            )
 
         order.payment_provider = "multicard"
         order.payment_status = "paid"
         order.payment_paid_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-        order.multicard_payment_uuid = str(payment_uuid) if payment_uuid else None
+        order.multicard_payment_uuid = str(payment_uuid)
         order.multicard_receipt_url = str(receipt_url) if receipt_url else None
         order.payment_card_pan = str(card_pan) if card_pan else None
         order.payment_ps = str(ps) if ps else None
@@ -278,7 +316,7 @@ async def multicard_callback(
         ps,
     )
 
-    return {"success": True}
+    return {}
 
 
 @router.post("/stoplist/{product_id}")

@@ -240,6 +240,8 @@ async def test_multicard_callback_queues_exact_paid_order_once(
 
     assert first.status_code == 200
     assert second.status_code == 200
+    assert first.json() == {}
+    assert second.json() == {}
     assert order.payment_status == "paid"
     assert order.status == "PAID_AWAITING_RESTAURANT"
     assert order.alipos_sync_status == "queued"
@@ -264,7 +266,7 @@ async def test_multicard_callback_amount_mismatch_does_not_mark_paid(
     )
     await webhook_db_session.refresh(order)
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     assert order.payment_status == "pending"
     assert order.alipos_sync_status == "awaiting_payment"
     dispatch.assert_not_awaited()
@@ -288,9 +290,28 @@ async def test_multicard_callback_wrong_store_does_not_mark_paid(
     )
     await webhook_db_session.refresh(order)
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     assert order.payment_status == "pending"
     dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multicard_callback_without_payment_uuid_is_rejected(
+    client,
+    webhook_db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    body = _signed_callback(order)
+    body.pop("uuid")
+
+    response = await client.post("/api/webhooks/multicard/callback", json=body)
+    await webhook_db_session.refresh(order)
+
+    assert response.status_code == 400
+    assert order.payment_status == "pending"
 
 
 @pytest.mark.asyncio
