@@ -53,7 +53,10 @@ async def register_telegram_webhook() -> None:
         return
 
     webhook_url = f"{settings.public_base_url}/api/webhooks/bot"
-    payload: dict[str, Any] = {"url": webhook_url, "allowed_updates": TELEGRAM_ALLOWED_UPDATES}
+    payload: dict[str, Any] = {
+        "url": webhook_url,
+        "allowed_updates": TELEGRAM_ALLOWED_UPDATES,
+    }
     if settings.telegram_webhook_secret:
         payload["secret_token"] = settings.telegram_webhook_secret
 
@@ -71,7 +74,9 @@ async def register_telegram_webhook() -> None:
                 current_allowed_updates = _normalized_allowed_updates(
                     current_info.get("allowed_updates")
                 )
-                expected_allowed_updates = _normalized_allowed_updates(TELEGRAM_ALLOWED_UPDATES)
+                expected_allowed_updates = _normalized_allowed_updates(
+                    TELEGRAM_ALLOWED_UPDATES
+                )
                 if (
                     current_url == webhook_url
                     and current_allowed_updates == expected_allowed_updates
@@ -99,6 +104,13 @@ async def start_payment_expiry_task() -> None:
     asyncio.create_task(_expire_pending_payments())
 
 
+@app.on_event("startup")
+async def recover_paid_alipos_queue() -> None:
+    from app.services.order_service import recover_queued_alipos_orders
+
+    await recover_queued_alipos_orders()
+
+
 async def _expire_pending_payments() -> None:
     """Background task: expire unpaid Rahmat orders past their payment deadline.
 
@@ -117,7 +129,9 @@ async def _expire_pending_payments() -> None:
         now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 
         # Collect IDs and alipos IDs to process outside the session
-        expired_records: list[tuple[str, str | None, str | None]] = []  # (order_id, alipos_order_id, mc_invoice_uuid)
+        expired_records: list[
+            tuple[str, str | None, str | None]
+        ] = []  # (order_id, alipos_order_id, mc_invoice_uuid)
 
         try:
             async with async_session() as db:
@@ -144,12 +158,18 @@ async def _expire_pending_payments() -> None:
                 for order in expired:
                     order.payment_status = "expired"
                     order.status = "CANCELLED"
-                    order.payment_error = "Payment timeout — invoice expired after 10 minutes"
-                    expired_records.append((
-                        str(order.id),
-                        str(order.alipos_order_id) if order.alipos_order_id else None,
-                        order.multicard_invoice_uuid,
-                    ))
+                    order.payment_error = (
+                        "Payment timeout — invoice expired after 10 minutes"
+                    )
+                    expired_records.append(
+                        (
+                            str(order.id),
+                            str(order.alipos_order_id)
+                            if order.alipos_order_id
+                            else None,
+                            order.multicard_invoice_uuid,
+                        )
+                    )
 
                 await db.commit()
 
@@ -172,7 +192,9 @@ async def _expire_pending_payments() -> None:
                 except Exception as exc:
                     cancel_status = "failed"
                     cancel_error = str(exc)[:500]
-                    logger.warning("AliPOS cancel failed for order %s: %s", order_id, exc)
+                    logger.warning(
+                        "AliPOS cancel failed for order %s: %s", order_id, exc
+                    )
 
                 try:
                     async with async_session() as db:
@@ -181,7 +203,10 @@ async def _expire_pending_payments() -> None:
                         from sqlalchemy import select as sel
 
                         from app.models.models import Order as O
-                        result = await db.execute(sel(O).where(O.id == _uuid.UUID(order_id)))
+
+                        result = await db.execute(
+                            sel(O).where(O.id == _uuid.UUID(order_id))
+                        )
                         o = result.scalar_one_or_none()
                         if o:
                             o.alipos_cancel_status = cancel_status
@@ -189,7 +214,11 @@ async def _expire_pending_payments() -> None:
                                 o.alipos_cancel_error = cancel_error
                             await db.commit()
                 except Exception as exc:
-                    logger.exception("Failed to save AliPOS cancel status for order %s: %s", order_id, exc)
+                    logger.exception(
+                        "Failed to save AliPOS cancel status for order %s: %s",
+                        order_id,
+                        exc,
+                    )
 
 
 app.add_middleware(

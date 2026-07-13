@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import re
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import async_session
 from app.models.models import Address, Order, User
 from app.schemas.order import OrderCreate
 from app.services import alipos_api, multicard_api
@@ -172,6 +174,43 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
     order.alipos_sync_error = None
     order.status = "NEW"
     await db.commit()
+
+
+async def dispatch_queued_alipos_order(order_id: uuid.UUID) -> None:
+    """Claim one paid order for a single AliPOS create attempt."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Order)
+            .where(
+                Order.id == order_id,
+                Order.alipos_sync_status == "queued",
+                Order.payment_status == "paid",
+            )
+            .with_for_update(skip_locked=True)
+        )
+        order = result.scalar_one_or_none()
+        if order is None:
+            return
+        order.alipos_sync_status = "sending"
+        await db.commit()
+        try:
+            await submit_order_to_alipos(db, order)
+        except OrderSubmissionRejected:
+            logger.exception("AliPOS rejected paid local order %s", order_id)
+
+
+async def recover_queued_alipos_orders() -> None:
+    """Schedule only never-attempted paid orders after a process restart."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Order.id).where(
+                Order.alipos_sync_status == "queued",
+                Order.payment_status == "paid",
+            )
+        )
+        order_ids = list(result.scalars())
+    for order_id in order_ids:
+        asyncio.create_task(dispatch_queued_alipos_order(order_id))
 
 
 async def _resolve_delivery(

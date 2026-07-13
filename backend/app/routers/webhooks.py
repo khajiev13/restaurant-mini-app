@@ -5,13 +5,14 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 from sqlalchemy import select
 
 from app.config import settings
 from app.database import async_session
 from app.models.models import Order, Stoplist, User
 from app.services import multicard_api
+from app.services.order_service import dispatch_queued_alipos_order
 from app.services.order_status_service import apply_alipos_status_update_for_order
 
 logger = logging.getLogger(__name__)
@@ -26,17 +27,23 @@ def _mask_telegram_id(telegram_id: Any) -> str:
     return f"***{value[-4:]}"
 
 
-def _verify_webhook_credentials(client_id: str | None, client_secret: str | None) -> None:
+def _verify_webhook_credentials(
+    client_id: str | None, client_secret: str | None
+) -> None:
     """Verify that AliPOS webhook headers match our credentials."""
     import hmac as _hmac
 
     if not client_id or not client_secret:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing credentials"
+        )
 
     id_ok = _hmac.compare_digest(client_id, settings.alipos_api_client_id)
     secret_ok = _hmac.compare_digest(client_secret, settings.alipos_api_client_secret)
     if not id_ok or not secret_ok:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
+        )
 
 
 @router.post("/bot")
@@ -66,7 +73,9 @@ async def telegram_bot_webhook(
                 update_id,
                 round((time.perf_counter() - started_at) * 1000),
             )
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret"
+            )
 
         logger.info("Telegram bot webhook secret accepted | update_id=%s", update_id)
 
@@ -128,12 +137,12 @@ async def order_status_webhook(
     order_number = body.get("orderNumber")
 
     if not eats_id or not new_status:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing eatsId or status")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Missing eatsId or status"
+        )
 
     async with async_session() as db:
-        result = await db.execute(
-            select(Order).where(Order.alipos_eats_id == eats_id)
-        )
+        result = await db.execute(select(Order).where(Order.alipos_eats_id == eats_id))
         order = result.scalar_one_or_none()
         if order and await apply_alipos_status_update_for_order(
             db,
@@ -147,7 +156,9 @@ async def order_status_webhook(
 
 
 @router.post("/multicard/callback")
-async def multicard_callback(request: Request) -> dict:
+async def multicard_callback(
+    request: Request, background_tasks: BackgroundTasks
+) -> dict:
     """Receive successful payment callback from Multicard.
 
     Multicard POSTs here after a successful hosted-checkout payment.
@@ -162,15 +173,30 @@ async def multicard_callback(request: Request) -> dict:
     sign = body.get("sign")
 
     if not all([store_id is not None, invoice_id, amount is not None, sign]):
-        logger.warning("Multicard callback missing required fields: %s", list(body.keys()))
+        logger.warning(
+            "Multicard callback missing required fields: %s", list(body.keys())
+        )
         # Return 200 with success:true — we don't want Multicard to reverse the payment
         return {"success": True}
 
-    # Verify signature
+    try:
+        parsed_store_id = int(store_id)
+        parsed_amount = int(amount)
+    except (TypeError, ValueError):
+        logger.warning("Multicard callback has invalid numeric fields")
+        return {"success": True}
+
+    if parsed_store_id != settings.multicard_store_id:
+        logger.warning(
+            "Multicard callback store mismatch for invoice_id=%s",
+            invoice_id,
+        )
+        return {"success": True}
+
     if not multicard_api.verify_callback_signature(
-        store_id=int(store_id),
+        store_id=parsed_store_id,
         invoice_id=str(invoice_id),
-        amount=int(amount),
+        amount=parsed_amount,
         received_sign=str(sign),
     ):
         logger.warning(
@@ -186,7 +212,9 @@ async def multicard_callback(request: Request) -> dict:
     try:
         order_uuid = uuid.UUID(str(invoice_id))
     except ValueError:
-        logger.warning("Multicard callback: cannot parse invoice_id as UUID: %s", invoice_id)
+        logger.warning(
+            "Multicard callback: cannot parse invoice_id as UUID: %s", invoice_id
+        )
         return {"success": True}
 
     payment_uuid = body.get("uuid")
@@ -195,16 +223,36 @@ async def multicard_callback(request: Request) -> dict:
     ps = body.get("ps")
 
     async with async_session() as db:
-        result = await db.execute(select(Order).where(Order.id == order_uuid))
+        result = await db.execute(
+            select(Order).where(Order.id == order_uuid).with_for_update()
+        )
         order = result.scalar_one_or_none()
 
         if not order:
-            logger.warning("Multicard callback: order not found for invoice_id=%s", invoice_id)
+            logger.warning(
+                "Multicard callback: order not found for invoice_id=%s", invoice_id
+            )
             return {"success": True}
 
         # Idempotency: already processed
         if order.payment_status == "paid":
-            logger.info("Multicard callback: order %s already paid, skipping", order_uuid)
+            logger.info(
+                "Multicard callback: order %s already paid, skipping", order_uuid
+            )
+            return {"success": True}
+
+        expected_amount = int(order.total_amount * 100)
+        if parsed_amount != expected_amount:
+            logger.warning(
+                "Multicard callback amount mismatch for order=%s",
+                order_uuid,
+            )
+            return {"success": True}
+        if order.payment_method != "rahmat" or order.status != "AWAITING_PAYMENT":
+            logger.warning(
+                "Multicard callback order is not awaiting online payment: order=%s",
+                order_uuid,
+            )
             return {"success": True}
 
         order.payment_provider = "multicard"
@@ -214,15 +262,20 @@ async def multicard_callback(request: Request) -> dict:
         order.multicard_receipt_url = str(receipt_url) if receipt_url else None
         order.payment_card_pan = str(card_pan) if card_pan else None
         order.payment_ps = str(ps) if ps else None
+        order.payment_error = None
+        order.alipos_sync_status = "queued"
+        order.alipos_sync_error = None
+        order.status = "PAID_AWAITING_RESTAURANT"
 
         await db.commit()
 
+    background_tasks.add_task(dispatch_queued_alipos_order, order_uuid)
+
     logger.info(
-        "Multicard payment confirmed: order=%s amount=%s ps=%s card_pan=%s",
+        "Multicard payment confirmed: order=%s amount=%s ps=%s",
         order_uuid,
         amount,
         ps,
-        card_pan,
     )
 
     return {"success": True}
