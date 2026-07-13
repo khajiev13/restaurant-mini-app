@@ -8,6 +8,7 @@ interface MenuState {
   loaded: boolean;
   error: string | null;
   fetchMenu: () => Promise<void>;
+  refreshMenu: () => Promise<void>;
   retry: () => Promise<void>;
 }
 
@@ -31,8 +32,20 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     }
   },
 
+  refreshMenu: async () => {
+    set({ loading: true, error: null });
+    try {
+      const res = await getMenu();
+      set({ menu: res.data.data, loaded: true });
+    } catch (err) {
+      console.error('Menu refresh failed:', err);
+      set({ error: 'Failed to load menu. Please try again.' });
+    } finally {
+      set({ loading: false });
+    }
+  },
+
   retry: async () => {
-    set({ loaded: false, error: null });
-    await get().fetchMenu();
+    await get().refreshMenu();
   },
 }));

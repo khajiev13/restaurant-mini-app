@@ -11,8 +11,13 @@ async def test_get_menu(client):
         "items": [{"id": "i1", "categoryId": "c1", "name": "Cola", "price": 10.0}]
     }
 
-    with patch("app.routers.menu.alipos_api.get_menu", new_callable=AsyncMock) as mock_get_menu:
-        mock_get_menu.return_value = mock_menu_data
+    for item in mock_menu_data["items"]:
+        item.update({"available": True, "availableCount": None})
+
+    with patch(
+        "app.routers.menu.get_customer_menu",
+        new=AsyncMock(return_value=mock_menu_data),
+    ) as mock_get_menu:
 
         response = await client.get("/api/menu")
 
@@ -21,3 +26,4 @@ async def test_get_menu(client):
         assert json_data["success"] is True
         assert json_data["data"]["categories"][0]["name"] == "Drinks"
         assert json_data["data"]["items"][0]["name"] == "Cola"
+        assert json_data["data"]["items"][0]["available"] is True

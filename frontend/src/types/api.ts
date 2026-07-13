@@ -71,6 +71,8 @@ export interface MenuItem {
   price: number;
   categoryId: string;
   sortOrder: number;
+  available: boolean;
+  availableCount: number | null;
   images?: MenuImage[];
 }
 

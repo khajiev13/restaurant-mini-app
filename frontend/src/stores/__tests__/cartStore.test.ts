@@ -18,7 +18,9 @@ describe('cartStore', () => {
       name: 'Cola',
       price: 15.0,
       description: null,
-      sortOrder: 1
+      sortOrder: 1,
+      available: true,
+      availableCount: null,
     });
     
     const items = useCartStore.getState().items;
@@ -34,7 +36,9 @@ describe('cartStore', () => {
       name: 'Cola',
       price: 15.0,
       description: null,
-      sortOrder: 1
+      sortOrder: 1,
+      available: true,
+      availableCount: null,
     };
 
     useCartStore.getState().addItem(item);
@@ -52,7 +56,9 @@ describe('cartStore', () => {
       name: 'Cola',
       price: 15.0,
       description: null,
-      sortOrder: 1
+      sortOrder: 1,
+      available: true,
+      availableCount: null,
     };
 
     useCartStore.getState().addItem(item);
