@@ -4,12 +4,29 @@
     "currency_ru": "сум",
     "currency_en": "UZS",
     "total": "Итого",
-    "loading": "Загрузка..."
+    "loading": "Загрузка...",
+    "close": "Закрыть"
   },
   "menu": {
     "cart": "Корзина",
     "addToCart": "+",
-    "checkout": "Оформить"
+    "checkout": "Оформить",
+    "sold_out": "Нет в наличии",
+    "cart_adjusted": "Корзина обновлена из-за изменения наличия."
+  },
+  "table": {
+    "dine_in_prompt": "Заказываете за столом?",
+    "enter_code_hint": "Введите код стола",
+    "service": "Обслуживание",
+    "change": "Сменить стол",
+    "enter_code": "Ввести код стола",
+    "change_short": "Сменить",
+    "enter_short": "Ввести код",
+    "code_title": "Введите код стола",
+    "code_description": "Введите 6-значный код рядом с QR.",
+    "code_label": "Код стола",
+    "checking": "Проверяем…",
+    "confirm": "Подтвердить"
   },
   "cart": {
     "title": "Ваша корзина",

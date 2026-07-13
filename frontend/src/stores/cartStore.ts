@@ -9,15 +9,18 @@ interface CartState {
   clearCart: () => void;
   getTotal: () => number;
   getItemCount: () => number;
+  reconcileAvailability: (products: MenuItem[]) => { removed: number; reduced: number };
 }
 
 export const useCartStore = create<CartState>((set, get) => ({
   items: [],
 
   addItem: (product) => {
+    if (!product.available) return;
     const items = get().items;
     const existing = items.find((item) => item.id === product.id);
     if (existing) {
+      if (product.availableCount !== null && existing.quantity >= product.availableCount) return;
       set({
         items: items.map((item) =>
           item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item,
@@ -51,4 +54,24 @@ export const useCartStore = create<CartState>((set, get) => ({
   getTotal: () => get().items.reduce((sum, item) => sum + item.price * item.quantity, 0),
 
   getItemCount: () => get().items.reduce((sum, item) => sum + item.quantity, 0),
+
+  reconcileAvailability: (products) => {
+    const catalog = new Map(products.map((product) => [product.id, product]));
+    let removed = 0;
+    let reduced = 0;
+    const items = get().items.flatMap((item) => {
+      const current = catalog.get(item.id);
+      if (!current || !current.available || current.availableCount === 0) {
+        removed += 1;
+        return [];
+      }
+      const quantity = current.availableCount !== null
+        ? Math.min(item.quantity, current.availableCount)
+        : item.quantity;
+      if (quantity < item.quantity) reduced += 1;
+      return [{ ...item, ...current, quantity }];
+    });
+    if (removed > 0 || reduced > 0) set({ items });
+    return { removed, reduced };
+  },
 }));

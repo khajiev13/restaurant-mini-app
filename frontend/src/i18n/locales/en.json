@@ -4,12 +4,29 @@
     "currency_ru": "сум",
     "currency_en": "UZS",
     "total": "Total",
-    "loading": "Loading..."
+    "loading": "Loading...",
+    "close": "Close"
   },
   "menu": {
     "cart": "Cart",
     "addToCart": "+",
-    "checkout": "Checkout"
+    "checkout": "Checkout",
+    "sold_out": "Sold out",
+    "cart_adjusted": "Your cart was updated because availability changed."
+  },
+  "table": {
+    "dine_in_prompt": "Ordering at a table?",
+    "enter_code_hint": "Enter your table code",
+    "service": "Service",
+    "change": "Change table",
+    "enter_code": "Enter table code",
+    "change_short": "Change",
+    "enter_short": "Enter code",
+    "code_title": "Enter table code",
+    "code_description": "Enter the 6-character code beside the QR.",
+    "code_label": "Table code",
+    "checking": "Checking…",
+    "confirm": "Confirm"
   },
   "cart": {
     "title": "Your Cart",

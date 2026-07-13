@@ -4,12 +4,29 @@
     "currency_ru": "сум",
     "currency_en": "UZS",
     "total": "Jami",
-    "loading": "Yuklanmoqda..."
+    "loading": "Yuklanmoqda...",
+    "close": "Yopish"
   },
   "menu": {
     "cart": "Savat",
     "addToCart": "+",
-    "checkout": "Buyurtma berish"
+    "checkout": "Buyurtma berish",
+    "sold_out": "Sotuvda yo'q",
+    "cart_adjusted": "Mavjudlik o'zgargani uchun savat yangilandi."
+  },
+  "table": {
+    "dine_in_prompt": "Stolda buyurtma berasizmi?",
+    "enter_code_hint": "Stol kodini kiriting",
+    "service": "Xizmat",
+    "change": "Stolni almashtirish",
+    "enter_code": "Stol kodini kiritish",
+    "change_short": "Almashtirish",
+    "enter_short": "Kod kiritish",
+    "code_title": "Stol kodini kiriting",
+    "code_description": "QR yonidagi 6 belgili kodni kiriting.",
+    "code_label": "Stol kodi",
+    "checking": "Tekshirilmoqda…",
+    "confirm": "Tasdiqlash"
   },
   "cart": {
     "title": "Savatingiz",

@@ -67,4 +67,28 @@ describe('cartStore', () => {
     const total = useCartStore.getState().getTotal();
     expect(total).toBe(30.0);
   });
+
+  it('removes sold-out items and caps limited quantities after a menu refresh', () => {
+    const soldOut = {
+      id: '1', categoryId: '1', name: 'Cola', price: 15,
+      description: null, sortOrder: 1, available: true, availableCount: null,
+    };
+    const limited = {
+      id: '2', categoryId: '1', name: 'Somsa', price: 18,
+      description: null, sortOrder: 2, available: true, availableCount: null,
+    };
+    useCartStore.getState().addItem(soldOut);
+    useCartStore.getState().addItem(limited);
+    useCartStore.getState().updateQuantity('2', 4);
+
+    const adjustment = useCartStore.getState().reconcileAvailability([
+      { ...soldOut, available: false, availableCount: 0 },
+      { ...limited, availableCount: 2 },
+    ]);
+
+    expect(adjustment).toEqual({ removed: 1, reduced: 1 });
+    expect(useCartStore.getState().items).toEqual([
+      expect.objectContaining({ id: '2', quantity: 2, availableCount: 2 }),
+    ]);
+  });
 });

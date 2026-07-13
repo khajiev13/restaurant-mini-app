@@ -2,10 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ArtisanLayout, { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
+import TableCodeSheet from '../../components/artisan/TableCodeSheet';
+import TableContextBar from '../../components/artisan/TableContextBar';
 import { getMe } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { useCartStore } from '../../stores/cartStore';
 import { useMenuStore } from '../../stores/menuStore';
+import { useTableOrderStore } from '../../stores/tableOrderStore';
 import { formatPrice } from '../../utils/format';
 import type { MenuCategory, MenuItem } from '../../types/api';
 import catBaliqlar from '../../assets/categories/baliqlar.jpg';
@@ -77,11 +80,13 @@ function getCategoryIcon(name: string, isActive?: boolean): React.ReactNode {
 }
 
 // --- Product Card ---
-function ProductCard({ product, quantity, onAdd, onRemove, language }: {
+function ProductCard({ product, quantity, onAdd, onRemove, language, soldOutLabel }: {
   product: MenuItem; quantity: number;
-  onAdd: () => void; onRemove: () => void; language: string;
+  onAdd: () => void; onRemove: () => void; language: string; soldOutLabel: string;
 }) {
   const imgUrl = product.images?.[0]?.url;
+  const available = product.available !== false;
+  const atLimit = product.availableCount !== null && quantity >= product.availableCount;
 
   return (
     <div
@@ -89,6 +94,7 @@ function ProductCard({ product, quantity, onAdd, onRemove, language }: {
         backgroundColor: COLORS.surfaceContainerLowest, borderRadius: 12, padding: 12,
         display: 'flex', gap: 16, boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
         border: `1px solid rgba(172, 173, 173, 0.05)`,
+        opacity: available ? 1 : 0.72,
       }}
     >
       {imgUrl && (
@@ -117,7 +123,15 @@ function ProductCard({ product, quantity, onAdd, onRemove, language }: {
           <span style={{ fontFamily: FONTS.headline, fontWeight: 700, color: COLORS.primary, fontSize: 14 }}>
             {formatPrice(product.price, language)}
           </span>
-          {quantity > 0 ? (
+          {!available ? (
+            <span style={{
+              minHeight: 36, display: 'inline-flex', alignItems: 'center', padding: '0 12px',
+              borderRadius: 999, background: 'rgba(179, 27, 37, 0.09)', color: COLORS.error,
+              fontSize: 11, fontWeight: 800,
+            }}>
+              {soldOutLabel}
+            </span>
+          ) : quantity > 0 ? (
             <div style={{
               display: 'flex', alignItems: 'center',
               backgroundColor: 'rgba(255, 121, 65, 0.2)',
@@ -138,10 +152,13 @@ function ProductCard({ product, quantity, onAdd, onRemove, language }: {
               </span>
               <button
                 onClick={onAdd}
+                disabled={atLimit}
+                aria-label={atLimit ? 'Mavjud miqdor savatda' : `${product.name} qo'shish`}
                 style={{
                   width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  borderRadius: '50%', backgroundColor: COLORS.primary, color: '#fff',
-                  border: 'none', cursor: 'pointer', boxShadow: '0 2px 6px rgba(163, 56, 0, 0.3)',
+                  borderRadius: '50%', backgroundColor: atLimit ? COLORS.surfaceContainerHigh : COLORS.primary,
+                  color: atLimit ? COLORS.secondary : '#fff', border: 'none', cursor: atLimit ? 'default' : 'pointer',
+                  boxShadow: atLimit ? 'none' : '0 2px 6px rgba(163, 56, 0, 0.3)',
                 }}
               >
                 <Icon name="add" size={16} />
@@ -150,6 +167,7 @@ function ProductCard({ product, quantity, onAdd, onRemove, language }: {
           ) : (
             <button
               onClick={onAdd}
+              aria-label={`${product.name} qo'shish`}
               style={{
                 width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 borderRadius: '50%', backgroundColor: COLORS.primary, color: '#fff',
@@ -179,6 +197,12 @@ export default function ArtisanMenuPage() {
   const cartItems = useCartStore((s) => s.items);
   const itemCount = useCartStore((s) => s.getItemCount());
   const cartTotal = useCartStore((s) => s.getTotal());
+  const reconcileAvailability = useCartStore((s) => s.reconcileAvailability);
+  const tableContext = useTableOrderStore((s) => s.context);
+  const resolveCode = useTableOrderStore((s) => s.resolveCode);
+  const tableResolving = useTableOrderStore((s) => s.isResolving);
+  const tableError = useTableOrderStore((s) => s.error);
+  const clearTableError = useTableOrderStore((s) => s.clearError);
   const navigate = useNavigate();
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
@@ -191,6 +215,8 @@ export default function ArtisanMenuPage() {
   const activeCategoryRef = useRef<string | null>(null);
   const [avatarUrl, setAvatarUrl] = useState<string | undefined>();
   const [firstName, setFirstName] = useState<string | undefined>();
+  const [tableSheetOpen, setTableSheetOpen] = useState(false);
+  const [cartNotice, setCartNotice] = useState<string | null>(null);
 
   const grouped: GroupedCategory[] = useMemo(() => {
     const categories = menu?.categories || [];
@@ -218,6 +244,18 @@ export default function ArtisanMenuPage() {
 
   useEffect(() => { tg?.BackButton?.hide(); }, []);
   useEffect(() => { void fetchMenu(); }, [fetchMenu]);
+
+  useEffect(() => {
+    if (!menu?.items) return;
+    const adjustment = reconcileAvailability(menu.items);
+    if (adjustment.removed > 0 || adjustment.reduced > 0) {
+      setCartNotice(t('menu.cart_adjusted', "Mavjudlik o'zgargani uchun savat yangilandi."));
+    }
+  }, [menu?.items, reconcileAvailability, t]);
+
+  useEffect(() => {
+    if (tableError && !tableContext) setTableSheetOpen(true);
+  }, [tableContext, tableError]);
 
   // Hide Telegram's MainButton in Artisan theme — we use our own cart bar
   useEffect(() => {
@@ -284,6 +322,10 @@ export default function ArtisanMenuPage() {
   };
 
   const getQuantity = (id: string) => cartItems.find((i) => i.id === id)?.quantity || 0;
+  const openTableSheet = () => {
+    clearTableError();
+    setTableSheetOpen(true);
+  };
 
   if (loading) {
     return (
@@ -316,8 +358,11 @@ export default function ArtisanMenuPage() {
   return (
     <ArtisanLayout hideBottomNav={itemCount > 0} avatarUrl={avatarUrl} avatarInitial={initial}>
       <div style={{ display: 'flex', height: '100vh', flexDirection: 'column', paddingBottom: itemCount > 0 ? 0 : 80, overflow: 'hidden' }}>
+        <div style={{ paddingTop: 64, flexShrink: 0 }}>
+          <TableContextBar context={tableContext} onChange={openTableSheet} />
+        </div>
         {/* Body: sidebar + content */}
-        <div style={{ display: 'flex', flex: 1, paddingTop: 64, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
           {/* Sidebar */}
           <aside
             style={{
@@ -364,6 +409,15 @@ export default function ArtisanMenuPage() {
 
           {/* Content */}
           <section ref={contentSectionRef} style={{ flex: 1, overflowY: 'auto', padding: '24px 16px', paddingBottom: itemCount > 0 ? 160 : 24 }}>
+            {cartNotice && (
+              <div role="status" style={{
+                marginBottom: 16, padding: '10px 12px', borderRadius: 12,
+                background: '#fff7ed', color: COLORS.onPrimaryContainer,
+                fontSize: 12, fontWeight: 700, lineHeight: 1.45,
+              }}>
+                {cartNotice}
+              </div>
+            )}
             {grouped.map((cat) => (
               <div key={cat.id} ref={(ref) => { if (ref) categoryRefs.current[cat.id] = ref; }} style={{ marginBottom: 32 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 24 }}>
@@ -378,6 +432,7 @@ export default function ArtisanMenuPage() {
                   {cat.products.map((p) => (
                     <ProductCard
                       key={p.id} product={p} language={i18n.language}
+                      soldOutLabel={t('menu.sold_out', "Sotuvda yo'q")}
                       quantity={getQuantity(p.id)}
                       onAdd={() => handleAdd(p)}
                       onRemove={() => handleRemove(p.id)}
@@ -437,6 +492,16 @@ export default function ArtisanMenuPage() {
           </div>
         )}
       </div>
+      <TableCodeSheet
+        open={tableSheetOpen}
+        onClose={() => {
+          setTableSheetOpen(false);
+          clearTableError();
+        }}
+        onResolve={resolveCode}
+        resolving={tableResolving}
+        error={tableError}
+      />
     </ArtisanLayout>
   );
 }
