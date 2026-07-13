@@ -14,6 +14,7 @@ import type {
   Order,
   OrderStatus,
   ReverseGeocodeResult,
+  TableContextResponse,
   User,
 } from '../types/api';
 
@@ -73,6 +74,11 @@ export const authenticateTelegram = (
   api.post('/auth/telegram', { init_data: initData });
 
 export const getMenu = (): Promise<AxiosResponse<ApiResponse<MenuData>>> => api.get('/menu');
+
+export const resolveTable = (
+  payload: { entry?: string; code?: string },
+): Promise<AxiosResponse<ApiResponse<TableContextResponse>>> =>
+  api.post('/tables/resolve', payload);
 
 export const getMe = (): Promise<AxiosResponse<ApiResponse<User>>> => api.get('/users/me');
 

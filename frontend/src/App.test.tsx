@@ -14,8 +14,16 @@ const authState = vi.hoisted(() => ({
   authError: null as string | null,
 }));
 
+const tableOrderState = vi.hoisted(() => ({
+  resolveEntry: vi.fn<(entry: string) => Promise<void>>().mockResolvedValue(undefined),
+}));
+
 vi.mock('./stores/authStore', () => ({
   useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
+}));
+
+vi.mock('./stores/tableOrderStore', () => ({
+  useTableOrderStore: (selector: (state: typeof tableOrderState) => unknown) => selector(tableOrderState),
 }));
 
 vi.mock('./pages/artisan/ArtisanMenuPage', () => ({
@@ -64,7 +72,9 @@ describe('App', () => {
     authState.hasHydratedUser = true;
     authState.hasResolvedInitialAuth = true;
     authState.authError = null;
+    tableOrderState.resolveEntry.mockClear();
     localStorage.clear();
+    sessionStorage.clear();
     delete (window as Window & { Telegram?: unknown }).Telegram;
   });
 
@@ -346,5 +356,28 @@ describe('App', () => {
     expect(tg.setBackgroundColor).toHaveBeenCalledWith('bg_color');
     expect(tg.setBottomBarColor).toHaveBeenCalledWith('bottom_bar_bg_color');
     expect(tg.disableVerticalSwipes).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves a Telegram table start parameter and keeps the customer on the menu', () => {
+    const tg = {
+      initDataUnsafe: { start_param: 't_A7K2P9_q1w2e3r4t5y6' },
+      ready: vi.fn(),
+      expand: vi.fn(),
+      setHeaderColor: vi.fn(),
+      setBackgroundColor: vi.fn(),
+      setBottomBarColor: vi.fn(),
+      disableVerticalSwipes: vi.fn(),
+      isVersionAtLeast: vi.fn(() => false),
+    };
+    (window as unknown as { Telegram?: { WebApp: unknown } }).Telegram = { WebApp: tg };
+
+    const view = render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(tableOrderState.resolveEntry).toHaveBeenCalledWith('t_A7K2P9_q1w2e3r4t5y6');
+    expect(view.getByText('Artisan menu page')).toBeInTheDocument();
   });
 });

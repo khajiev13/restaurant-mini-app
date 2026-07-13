@@ -11,6 +11,7 @@ import StaffOrderDetailPage from './pages/staff/StaffOrderDetailPage';
 import StaffProfilePage from './pages/staff/StaffProfilePage';
 import AdminUsersPage from './pages/admin/AdminUsersPage';
 import { useAuthStore } from './stores/authStore';
+import { useTableOrderStore } from './stores/tableOrderStore';
 
 function RoleRouteLoadingShell() {
   return <div aria-busy="true" className="min-h-screen" data-testid="role-route-loading" />;
@@ -65,6 +66,7 @@ export default function App() {
   const hasHydratedUser = useAuthStore((state) => state.hasHydratedUser);
   const hasResolvedInitialAuth = useAuthStore((state) => state.hasResolvedInitialAuth);
   const authError = useAuthStore((state) => state.authError);
+  const resolveTableEntry = useTableOrderStore((state) => state.resolveEntry);
   const role = user?.role ?? 'customer';
   const navigate = useNavigate();
   const isResolvingRole = isLoading || !hasResolvedInitialAuth || !hasHydratedUser;
@@ -128,8 +130,15 @@ export default function App() {
       if (orderId) {
         navigate(`/order/${orderId}`, { replace: true });
       }
+      return;
     }
-  }, [navigate]);
+    if (startParam?.startsWith('t_')) {
+      navigate('/', { replace: true });
+      void resolveTableEntry(startParam).catch(() => {
+        // The menu exposes a retryable manual-code fallback.
+      });
+    }
+  }, [navigate, resolveTableEntry]);
 
   useEffect(() => {
     void bootstrapAuth();

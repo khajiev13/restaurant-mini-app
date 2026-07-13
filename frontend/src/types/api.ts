@@ -87,6 +87,14 @@ export interface MenuData {
   items: MenuItem[];
 }
 
+export interface TableContextResponse {
+  table_title: string;
+  hall_title: string;
+  service_percent: number;
+  manual_code: string;
+  access_token: string;
+}
+
 export interface OrderItem {
   id: string;
   name?: string;
