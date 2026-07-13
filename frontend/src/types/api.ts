@@ -106,6 +106,8 @@ export interface OrderItem {
 export interface Order {
   id: string;
   status: string;
+  discriminator: 'delivery' | 'inplace';
+  items_cost: number;
   total_amount: number;
   created_at: string;
   order_number: string | null;
@@ -119,6 +121,10 @@ export interface Order {
   multicard_checkout_url: string | null;
   multicard_receipt_url: string | null;
   alipos_order_id: string | null;
+  alipos_sync_status: string | null;
+  table_title: string | null;
+  hall_title: string | null;
+  service_percent: number;
 }
 
 export interface OrderStatus {
@@ -143,11 +149,12 @@ export interface CreateOrderPayload {
     modifications: unknown[];
   }>;
   phone_number: string;
-  delivery_address: string;
+  delivery_address?: string;
   latitude?: string | null;
   longitude?: string | null;
   address_id?: string;
   comment?: string;
   payment_method: string;
   discriminator: string;
+  table_access_token?: string;
 }

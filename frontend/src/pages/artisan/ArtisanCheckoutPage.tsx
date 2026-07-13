@@ -6,6 +6,8 @@ import MapPickerOverlay from '../../components/artisan/MapPickerOverlay';
 import { createAddress, createOrder, getAddresses, getMe } from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
 import { useCartStore } from '../../stores/cartStore';
+import { useMenuStore } from '../../stores/menuStore';
+import { useTableOrderStore } from '../../stores/tableOrderStore';
 import { formatPrice } from '../../utils/format';
 import type { Address, CreateOrderPayload } from '../../types/api';
 
@@ -56,7 +58,15 @@ export default function ArtisanCheckoutPage() {
   const { t, i18n } = useTranslation();
   const items = useCartStore((s) => s.items);
   const clearCart = useCartStore((s) => s.clearCart);
+  const reconcileAvailability = useCartStore((s) => s.reconcileAvailability);
   const total = useCartStore((s) => s.getTotal());
+  const refreshMenu = useMenuStore((s) => s.refreshMenu);
+  const tableContext = useTableOrderStore((s) => s.context);
+  const isTableOrder = tableContext !== null;
+  const serviceCharge = tableContext
+    ? Math.round(total * tableContext.servicePercent) / 100
+    : 0;
+  const grandTotal = total + serviceCharge;
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authenticate = useAuthStore((s) => s.authenticate);
   const navigate = useNavigate();
@@ -76,8 +86,8 @@ export default function ArtisanCheckoutPage() {
   const showToast = (msg: string): void => { setToast(msg); haptic?.notificationOccurred('error'); };
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
 
-  const stateRef = useRef({ phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod });
-  stateRef.current = { phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod };
+  const stateRef = useRef({ phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability });
+  stateRef.current = { phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability };
 
   useEffect(() => {
     const bb = tg?.BackButton;
@@ -99,26 +109,29 @@ export default function ArtisanCheckoutPage() {
 
     setLoading(true);
 
-    void Promise.all([getMe(), getAddresses()])
+    const addressesRequest = isTableOrder ? Promise.resolve(null) : getAddresses();
+    void Promise.all([getMe(), addressesRequest])
       .then(([meRes, addrRes]) => {
         if (cancelled) return;
         const p = meRes.data.data?.phone_number;
         if (p) setPhone(p);
-        const addrs = addrRes.data.data || [];
+        const addrs = addrRes?.data.data || [];
         setAddresses(addrs);
         if (addrs.length > 0) setSelectedAddressId(addrs[0].id);
       })
       .catch(console.error)
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, isTableOrder]);
 
   const handlePlaceOrder = async () => {
     const s = stateRef.current;
     if (s.submitting) return;
     if (!s.phone) { showToast(t('checkout.error_phone')); return; }
-    const addr = s.addresses.find((a) => a.id === s.selectedAddressId);
-    if (!addr) { showToast(t('checkout.error_address')); return; }
+    const addr = s.tableContext
+      ? null
+      : s.addresses.find((a) => a.id === s.selectedAddressId);
+    if (!s.tableContext && !addr) { showToast(t('checkout.error_address')); return; }
 
     setSubmitting(true);
     try {
@@ -130,12 +143,20 @@ export default function ArtisanCheckoutPage() {
           price: i.price,
           modifications: [],
         })),
-        phone_number: s.phone, delivery_address: addr.full_address,
-        latitude: addr.latitude, longitude: addr.longitude, address_id: addr.id,
-        comment: s.comment || undefined, payment_method: s.paymentMethod, discriminator: 'delivery',
+        phone_number: s.phone,
+        comment: s.comment || undefined,
+        payment_method: s.paymentMethod,
+        discriminator: s.tableContext ? 'inplace' : 'delivery',
+        ...(s.tableContext
+          ? { table_access_token: s.tableContext.accessToken }
+          : {
+              delivery_address: addr?.full_address,
+              latitude: addr?.latitude,
+              longitude: addr?.longitude,
+              address_id: addr?.id,
+            }),
       };
       const res = await createOrder(payload);
-      s.clearCart();
       haptic?.notificationOccurred('success');
 
       const orderData = res.data.data;
@@ -147,13 +168,20 @@ export default function ArtisanCheckoutPage() {
         } else {
           window.open(orderData.multicard_checkout_url, '_blank');
         }
-        s.navigate(`/order/${orderData.id}`);
-      } else {
-        s.navigate(`/order/${orderData.id}`);
       }
+      s.navigate(`/order/${orderData.id}`);
+      s.clearCart();
     } catch (err) {
       console.error('Order failed:', err);
-      showToast(t('checkout.error_general'));
+      const detail = (err as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response;
+      if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
+        await s.refreshMenu();
+        const refreshed = useMenuStore.getState().menu;
+        if (refreshed) s.reconcileAvailability(refreshed.items);
+        showToast(t('checkout.cart_changed', 'Menu o\'zgardi. Savatni tekshirib, qayta urinib ko\'ring.'));
+      } else {
+        showToast(t('checkout.error_general'));
+      }
       haptic?.notificationOccurred('error');
     } finally { setSubmitting(false); }
   };
@@ -253,7 +281,32 @@ export default function ArtisanCheckoutPage() {
             </div>
           </section>
 
+          {tableContext && (
+            <section style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <h2 style={{ fontSize: 13, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: COLORS.secondary, fontFamily: FONTS.headline, margin: 0, padding: '0 4px' }}>
+                {t('checkout.table_label', 'Stol')}
+              </h2>
+              <div style={{
+                background: '#fff7ed', border: '1px solid rgba(163, 56, 0, 0.14)',
+                borderRadius: 14, padding: 16, display: 'flex', alignItems: 'center', gap: 12,
+              }}>
+                <div style={{ width: 44, height: 44, borderRadius: 13, background: 'rgba(163, 56, 0, 0.12)', color: COLORS.primary, display: 'grid', placeItems: 'center' }}>
+                  <Icon name="table_restaurant" size={24} />
+                </div>
+                <div>
+                  <div style={{ fontFamily: FONTS.headline, fontWeight: 800, color: COLORS.onSurface }}>
+                    {tableContext.tableTitle}
+                  </div>
+                  <div style={{ fontSize: 12, color: COLORS.secondary, marginTop: 2 }}>
+                    {tableContext.hallTitle} · {t('table.service', 'Xizmat')} {tableContext.servicePercent}%
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
           {/* Addresses */}
+          {!isTableOrder && (
           <section style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <h2 style={{ fontSize: 13, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: COLORS.secondary, fontFamily: FONTS.headline, margin: 0, padding: '0 4px' }}>
               {t('checkout.address_label')}
@@ -396,13 +449,14 @@ export default function ArtisanCheckoutPage() {
               </div>
             )}
           </section>
+          )}
 
           {/* Payment Method */}
           <section style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <h2 style={{ fontSize: 13, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: COLORS.secondary, fontFamily: FONTS.headline, margin: 0, padding: '0 4px' }}>
               {t('checkout.payment_method_label', '💳 Payment Method')}
             </h2>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
               {PAYMENT_METHODS.map((pm) => {
                 const active = paymentMethod === pm.key;
                 return (
@@ -474,6 +528,22 @@ export default function ArtisanCheckoutPage() {
                   </span>
                 </div>
               ))}
+              <div style={{ padding: 14, borderTop: `1px solid ${COLORS.surfaceContainer}`, display: 'grid', gap: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.secondary, fontSize: 13 }}>
+                  <span>{t('checkout.subtotal', 'Mahsulotlar')}</span>
+                  <span>{formatPrice(total, i18n.language)}</span>
+                </div>
+                {tableContext && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.secondary, fontSize: 13 }}>
+                    <span>{t('checkout.service_charge', 'Xizmat haqi')} ({tableContext.servicePercent}%)</span>
+                    <span>{formatPrice(serviceCharge, i18n.language)}</span>
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: COLORS.onSurface, fontFamily: FONTS.headline, fontSize: 16, fontWeight: 800, paddingTop: 4 }}>
+                  <span>{t('common.total', 'Jami')}</span>
+                  <span>{formatPrice(grandTotal, i18n.language)}</span>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -518,13 +588,17 @@ export default function ArtisanCheckoutPage() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Icon name="shopping_bag" fill style={{ color: COLORS.onPrimary }} />
               <span style={{ fontWeight: 700, fontFamily: FONTS.headline, fontSize: 18, letterSpacing: '-0.01em' }}>
-                {submitting ? t('checkout.placing_order', 'Placing...') : t('checkout.place_order')}
+                {submitting
+                  ? t('checkout.placing_order', 'Placing...')
+                  : paymentMethod === 'rahmat'
+                    ? t('checkout.pay_online', "Onlayn to'lash")
+                    : t('checkout.place_order')}
               </span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <div style={{ height: 24, width: 1, backgroundColor: 'rgba(255,255,255,0.2)' }} />
               <span style={{ fontWeight: 800, fontFamily: FONTS.headline, fontSize: 18 }}>
-                {formatPrice(total, i18n.language)}
+                {formatPrice(grandTotal, i18n.language)}
               </span>
             </div>
           </button>
@@ -532,7 +606,7 @@ export default function ArtisanCheckoutPage() {
         </div>
       </div>
 
-      {showMapPicker && (
+      {!isTableOrder && showMapPicker && (
         <MapPickerOverlay
           isOpen={showMapPicker}
           initialLat={form.lat}
