@@ -9,6 +9,37 @@ from app.middleware.telegram_auth import create_jwt
 from app.models.models import Order, User
 
 
+async def _table_order(db_session, *, paid: bool = False) -> tuple[User, Order]:
+    telegram_id = 9_000_000_000 + uuid.uuid4().int % 1_000_000_000
+    user = User(
+        telegram_id=telegram_id,
+        first_name="Table customer",
+        last_name=None,
+        username=None,
+    )
+    order = Order(
+        user_id=telegram_id,
+        items=[],
+        delivery_info={"clientName": "Table customer", "phoneNumber": "+998900000000"},
+        items_cost=36000,
+        total_amount=39600,
+        delivery_fee=0,
+        payment_method="rahmat" if paid else "cash",
+        payment_provider="multicard" if paid else None,
+        payment_status="paid" if paid else None,
+        multicard_payment_uuid="payment-uuid" if paid else None,
+        discriminator="inplace",
+        table_id=uuid.uuid4(),
+        alipos_order_id=uuid.uuid4(),
+        alipos_eats_id=f"cancel-{uuid.uuid4().hex}",
+        alipos_sync_status="synced",
+        status="NEW",
+    )
+    db_session.add_all([user, order])
+    await db_session.commit()
+    return user, order
+
+
 @pytest.mark.asyncio
 async def test_order_status_poll_does_not_overwrite_local_delivered(client, db_session):
     user = User(
@@ -102,3 +133,94 @@ async def test_order_status_poll_does_not_overwrite_delivery_that_wins_race(
     assert response.json()["data"]["status"] == "DELIVERED"
     assert order.status == "DELIVERED"
     assert order.order_number is None
+
+
+@pytest.mark.asyncio
+async def test_new_cash_table_order_can_be_cancelled(client, db_session):
+    user, order = await _table_order(db_session)
+    cancel = AsyncMock()
+    token = create_jwt(user.telegram_id)
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=AsyncMock(return_value={"status": "NEW"}),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel,
+        ),
+    ):
+        response = await client.delete(
+            f"/api/orders/{order.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    cancel.assert_awaited_once_with(
+        str(order.alipos_order_id),
+        "Mijoz yangi buyurtmani bekor qildi",
+    )
+    assert order.status == "CANCELLED"
+    assert response.json()["data"]["status"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_accepted_table_order_cannot_be_cancelled(client, db_session):
+    user, order = await _table_order(db_session)
+    cancel = AsyncMock()
+    token = create_jwt(user.telegram_id)
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=AsyncMock(return_value={"status": "ACCEPTED_BY_RESTAURANT"}),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel,
+        ),
+    ):
+        response = await client.delete(
+            f"/api/orders/{order.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 409
+    cancel.assert_not_awaited()
+    assert order.status == "ACCEPTED_BY_RESTAURANT"
+
+
+@pytest.mark.asyncio
+async def test_paid_table_order_refunds_after_alipos_cancel(client, db_session):
+    user, order = await _table_order(db_session, paid=True)
+    refund = AsyncMock(return_value={"success": True})
+    token = create_jwt(user.telegram_id)
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=AsyncMock(return_value={"status": "NEW"}),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        response = await client.delete(
+            f"/api/orders/{order.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    refund.assert_awaited_once_with("payment-uuid")
+    assert order.status == "CANCELLED"
+    assert order.payment_status == "refunded"
+    assert response.json()["data"]["payment_status"] == "refunded"

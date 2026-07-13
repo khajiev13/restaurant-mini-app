@@ -185,7 +185,10 @@ async def _expire_pending_payments() -> None:
 
             if alipos_order_id:
                 try:
-                    await alipos_api.cancel_order(alipos_order_id)
+                    await alipos_api.cancel_order(
+                        alipos_order_id,
+                        "To'lov muddati tugagani uchun bekor qilindi",
+                    )
                     cancel_status = "cancelled"
                     cancel_error = None
                     logger.info("AliPOS cancel succeeded for order %s", order_id)

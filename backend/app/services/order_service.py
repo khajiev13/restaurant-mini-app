@@ -15,6 +15,7 @@ from app.models.models import Address, Order, User
 from app.schemas.order import OrderCreate
 from app.services import alipos_api, multicard_api
 from app.services.menu_catalog_service import price_cart
+from app.services.order_status_service import normalize_order_status
 from app.services.table_access_service import TableAccessService
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,18 @@ class OrderSubmissionRejected(RuntimeError):
 
 
 class PaymentCheckoutError(RuntimeError):
+    pass
+
+
+class CustomerOrderNotFound(LookupError):
+    pass
+
+
+class CancellationConflict(RuntimeError):
+    pass
+
+
+class CancellationError(RuntimeError):
     pass
 
 
@@ -211,6 +224,104 @@ async def recover_queued_alipos_orders() -> None:
         order_ids = list(result.scalars())
     for order_id in order_ids:
         asyncio.create_task(dispatch_queued_alipos_order(order_id))
+
+
+async def cancel_customer_order(
+    db: AsyncSession,
+    current_user: User,
+    order_id: uuid.UUID,
+) -> Order:
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.id == order_id,
+            Order.user_id == current_user.telegram_id,
+        )
+        .with_for_update()
+    )
+    order = result.scalar_one_or_none()
+    if order is None:
+        raise CustomerOrderNotFound("Order not found")
+    if order.discriminator != "inplace":
+        raise CancellationConflict("Only table orders can be cancelled here")
+
+    if (
+        order.status == "AWAITING_PAYMENT"
+        and order.payment_status == "pending"
+        and order.alipos_order_id is None
+    ):
+        order.status = "CANCELLED"
+        order.payment_status = "cancelled"
+        order.cancel_requested_at = datetime.datetime.now(datetime.UTC).replace(
+            tzinfo=None
+        )
+        await db.commit()
+        if order.multicard_invoice_uuid:
+            await multicard_api.cancel_invoice(order.multicard_invoice_uuid)
+        return order
+
+    if order.alipos_order_id is None or order.alipos_sync_status != "synced":
+        raise CancellationConflict(
+            "This order cannot be safely cancelled automatically; please ask staff"
+        )
+
+    try:
+        current = await alipos_api.get_order_status(str(order.alipos_order_id))
+    except Exception as exc:
+        raise CancellationError("Could not verify the restaurant order status") from exc
+    current_status = normalize_order_status(str(current.get("status") or ""))
+    if current_status != "NEW":
+        if current_status:
+            order.status = current_status
+            order.status_updated_at = datetime.datetime.now(datetime.UTC).replace(
+                tzinfo=None
+            )
+            await db.commit()
+        raise CancellationConflict(
+            "The restaurant has already accepted this order, so it cannot be cancelled"
+        )
+
+    order.cancel_requested_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    try:
+        await alipos_api.cancel_order(
+            str(order.alipos_order_id),
+            "Mijoz yangi buyurtmani bekor qildi",
+        )
+    except Exception as exc:
+        order.alipos_cancel_status = "unknown"
+        order.alipos_cancel_error = "AliPOS cancellation outcome is unknown"
+        await db.commit()
+        raise CancellationError(
+            "The cancellation result could not be confirmed"
+        ) from exc
+
+    order.status = "CANCELLED"
+    order.status_updated_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    order.alipos_cancel_status = "cancelled"
+    order.alipos_cancel_error = None
+    should_refund = order.payment_status == "paid"
+    if should_refund:
+        order.payment_status = "refund_pending"
+    await db.commit()
+
+    if not should_refund:
+        return order
+    if not order.multicard_payment_uuid:
+        order.payment_status = "refund_failed"
+        order.payment_error = "Missing Multicard payment reference"
+        await db.commit()
+        return order
+    try:
+        await multicard_api.refund_payment(order.multicard_payment_uuid)
+    except Exception:
+        logger.exception("Multicard refund failed for local order %s", order.id)
+        order.payment_status = "refund_failed"
+        order.payment_error = "The online refund could not be completed"
+    else:
+        order.payment_status = "refunded"
+        order.payment_error = None
+    await db.commit()
+    return order
 
 
 async def _resolve_delivery(

@@ -156,3 +156,25 @@ async def cancel_invoice(invoice_uuid: str) -> None:
         )
     except Exception as exc:
         logger.warning("Multicard cancel invoice %s failed: %s", invoice_uuid, exc)
+
+
+async def refund_payment(payment_uuid: str) -> dict[str, Any]:
+    """Request one full refund for a completed Multicard payment."""
+    token = await _get_token()
+    async with httpx.AsyncClient() as client:
+        response = await client.delete(
+            f"{settings.multicard_api_base_url}/payment/{payment_uuid}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Access-Token": token,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not payload.get("success"):
+        error = payload.get("error") or {}
+        raise RuntimeError(
+            f"Multicard refund failed: {error.get('code')} — {error.get('details')}"
+        )
+    return payload.get("data") or payload

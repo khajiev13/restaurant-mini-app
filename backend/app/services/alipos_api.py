@@ -120,10 +120,12 @@ async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
                     exc,
                 )
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
 
-    raise RuntimeError(f"AliPOS request failed after {max_retries} attempts: {last_exc}") from last_exc
+    raise RuntimeError(
+        f"AliPOS request failed after {max_retries} attempts: {last_exc}"
+    ) from last_exc
 
 
 async def get_menu() -> dict:
@@ -191,12 +193,30 @@ async def get_order_status(alipos_order_id: str) -> dict:
     return resp.json()
 
 
-async def cancel_order(alipos_order_id: str) -> None:
-    """Cancel an order in AliPOS."""
-    await _api_request(
-        "DELETE",
-        f"/api/Integration/v1/order/{alipos_order_id}",
-    )
+async def cancel_order(alipos_order_id: str, comment: str) -> None:
+    """Cancel an order once with AliPOS's required comment body."""
+    token = await _get_token()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                "DELETE",
+                f"{settings.alipos_api_base_url}/api/Integration/v1/order/{alipos_order_id}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+                json={"comment": comment},
+                timeout=30,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = _format_alipos_error(exc.response)
+        raise RuntimeError(
+            f"AliPOS returned {exc.response.status_code}: {detail}"
+        ) from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError("AliPOS cancellation outcome is unknown") from exc
 
 
 async def get_payment_methods() -> list[dict]:

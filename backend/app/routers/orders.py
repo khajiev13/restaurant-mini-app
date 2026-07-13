@@ -10,9 +10,13 @@ from app.schemas.order import OrderCreate, OrderResponse, OrderStatusResponse
 from app.services import alipos_api
 from app.services.menu_catalog_service import CartConflict
 from app.services.order_service import (
+    CancellationConflict,
+    CancellationError,
     CustomerOrderError,
+    CustomerOrderNotFound,
     OrderSubmissionRejected,
     PaymentCheckoutError,
+    cancel_customer_order,
     create_customer_order,
 )
 from app.services.order_status_service import apply_alipos_status_update_for_order
@@ -85,6 +89,35 @@ async def get_order(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
         )
+    return ApiResponse(
+        success=True,
+        data=OrderResponse.model_validate(order).model_dump(mode="json"),
+    )
+
+
+@router.delete("/{order_id}")
+async def cancel_order(
+    order_id: uuid.UUID,
+    current_user: CurrentUserDep,
+    db: DbDep,
+) -> ApiResponse:
+    try:
+        order = await cancel_customer_order(db, current_user, order_id)
+    except CustomerOrderNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except CancellationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except CancellationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
     return ApiResponse(
         success=True,
         data=OrderResponse.model_validate(order).model_dump(mode="json"),
