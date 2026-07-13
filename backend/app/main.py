@@ -17,6 +17,7 @@ from app.routers import (
     menu,
     orders,
     staff,
+    tables,
     users,
     webhooks,
 )
@@ -212,6 +213,7 @@ app.include_router(addresses.router, prefix="/api")
 app.include_router(geocoding.router, prefix="/api")
 app.include_router(orders.router, prefix="/api")
 app.include_router(staff.router, prefix="/api")
+app.include_router(tables.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api")
 
 

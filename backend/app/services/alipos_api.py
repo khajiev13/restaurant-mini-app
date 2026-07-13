@@ -17,6 +17,10 @@ _menu_cache: dict | None = None
 _menu_cache_expires_at: float = 0
 _MENU_TTL = 300
 
+# Halls/tables cache (5 minute TTL)
+_tables_cache: dict | None = None
+_tables_cache_expires_at: float = 0
+
 
 def _format_alipos_error(response: httpx.Response) -> str:
     try:
@@ -126,6 +130,20 @@ async def get_menu() -> dict:
     _menu_cache = resp.json()
     _menu_cache_expires_at = time.monotonic() + _MENU_TTL
     return _menu_cache
+
+
+async def get_halls_and_tables() -> dict:
+    """Fetch the configured restaurant's hall/table directory, cached for 5 minutes."""
+    global _tables_cache, _tables_cache_expires_at
+    if _tables_cache is not None and time.monotonic() < _tables_cache_expires_at:
+        return _tables_cache
+    resp = await _api_request(
+        "GET",
+        f"/api/Integration/v1/restaurant/{settings.alipos_restaurant_id}/halls-and-tables",
+    )
+    _tables_cache = resp.json()
+    _tables_cache_expires_at = time.monotonic() + _MENU_TTL
+    return _tables_cache
 
 
 async def create_order(order_payload: dict) -> dict:

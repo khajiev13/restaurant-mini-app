@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str
     telegram_webhook_secret: str = ""
     telegram_bot_username: str = "olotsomsa_zakaz_bot"
+    table_access_secret: str = ""
+    table_access_ttl_seconds: int = 28800
     bootstrap_admin_telegram_ids: str = ""
     public_app_url: str = ""
     public_backend_url: str = ""
@@ -132,6 +134,10 @@ class Settings(BaseSettings):
         if not self.public_base_url:
             raise RuntimeError("PUBLIC_APP_URL or PUBLIC_BACKEND_URL must be configured")
         return f"{self.public_base_url}/api/webhooks/multicard/callback"
+
+    @property
+    def effective_table_access_secret(self) -> str:
+        return self.table_access_secret or self.jwt_secret
 
     def telegram_order_deep_link(self, order_id: str) -> str:
         return f"https://t.me/{self.telegram_bot_username}?startapp=order_{order_id}"
