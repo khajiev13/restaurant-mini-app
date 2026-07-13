@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS orders (
     assigned_at            TIMESTAMP,
     delivered_at           TIMESTAMP,
     items                  JSONB NOT NULL,
+    items_cost             NUMERIC(12, 2) NOT NULL DEFAULT 0,
     total_amount           NUMERIC(12, 2) NOT NULL,
     delivery_fee           NUMERIC(12, 2) NOT NULL DEFAULT 0,
     comment                TEXT,
@@ -52,8 +53,15 @@ CREATE TABLE IF NOT EXISTS orders (
     payment_card_pan       VARCHAR(32),
     payment_ps             VARCHAR(50),
     discriminator          VARCHAR(20) NOT NULL DEFAULT 'delivery',
+    table_id               UUID,
+    table_title            VARCHAR(100),
+    hall_id                UUID,
+    hall_title             VARCHAR(100),
+    service_percent        NUMERIC(5, 2) NOT NULL DEFAULT 0,
     alipos_order_id        UUID,
     alipos_eats_id         VARCHAR(255),
+    alipos_sync_status     VARCHAR(32),
+    alipos_sync_error      TEXT,
     multicard_invoice_uuid VARCHAR(64),
     multicard_checkout_url TEXT,
     multicard_receipt_url  TEXT,
@@ -63,6 +71,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status                 VARCHAR(50) NOT NULL DEFAULT 'NEW',
     order_number           VARCHAR(50),
     status_updated_at      TIMESTAMP,
+    cancel_requested_at    TIMESTAMP,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -70,6 +79,8 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_alipos_order_id ON orders(alipos_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_alipos_eats_id ON orders(alipos_eats_id);
+CREATE INDEX IF NOT EXISTS idx_orders_table_id ON orders(table_id);
+CREATE INDEX IF NOT EXISTS idx_orders_alipos_sync_status ON orders(alipos_sync_status);
 CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status);
 CREATE INDEX IF NOT EXISTS idx_orders_payment_expires_at ON orders(payment_expires_at);
 CREATE INDEX IF NOT EXISTS idx_orders_multicard_payment_uuid ON orders(multicard_payment_uuid);
@@ -113,6 +124,15 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_cancel_error    TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_staff_id BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS items_cost NUMERIC(12, 2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_id UUID;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_title VARCHAR(100);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS hall_id UUID;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS hall_title VARCHAR(100);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_percent NUMERIC(5, 2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_status VARCHAR(32);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_error TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMP;
 
 DO $$
 BEGIN
@@ -131,6 +151,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_multicard_payment_uuid ON orders(multicard
 CREATE INDEX IF NOT EXISTS idx_orders_assigned_staff_id ON orders(assigned_staff_id);
 CREATE INDEX IF NOT EXISTS idx_orders_delivered_at ON orders(delivered_at);
 CREATE INDEX IF NOT EXISTS idx_orders_staff_available ON orders(status, assigned_staff_id, discriminator);
+CREATE INDEX IF NOT EXISTS idx_orders_table_id ON orders(table_id);
+CREATE INDEX IF NOT EXISTS idx_orders_alipos_sync_status ON orders(alipos_sync_status);
 DROP INDEX IF EXISTS uq_orders_one_active_delivery_per_staff;
 CREATE UNIQUE INDEX uq_orders_one_active_delivery_per_staff
     ON orders(assigned_staff_id)

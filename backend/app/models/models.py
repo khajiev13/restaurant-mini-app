@@ -93,6 +93,7 @@ class Order(Base):
     assigned_at: Mapped[datetime.datetime | None] = mapped_column()
     delivered_at: Mapped[datetime.datetime | None] = mapped_column()
     items: Mapped[dict] = mapped_column(JSONB)
+    items_cost: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     total_amount: Mapped[float] = mapped_column(Numeric(12, 2))
     delivery_fee: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     comment: Mapped[str | None] = mapped_column(Text)
@@ -105,8 +106,15 @@ class Order(Base):
     payment_card_pan: Mapped[str | None] = mapped_column(String(32))
     payment_ps: Mapped[str | None] = mapped_column(String(50))
     discriminator: Mapped[str] = mapped_column(String(20), default="delivery")
+    table_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    table_title: Mapped[str | None] = mapped_column(String(100))
+    hall_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    hall_title: Mapped[str | None] = mapped_column(String(100))
+    service_percent: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
     alipos_order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     alipos_eats_id: Mapped[str | None] = mapped_column(String(255))
+    alipos_sync_status: Mapped[str | None] = mapped_column(String(32))
+    alipos_sync_error: Mapped[str | None] = mapped_column(Text)
     multicard_invoice_uuid: Mapped[str | None] = mapped_column(String(64))
     multicard_checkout_url: Mapped[str | None] = mapped_column(Text)
     multicard_receipt_url: Mapped[str | None] = mapped_column(Text)
@@ -116,6 +124,7 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(50), default="NEW")
     order_number: Mapped[str | None] = mapped_column(String(50))
     status_updated_at: Mapped[datetime.datetime | None] = mapped_column()
+    cancel_requested_at: Mapped[datetime.datetime | None] = mapped_column()
     created_at: Mapped[datetime.datetime] = mapped_column(
         default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     )
@@ -138,6 +147,8 @@ class Order(Base):
         Index("idx_orders_user_id", "user_id"),
         Index("idx_orders_alipos_order_id", "alipos_order_id"),
         Index("idx_orders_alipos_eats_id", "alipos_eats_id"),
+        Index("idx_orders_table_id", "table_id"),
+        Index("idx_orders_alipos_sync_status", "alipos_sync_status"),
         Index("idx_orders_payment_status", "payment_status"),
         Index("idx_orders_payment_expires_at", "payment_expires_at"),
         Index("idx_orders_multicard_payment_uuid", "multicard_payment_uuid"),

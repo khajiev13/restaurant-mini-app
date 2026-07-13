@@ -35,6 +35,7 @@ class OrderCreate(BaseModel):
 class OrderResponse(BaseModel):
     id: uuid.UUID
     items: list[dict]
+    items_cost: float
     total_amount: float
     delivery_fee: float
     comment: str | None = None
@@ -45,8 +46,15 @@ class OrderResponse(BaseModel):
     multicard_checkout_url: str | None = None
     multicard_receipt_url: str | None = None
     discriminator: str
+    table_id: uuid.UUID | None = None
+    table_title: str | None = None
+    hall_id: uuid.UUID | None = None
+    hall_title: str | None = None
+    service_percent: float = 0
     alipos_order_id: uuid.UUID | None = None
     alipos_eats_id: str | None = None
+    alipos_sync_status: str | None = None
+    alipos_sync_error: str | None = None
     status: str
     order_number: str | None = None
     status_updated_at: datetime.datetime | None = None
@@ -62,6 +70,10 @@ class OrderStatusResponse(BaseModel):
     payment_status: str | None = None
     payment_expires_at: datetime.datetime | None = None
     multicard_receipt_url: str | None = None
+    table_title: str | None = None
+    hall_title: str | None = None
+    service_percent: float = 0
+    alipos_sync_status: str | None = None
 
 
 class StaffCustomerResponse(BaseModel):

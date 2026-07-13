@@ -1,4 +1,5 @@
 from app.models.models import Order
+from app.schemas.order import OrderResponse, OrderStatusResponse
 
 
 def test_order_metadata_declares_one_active_delivery_per_staff_index():
@@ -13,3 +14,26 @@ def test_order_metadata_declares_one_active_delivery_per_staff_index():
     assert "assigned_staff_id IS NOT NULL" in where_clause
     assert "delivered_at IS NULL" in where_clause
     assert "discriminator = 'delivery'" in where_clause
+
+
+def test_order_contract_declares_table_pricing_and_sync_fields():
+    expected_model_fields = {
+        "table_id",
+        "table_title",
+        "hall_id",
+        "hall_title",
+        "service_percent",
+        "items_cost",
+        "alipos_sync_status",
+        "alipos_sync_error",
+        "cancel_requested_at",
+    }
+
+    assert expected_model_fields <= set(Order.__table__.columns.keys())
+    assert expected_model_fields - {"cancel_requested_at"} <= set(OrderResponse.model_fields)
+    assert {
+        "table_title",
+        "hall_title",
+        "service_percent",
+        "alipos_sync_status",
+    } <= set(OrderStatusResponse.model_fields)

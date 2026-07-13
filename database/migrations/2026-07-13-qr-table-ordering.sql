@@ -1,0 +1,12 @@
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS items_cost NUMERIC(12, 2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_id UUID;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_title VARCHAR(100);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS hall_id UUID;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS hall_title VARCHAR(100);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_percent NUMERIC(5, 2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_status VARCHAR(32);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_error TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMP;
+
+CREATE INDEX IF NOT EXISTS idx_orders_table_id ON orders(table_id);
+CREATE INDEX IF NOT EXISTS idx_orders_alipos_sync_status ON orders(alipos_sync_status);
