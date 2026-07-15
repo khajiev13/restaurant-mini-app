@@ -137,6 +137,26 @@ async def test_customer_is_denied_but_staff_and_admin_can_list_tables(
 
 
 @pytest.mark.asyncio
+async def test_directory_provider_runs_without_request_database_transaction(
+    client, db_session
+):
+    staff = await create_user(db_session, 8104, "staff")
+    await db_session.commit()
+
+    async def directory_provider() -> alipos_api.HallsTablesSnapshot:
+        assert not db_session.in_transaction()
+        return directory_snapshot()
+
+    with patch(
+        "app.services.staff_table_service.alipos_api.get_halls_and_tables_snapshot",
+        new=AsyncMock(side_effect=directory_provider),
+    ):
+        response = await client.get("/api/staff/tables", headers=auth_headers(staff))
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_overview_returns_all_tables_and_aggregates_only_synced_orders(
     client, db_session
 ):

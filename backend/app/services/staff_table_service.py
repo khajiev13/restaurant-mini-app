@@ -501,6 +501,7 @@ async def _load_workspace(
     now: datetime.datetime | None,
 ) -> WorkspaceData:
     require_staff(current_user)
+    await db.commit()
     resolved_now = _as_aware_utc(now or _utcnow())
     try:
         snapshot = await alipos_api.get_halls_and_tables_snapshot()
