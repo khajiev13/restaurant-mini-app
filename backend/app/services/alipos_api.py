@@ -1,6 +1,10 @@
 import asyncio
+import datetime
 import logging
 import time
+import uuid
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -25,6 +29,18 @@ _AVAILABILITY_TTL = 30
 # Halls/tables cache (5 minute TTL)
 _tables_cache: dict | None = None
 _tables_cache_expires_at: float = 0
+_tables_cache_last_success_at: datetime.datetime | None = None
+
+
+@dataclass(frozen=True)
+class HallsTablesSnapshot:
+    payload: dict
+    stale: bool
+    last_success_at: datetime.datetime
+
+
+class HallsTablesUnavailable(RuntimeError):
+    pass
 
 
 class AliPOSRejected(RuntimeError):
@@ -164,18 +180,89 @@ async def get_menu_availability() -> dict:
     return _availability_cache
 
 
-async def get_halls_and_tables() -> dict:
-    """Fetch the configured restaurant's hall/table directory, cached for 5 minutes."""
-    global _tables_cache, _tables_cache_expires_at
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC)
+
+
+def _decode_halls_tables(response) -> dict:
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("AliPOS table directory must be an object")
+    if not isinstance(payload.get("halls"), list):
+        raise ValueError("AliPOS table directory halls must be a list")
+    if not isinstance(payload.get("tables"), list):
+        raise ValueError("AliPOS table directory tables must be a list")
+    hall_ids: set[uuid.UUID] = set()
+    for index, hall in enumerate(payload["halls"]):
+        if not isinstance(hall, dict):
+            raise ValueError(f"AliPOS hall {index} must be an object")
+        try:
+            hall_id = uuid.UUID(str(hall["id"]))
+            service_percent = Decimal(str(hall.get("servicePercent") or 0))
+        except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(f"AliPOS hall {index} is malformed") from exc
+        if not service_percent.is_finite() or hall_id in hall_ids:
+            raise ValueError(f"AliPOS hall {index} is malformed")
+        hall_ids.add(hall_id)
+    table_ids: set[uuid.UUID] = set()
+    for index, table in enumerate(payload["tables"]):
+        if not isinstance(table, dict):
+            raise ValueError(f"AliPOS table {index} must be an object")
+        try:
+            table_id = uuid.UUID(str(table["id"]))
+            hall_id = uuid.UUID(str(table["hallId"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"AliPOS table {index} is malformed") from exc
+        if table_id in table_ids or hall_id not in hall_ids:
+            raise ValueError(f"AliPOS table {index} is malformed")
+        table_ids.add(table_id)
+    return payload
+
+
+async def get_halls_and_tables_snapshot() -> HallsTablesSnapshot:
+    global _tables_cache, _tables_cache_expires_at, _tables_cache_last_success_at
+
     if _tables_cache is not None and time.monotonic() < _tables_cache_expires_at:
-        return _tables_cache
-    resp = await _api_request(
-        "GET",
-        f"/api/Integration/v1/restaurant/{settings.alipos_restaurant_id}/halls-and-tables",
-    )
-    _tables_cache = resp.json()
+        if _tables_cache_last_success_at is None:
+            raise HallsTablesUnavailable("Table cache is missing freshness metadata")
+        return HallsTablesSnapshot(
+            _tables_cache,
+            False,
+            _tables_cache_last_success_at,
+        )
+
+    try:
+        response = await _api_request(
+            "GET",
+            f"/api/Integration/v1/restaurant/{settings.alipos_restaurant_id}/halls-and-tables",
+        )
+        payload = _decode_halls_tables(response)
+    except Exception as exc:
+        if _tables_cache is None or _tables_cache_last_success_at is None:
+            raise HallsTablesUnavailable("Table directory is unavailable") from exc
+        return HallsTablesSnapshot(
+            _tables_cache,
+            True,
+            _tables_cache_last_success_at,
+        )
+
+    _tables_cache = payload
     _tables_cache_expires_at = time.monotonic() + _MENU_TTL
-    return _tables_cache
+    _tables_cache_last_success_at = _utcnow()
+    return HallsTablesSnapshot(
+        _tables_cache,
+        False,
+        _tables_cache_last_success_at,
+    )
+
+
+async def get_halls_and_tables() -> dict:
+    snapshot = await get_halls_and_tables_snapshot()
+    if snapshot.stale:
+        # Stale fallback is inspection-only. Customer resolution and token
+        # restoration must never accept a table removed from the live directory.
+        raise HallsTablesUnavailable("A fresh table directory is required")
+    return snapshot.payload
 
 
 async def create_order(order_payload: dict) -> dict:

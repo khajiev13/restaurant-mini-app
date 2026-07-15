@@ -6,7 +6,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from app.services import alipos_api
 
@@ -52,18 +52,18 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-async def get_table_directory() -> list[TableDirectoryEntry]:
-    payload = await alipos_api.get_halls_and_tables()
+def parse_table_directory(payload: dict) -> list[TableDirectoryEntry]:
     halls: dict[uuid.UUID, tuple[str, Decimal]] = {}
     for hall in payload.get("halls", []):
         try:
             hall_id = uuid.UUID(str(hall["id"]))
         except (KeyError, TypeError, ValueError):
             continue
-        halls[hall_id] = (
-            str(hall.get("title") or ""),
-            Decimal(str(hall.get("servicePercent") or 0)),
-        )
+        try:
+            service_percent = Decimal(str(hall.get("servicePercent") or 0))
+        except InvalidOperation:
+            continue
+        halls[hall_id] = (str(hall.get("title") or ""), service_percent)
 
     entries: list[TableDirectoryEntry] = []
     for table in payload.get("tables", []):
@@ -86,6 +86,10 @@ async def get_table_directory() -> list[TableDirectoryEntry]:
             )
         )
     return entries
+
+
+async def get_table_directory() -> list[TableDirectoryEntry]:
+    return parse_table_directory(await alipos_api.get_halls_and_tables())
 
 
 class TableAccessService:
