@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS orders (
     status                 VARCHAR(50) NOT NULL DEFAULT 'NEW',
     order_number           VARCHAR(50),
     status_updated_at      TIMESTAMP,
+    alipos_status_check_attempted_at TIMESTAMP,
+    alipos_status_checked_at TIMESTAMP,
     cancel_requested_at    TIMESTAMP,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -147,6 +149,10 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_access_expires_at TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_status VARCHAR(32);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_error TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMP;
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS alipos_status_check_attempted_at TIMESTAMP;
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS alipos_status_checked_at TIMESTAMP;
 
 DO $$
 BEGIN
@@ -175,3 +181,7 @@ CREATE UNIQUE INDEX uq_orders_one_active_delivery_per_staff
       AND discriminator = 'delivery'
       AND delivered_at IS NULL
       AND status NOT IN ('DELIVERED', 'CANCELLED', 'CANCELED');
+
+CREATE INDEX IF NOT EXISTS idx_orders_inplace_workspace
+    ON orders(table_id, alipos_sync_status, status, alipos_status_check_attempted_at)
+    WHERE discriminator = 'inplace';
