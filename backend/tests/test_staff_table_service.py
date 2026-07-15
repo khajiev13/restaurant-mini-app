@@ -1,15 +1,24 @@
+import asyncio
 import datetime
+import logging
 import uuid
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
-from app.models.models import Order
+from app.config import settings
+from app.models.models import Base, Order, User
 from app.services.staff_table_service import (
     aggregate_order_items,
     build_staff_table_detail,
     build_staff_tables_overview,
     classify_table_order,
+    reconcile_stale_table_orders,
 )
 from app.services.table_access_service import TableDirectoryEntry
 
@@ -399,3 +408,194 @@ def test_detail_contract_omits_customer_and_provider_sensitive_fields():
         "price",
         "modifications",
     }
+
+
+@pytest.mark.asyncio
+async def test_reconcile_atomically_throttles_caps_concurrency_and_logs_safe_counts(
+    caplog,
+):
+    test_database = f"codex_staff_tables_{uuid.uuid4().hex[:12]}"
+    base_url = make_url(settings.database_url)
+    admin_engine = create_async_engine(
+        base_url.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+        poolclass=NullPool,
+    )
+    engine = None
+    try:
+        async with admin_engine.connect() as admin:
+            await admin.execute(text(f'CREATE DATABASE "{test_database}"'))
+
+        engine = create_async_engine(
+            base_url.set(database=test_database),
+            poolclass=NullPool,
+        )
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        telegram_id = 8_000_000_000 + uuid.uuid4().int % 900_000_000
+        now = datetime.datetime.now(datetime.UTC)
+        now_naive = now.replace(tzinfo=None)
+        stale_provider_ids = [uuid.uuid4() for _ in range(6)]
+        failed_provider_id = stale_provider_ids[-1]
+        fresh_provider_id = uuid.uuid4()
+
+        def persisted_order(**overrides) -> Order:
+            values = {
+                "user_id": telegram_id,
+                "items": [
+                    {
+                        "id": "somsa",
+                        "name": "Somsa",
+                        "quantity": 1,
+                        "price": 100,
+                        "modifications": [],
+                    }
+                ],
+                "items_cost": 100,
+                "total_amount": 110,
+                "delivery_fee": 0,
+                "payment_method": "cash",
+                "payment_status": None,
+                "discriminator": "inplace",
+                "table_id": TABLE_ID,
+                "table_title": "Stol 1",
+                "hall_id": HALL_ID,
+                "hall_title": "Asosiy zal",
+                "service_percent": 10,
+                "alipos_sync_status": "synced",
+                "status": "NEW",
+            }
+            values.update(overrides)
+            return Order(**values)
+
+        caplog.set_level(logging.INFO, logger="uvicorn.error")
+        async with sessions() as setup:
+            setup.add(
+                User(
+                    telegram_id=telegram_id,
+                    first_name="Concurrency",
+                    last_name=None,
+                    username=None,
+                    phone_number=None,
+                    role="customer",
+                )
+            )
+            setup.add_all(
+                [
+                    persisted_order(alipos_order_id=provider_id)
+                    for provider_id in stale_provider_ids
+                ]
+            )
+            setup.add(
+                persisted_order(
+                    alipos_order_id=fresh_provider_id,
+                    alipos_status_check_attempted_at=now_naive,
+                    alipos_status_checked_at=now_naive,
+                )
+            )
+            setup.add(
+                persisted_order(
+                    alipos_order_id=uuid.uuid4(),
+                    table_id=None,
+                    table_title=None,
+                )
+            )
+            setup.add(
+                persisted_order(
+                    alipos_order_id=uuid.uuid4(),
+                    payment_method="rahmat",
+                    payment_status="pending",
+                )
+            )
+            await setup.commit()
+
+        active = 0
+        maximum_active = 0
+
+        async def read_status(alipos_id: str) -> dict:
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            try:
+                await asyncio.sleep(0.01)
+                if alipos_id == str(failed_provider_id):
+                    raise RuntimeError("provider failure")
+                return {
+                    "status": "NEW",
+                    "orderNumber": f"N-{alipos_id[-4:]}",
+                    "updatedAt": "2026-07-15T09:00:00Z",
+                }
+            finally:
+                active -= 1
+
+        status_read = AsyncMock(side_effect=read_status)
+        with patch(
+            "app.services.staff_table_service.alipos_api.get_order_status",
+            new=status_read,
+        ):
+            async with sessions() as worker_one, sessions() as worker_two:
+                await asyncio.gather(
+                    reconcile_stale_table_orders(worker_one, now),
+                    reconcile_stale_table_orders(worker_two, now),
+                )
+            async with sessions() as repeated:
+                await reconcile_stale_table_orders(repeated, now)
+
+        assert status_read.await_count == 6
+        assert maximum_active == 5
+        assert {call.args[0] for call in status_read.await_args_list} == {
+            str(value) for value in stale_provider_ids
+        }
+
+        async with sessions() as verify:
+            rows = list(
+                (
+                    await verify.scalars(
+                        select(Order).where(Order.user_id == telegram_id)
+                    )
+                ).all()
+            )
+        by_provider = {row.alipos_order_id: row for row in rows}
+        for provider_id in stale_provider_ids[:-1]:
+            assert by_provider[provider_id].alipos_status_check_attempted_at is not None
+            assert by_provider[provider_id].alipos_status_checked_at is not None
+            assert by_provider[provider_id].order_number == f"N-{str(provider_id)[-4:]}"
+        assert (
+            by_provider[failed_provider_id].alipos_status_check_attempted_at is not None
+        )
+        assert by_provider[failed_provider_id].alipos_status_checked_at is None
+        assert (
+            by_provider[fresh_provider_id].alipos_status_check_attempted_at == now_naive
+        )
+        hidden = [row for row in rows if row.table_id is None]
+        unpaid = [row for row in rows if row.payment_method == "rahmat"]
+        assert hidden[0].alipos_status_check_attempted_at is None
+        assert unpaid[0].alipos_status_check_attempted_at is None
+        reconcile_logs = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "uvicorn.error"
+            and record.getMessage().startswith("staff_table_status_reconcile ")
+        ]
+        assert len(reconcile_logs) == 1
+        assert "claimed=6 succeeded=5 failed=1" in reconcile_logs[0]
+        assert all(
+            str(provider_id) not in reconcile_logs[0]
+            for provider_id in stale_provider_ids
+        )
+    finally:
+        if engine is not None:
+            await engine.dispose()
+        try:
+            async with admin_engine.connect() as admin:
+                await admin.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :database AND pid <> pg_backend_pid()"
+                    ),
+                    {"database": test_database},
+                )
+                await admin.execute(text(f'DROP DATABASE IF EXISTS "{test_database}"'))
+        finally:
+            await admin_engine.dispose()
