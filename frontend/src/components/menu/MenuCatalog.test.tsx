@@ -1,7 +1,9 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import MenuCatalog from './MenuCatalog';
+
+afterEach(cleanup);
 
 const menu = {
   categories: [{ id: 'somsa', name: 'Somsa', sortOrder: 0 }],
@@ -57,6 +59,66 @@ describe('MenuCatalog', () => {
 
     await user.click(screen.getByRole('button', { name: /classic somsa.*add/i }));
     expect(onAdd).toHaveBeenCalledWith(menu.items[0]);
+  });
+
+  it('disables the initial add control when no live quantity remains', async () => {
+    const user = userEvent.setup();
+    const onAdd = vi.fn();
+    const zeroCountMenu = {
+      ...menu,
+      items: [{ ...menu.items[0], availableCount: 0 }],
+    };
+    render(
+      <MenuCatalog
+        menu={zeroCountMenu}
+        language="en"
+        mode="interactive"
+        labels={labels}
+        quantities={{ classic: 0 }}
+        onAdd={onAdd}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    const addButton = screen.getByRole('button', { name: labels.limit });
+    expect(addButton).toBeDisabled();
+    await user.click(addButton);
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it('provides at least 44x44 hit targets for every interactive quantity control', () => {
+    const controlsMenu = {
+      categories: menu.categories,
+      items: [
+        { ...menu.items[0], id: 'first', name: 'First Somsa', availableCount: 2 },
+        { ...menu.items[0], id: 'second', name: 'Second Somsa', sortOrder: 1, availableCount: 2 },
+      ],
+    };
+    render(
+      <MenuCatalog
+        menu={controlsMenu}
+        language="en"
+        mode="interactive"
+        labels={labels}
+        quantities={{ first: 0, second: 1 }}
+        onAdd={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    const controls = [
+      screen.getByRole('button', { name: 'First Somsa Add' }),
+      screen.getByRole('button', { name: 'Second Somsa Remove' }),
+      screen.getByRole('button', { name: 'Second Somsa Add' }),
+    ];
+
+    for (const control of controls) {
+      const style = window.getComputedStyle(control);
+      const width = Math.max(Number.parseFloat(style.width) || 0, Number.parseFloat(style.minWidth) || 0);
+      const height = Math.max(Number.parseFloat(style.height) || 0, Number.parseFloat(style.minHeight) || 0);
+      expect(width).toBeGreaterThanOrEqual(44);
+      expect(height).toBeGreaterThanOrEqual(44);
+    }
   });
 
   it('keeps remove behavior and disables additions at the live limit', async () => {

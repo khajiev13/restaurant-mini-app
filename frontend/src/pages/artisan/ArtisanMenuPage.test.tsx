@@ -105,7 +105,7 @@ vi.mock('../../components/menu/MenuCatalog', () => ({
 describe('ArtisanMenuPage catalog extraction', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('preserves loading, table context, cart wiring, and checkout presentation', async () => {
+  it('preserves table context, cart wiring, and checkout presentation', async () => {
     const user = userEvent.setup();
     render(
       <MemoryRouter>
