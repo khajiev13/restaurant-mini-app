@@ -12,7 +12,12 @@
     "addToCart": "+",
     "checkout": "Checkout",
     "sold_out": "Sold out",
-    "cart_adjusted": "Your cart was updated because availability changed."
+    "cart_adjusted": "Your cart was updated because availability changed.",
+    "add": "Add",
+    "remove": "Remove",
+    "limit": "Available quantity is already in the cart",
+    "empty": "No menu items",
+    "retry": "Retry"
   },
   "table": {
     "dine_in_prompt": "Ordering at a table?",

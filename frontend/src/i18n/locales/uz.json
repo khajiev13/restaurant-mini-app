@@ -12,7 +12,12 @@
     "addToCart": "+",
     "checkout": "Buyurtma berish",
     "sold_out": "Sotuvda yo'q",
-    "cart_adjusted": "Mavjudlik o'zgargani uchun savat yangilandi."
+    "cart_adjusted": "Mavjudlik o'zgargani uchun savat yangilandi.",
+    "add": "Qo‘shish",
+    "remove": "Kamaytirish",
+    "limit": "Mavjud miqdorning barchasi savatda",
+    "empty": "Menyuda hozircha mahsulot yo‘q",
+    "retry": "Qayta urinish"
   },
   "table": {
     "dine_in_prompt": "Stolda buyurtma berasizmi?",
