@@ -22,6 +22,59 @@ DIRECTORY = {
     ],
 }
 
+MALFORMED_TITLE_DIRECTORIES = (
+    pytest.param(
+        {
+            "halls": [
+                {
+                    "id": DIRECTORY["halls"][0]["id"],
+                    "servicePercent": 10,
+                }
+            ],
+            "tables": DIRECTORY["tables"],
+        },
+        id="missing-hall-title",
+    ),
+    pytest.param(
+        {
+            "halls": [
+                {
+                    "id": DIRECTORY["halls"][0]["id"],
+                    "title": ["Main"],
+                    "servicePercent": 10,
+                }
+            ],
+            "tables": DIRECTORY["tables"],
+        },
+        id="malformed-hall-title",
+    ),
+    pytest.param(
+        {
+            "halls": DIRECTORY["halls"],
+            "tables": [
+                {
+                    "id": DIRECTORY["tables"][0]["id"],
+                    "hallId": DIRECTORY["tables"][0]["hallId"],
+                }
+            ],
+        },
+        id="missing-table-title",
+    ),
+    pytest.param(
+        {
+            "halls": DIRECTORY["halls"],
+            "tables": [
+                {
+                    "id": DIRECTORY["tables"][0]["id"],
+                    "title": 1,
+                    "hallId": DIRECTORY["tables"][0]["hallId"],
+                }
+            ],
+        },
+        id="malformed-table-title",
+    ),
+)
+
 
 class JsonResponse:
     def __init__(self, payload: dict):
@@ -139,6 +192,14 @@ async def test_halls_tables_snapshot_uses_stale_cache_for_malformed_success(
                 }
             ],
         },
+        {
+            "halls": DIRECTORY["halls"] * 2,
+            "tables": DIRECTORY["tables"],
+        },
+        {
+            "halls": DIRECTORY["halls"],
+            "tables": DIRECTORY["tables"] * 2,
+        },
     ],
 )
 @pytest.mark.asyncio
@@ -160,6 +221,43 @@ async def test_malformed_row_never_replaces_last_complete_directory(
     assert snapshot.payload == DIRECTORY
     assert snapshot.stale is True
     assert snapshot.last_success_at == last_success
+
+
+@pytest.mark.parametrize("malformed", MALFORMED_TITLE_DIRECTORIES)
+@pytest.mark.asyncio
+async def test_malformed_title_never_replaces_last_complete_directory(
+    monkeypatch, malformed
+):
+    last_success = datetime.datetime(2026, 7, 15, 9, 0, tzinfo=datetime.UTC)
+    monkeypatch.setattr(alipos_api, "_tables_cache", DIRECTORY)
+    monkeypatch.setattr(alipos_api, "_tables_cache_expires_at", 0.0)
+    monkeypatch.setattr(alipos_api, "_tables_cache_last_success_at", last_success)
+    monkeypatch.setattr(
+        alipos_api,
+        "_api_request",
+        AsyncMock(return_value=JsonResponse(malformed)),
+    )
+
+    snapshot = await alipos_api.get_halls_and_tables_snapshot()
+
+    assert snapshot.payload == DIRECTORY
+    assert snapshot.stale is True
+    assert snapshot.last_success_at == last_success
+
+
+@pytest.mark.parametrize("malformed", MALFORMED_TITLE_DIRECTORIES)
+@pytest.mark.asyncio
+async def test_malformed_title_raises_when_no_complete_directory_exists(
+    monkeypatch, malformed
+):
+    monkeypatch.setattr(
+        alipos_api,
+        "_api_request",
+        AsyncMock(return_value=JsonResponse(malformed)),
+    )
+
+    with pytest.raises(alipos_api.HallsTablesUnavailable):
+        await alipos_api.get_halls_and_tables_snapshot()
 
 
 @pytest.mark.asyncio

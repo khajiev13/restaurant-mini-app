@@ -196,6 +196,8 @@ def _decode_halls_tables(response) -> dict:
     for index, hall in enumerate(payload["halls"]):
         if not isinstance(hall, dict):
             raise ValueError(f"AliPOS hall {index} must be an object")
+        if not isinstance(hall.get("title"), str):
+            raise ValueError(f"AliPOS hall {index} is malformed")
         try:
             hall_id = uuid.UUID(str(hall["id"]))
             service_percent = Decimal(str(hall.get("servicePercent") or 0))
@@ -208,6 +210,8 @@ def _decode_halls_tables(response) -> dict:
     for index, table in enumerate(payload["tables"]):
         if not isinstance(table, dict):
             raise ValueError(f"AliPOS table {index} must be an object")
+        if not isinstance(table.get("title"), str):
+            raise ValueError(f"AliPOS table {index} is malformed")
         try:
             table_id = uuid.UUID(str(table["id"]))
             hall_id = uuid.UUID(str(table["hallId"]))
