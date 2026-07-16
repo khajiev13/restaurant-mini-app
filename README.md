@@ -4,7 +4,7 @@ A production Telegram Mini App for restaurant ordering, built around a real food
 
 **Highlights**
 
-- Telegram Mini App frontend with React 18, Vite, and `@telegram-apps/telegram-ui`
+- Telegram Mini App frontend with React 19, Vite, and `@telegram-apps/telegram-ui`
 - FastAPI backend with async SQLAlchemy, PostgreSQL 16, JWT auth, and Telegram `initData` validation
 - AliPOS menu/order integration plus Multicard/Rahmat hosted checkout callbacks
 - Docker Compose deployment with Caddy and Cloudflare Tunnel
