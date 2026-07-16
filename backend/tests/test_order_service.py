@@ -18,6 +18,7 @@ from app.services.order_service import (
     CustomerOrderError,
     OrderSubmissionRejected,
     _dispatch_queued_refund,
+    _submit_queued_alipos_order,
     create_customer_order,
     expire_due_payment_orders,
     list_recoverable_alipos_order_ids,
@@ -918,6 +919,52 @@ async def test_paid_definite_submission_rejection_dispatches_one_refund(db_sessi
     refund.assert_awaited_once_with("payment-uuid")
     assert order.payment_status == "refunded"
     assert order.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_definite_rejection_with_ambiguous_refund_never_repeats_mutations(
+    db_session,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="paid",
+    )
+    order.multicard_payment_uuid = "payment-uuid"
+    await db_session.commit()
+    create = AsyncMock(side_effect=alipos_api.AliPOSRejected(400))
+    refund = AsyncMock(
+        side_effect=multicard_api.RefundOutcomeUnknown(
+            "Multicard refund outcome is unknown"
+        )
+    )
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": ONLINE_PAYMENT_ID, "title": "online-order"}]
+            ),
+        ),
+        patch("app.services.order_service.alipos_api.create_order", new=create),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        with pytest.raises(OrderSubmissionRejected):
+            await _submit_queued_alipos_order(db_session, order.id)
+        assert await _submit_queued_alipos_order(db_session, order.id) is None
+
+    await db_session.refresh(order)
+    create.assert_awaited_once()
+    refund.assert_awaited_once_with("payment-uuid")
+    assert order.alipos_sync_status == "failed"
+    assert order.status == "SUBMISSION_FAILED"
+    assert order.payment_status == "refund_pending"
+    assert order.refund_sync_status == "unknown"
 
 
 @pytest.mark.asyncio

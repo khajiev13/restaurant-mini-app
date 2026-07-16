@@ -241,6 +241,9 @@
     "payment_cash": "Наличные",
     "payment_online": "Онлайн",
     "payment_paid": "Оплачено",
+    "payment_refund_pending": "Возврат в обработке",
+    "payment_refund_verification_required": "Требуется проверка возврата",
+    "payment_refund_failed": "Ошибка возврата",
     "payment_unknown": "Статус оплаты неизвестен"
   },
   "nav": {

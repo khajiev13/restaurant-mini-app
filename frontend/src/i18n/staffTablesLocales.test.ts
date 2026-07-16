@@ -16,7 +16,8 @@ const required = [
   'processing_orders', 'attention_orders', 'items_cost', 'service_amount',
   'total_amount', 'synchronized', 'processing', 'verify_pos', 'not_synchronized',
   'active', 'not_found', 'order', 'modifiers', 'payment_cash', 'payment_online',
-  'payment_paid', 'payment_unknown',
+  'payment_paid', 'payment_refund_pending', 'payment_refund_verification_required',
+  'payment_refund_failed', 'payment_unknown',
 ] as const;
 
 describe.each([['en', en], ['ru', ru], ['uz', uz]] as const)(

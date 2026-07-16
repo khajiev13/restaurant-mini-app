@@ -19,6 +19,8 @@ from app.schemas.staff_table import (
     StaffTableModifierResponse,
     StaffTableOrderItemResponse,
     StaffTableOrderResponse,
+    StaffTableOrderStatus,
+    StaffTablePaymentStatus,
     StaffTablesFreshnessResponse,
     StaffTablesOverviewResponse,
     StaffTableSummaryResponse,
@@ -75,6 +77,12 @@ def classify_table_order(order: Order) -> StaffTableSyncState | None:
         return "synchronized"
     if sync in PROCESSING_SYNC_STATES and _payment_ready(order):
         return "processing"
+    if (
+        sync == "failed"
+        and order.payment_status == "refunded"
+        and order.refund_sync_status == "refunded"
+    ):
+        return None
     if sync in ATTENTION_SYNC_STATES:
         return "attention"
     return None
@@ -222,6 +230,47 @@ def _sync_label(
     )
 
 
+def _payment_status(order: Order) -> StaffTablePaymentStatus | None:
+    if order.payment_method == "cash":
+        return None
+    if order.payment_status == "paid":
+        return "paid"
+    if (
+        str(order.alipos_sync_status or "").lower() == "failed"
+        and order.payment_status == "refund_pending"
+        and order.refund_sync_status == "unknown"
+    ):
+        return "refund_verification_required"
+    if (
+        str(order.alipos_sync_status or "").lower() == "failed"
+        and (
+            order.payment_status == "refund_failed"
+            or order.refund_sync_status == "failed"
+        )
+    ):
+        return "refund_failed"
+    if (
+        str(order.alipos_sync_status or "").lower() == "failed"
+        and order.payment_status == "refund_pending"
+        and order.refund_sync_status in {"queued", "sending"}
+    ):
+        return "refund_pending"
+    return None
+
+
+def _order_status(order: Order) -> StaffTableOrderStatus:
+    status = normalize_order_status(order.status)
+    if status == "PAID_AWAITING_RESTAURANT":
+        return "PAID_AWAITING_RESTAURANT"
+    if status == "NEW":
+        return "NEW"
+    if status == "ACCEPTED_BY_RESTAURANT":
+        return "ACCEPTED_BY_RESTAURANT"
+    if status == "READY":
+        return "READY"
+    return "ACTIVE"
+
+
 def _order_response(
     order: Order,
     sync_state: StaffTableSyncState,
@@ -230,11 +279,11 @@ def _order_response(
         id=order.id,
         order_number=order.order_number,
         created_at=order.created_at,
-        status=normalize_order_status(order.status),
+        status=_order_status(order),
         sync_state=sync_state,
         sync_label=_sync_label(order, sync_state),
         payment_method="cash" if order.payment_method == "cash" else "online",
-        payment_status="paid" if order.payment_status == "paid" else None,
+        payment_status=_payment_status(order),
         items=_safe_order_items(list(order.items or [])),
         items_cost=float(_decimal(order.items_cost)),
         service_amount=float(

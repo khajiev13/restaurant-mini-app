@@ -28,11 +28,18 @@ export default function TableOrderSummary({ order }: { order: StaffTableOrder })
         : order.sync_label === 'synchronized'
           ? activeCopy
           : t('staff_tables.active', 'Active');
+  const paymentStatusCopy = order.payment_status === 'paid'
+    ? t('staff_tables.payment_paid', 'Paid')
+    : order.payment_status === 'refund_pending'
+      ? t('staff_tables.payment_refund_pending', 'Refund pending')
+      : order.payment_status === 'refund_verification_required'
+        ? t('staff_tables.payment_refund_verification_required', 'Refund verification required')
+        : order.payment_status === 'refund_failed'
+          ? t('staff_tables.payment_refund_failed', 'Refund failed')
+          : t('staff_tables.payment_unknown', 'Payment status unknown');
   const paymentCopy = order.payment_method === 'cash'
     ? t('staff_tables.payment_cash', 'Cash')
-    : order.payment_status === 'paid'
-      ? `${t('staff_tables.payment_online', 'Online')} · ${t('staff_tables.payment_paid', 'Paid')}`
-      : `${t('staff_tables.payment_online', 'Online')} · ${t('staff_tables.payment_unknown', 'Payment status unknown')}`;
+    : `${t('staff_tables.payment_online', 'Online')} · ${paymentStatusCopy}`;
   const stateIcon = order.sync_label === 'processing'
     ? 'hourglass_top'
     : order.sync_label === 'synchronized'

@@ -50,8 +50,9 @@ describe('TableOrderSummary', () => {
     ['READY', 'Ready'],
     [PROVIDER_STATUS_CANARY, 'Active'],
     ['toString', 'Active'],
-  ])('maps provider status %s to safe copy', (status, expected) => {
-    const { container } = render(<TableOrderSummary order={makeOrder({ status })} />);
+  ] as const)('maps provider status %s to safe copy', (status, expected) => {
+    const unsafeOrder = { ...makeOrder(), status } as unknown as StaffTableOrder;
+    const { container } = render(<TableOrderSummary order={unsafeOrder} />);
 
     expect(within(container).getByText(expected)).toBeInTheDocument();
     expect(container).not.toHaveTextContent(PROVIDER_STATUS_CANARY);
@@ -65,7 +66,8 @@ describe('TableOrderSummary', () => {
     [PROVIDER_SYNC_CANARY, 'Active'],
   ] as const)('maps sync label %s without exposing provider copy', (syncLabel, expected) => {
     const unsafeOrder = {
-      ...makeOrder({ status: PROVIDER_STATUS_CANARY }),
+      ...makeOrder(),
+      status: PROVIDER_STATUS_CANARY,
       sync_label: syncLabel,
       sync_state: PROVIDER_SYNC_CANARY,
     } as unknown as StaffTableOrder;
@@ -80,16 +82,24 @@ describe('TableOrderSummary', () => {
   it.each([
     ['cash', null, 'Cash'],
     ['online', 'paid', 'Online · Paid'],
+    ['online', 'refund_pending', 'Online · Refund pending'],
+    ['online', 'refund_verification_required', 'Online · Refund verification required'],
+    ['online', 'refund_failed', 'Online · Refund failed'],
     ['online', null, 'Online · Payment status unknown'],
+    ['online', 'provider-payment-canary', 'Online · Payment status unknown'],
   ] as const)('maps %s payment state safely', (paymentMethod, paymentStatus, expected) => {
+    const unsafeOrder = {
+      ...makeOrder(),
+      payment_method: paymentMethod,
+      payment_status: paymentStatus,
+    } as unknown as StaffTableOrder;
     const { container } = render(
-      <TableOrderSummary
-        order={makeOrder({ payment_method: paymentMethod, payment_status: paymentStatus })}
-      />,
+      <TableOrderSummary order={unsafeOrder} />,
     );
 
     expect(within(container).getByText(new RegExp(expected.replace(' · ', '.*')))).toBeInTheDocument();
     expect(container).not.toHaveTextContent(ORDER_UUID_CANARY);
+    expect(container).not.toHaveTextContent('provider-payment-canary');
   });
 
   it('keeps the order boundary, semantic timestamp, modifiers, and persisted totals', () => {

@@ -1,4 +1,15 @@
 export type StaffTableSyncState = 'synchronized' | 'processing' | 'attention';
+export type StaffTableOrderStatus =
+  | 'PAID_AWAITING_RESTAURANT'
+  | 'NEW'
+  | 'ACCEPTED_BY_RESTAURANT'
+  | 'READY'
+  | 'ACTIVE';
+export type StaffTablePaymentStatus =
+  | 'paid'
+  | 'refund_pending'
+  | 'refund_verification_required'
+  | 'refund_failed';
 export type StaffTableSyncLabel =
   | 'synchronized'
   | 'processing'
@@ -28,11 +39,11 @@ export interface StaffTableOrder {
   id: string;
   order_number: string | null;
   created_at: string;
-  status: string;
+  status: StaffTableOrderStatus;
   sync_state: StaffTableSyncState;
   sync_label: StaffTableSyncLabel;
   payment_method: 'cash' | 'online';
-  payment_status: 'paid' | null;
+  payment_status: StaffTablePaymentStatus | null;
   items: StaffTableOrderItem[];
   items_cost: number;
   service_amount: number;

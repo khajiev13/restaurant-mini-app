@@ -121,6 +121,160 @@ def test_online_order_requires_confirmed_payment_for_synced_or_processing():
     )
 
 
+def test_paid_unknown_alipos_order_stays_attention_without_combined_totals():
+    order = make_order(
+        payment_method="rahmat",
+        payment_status="paid",
+        alipos_sync_status="unknown",
+        status="SYNC_UNKNOWN",
+        multicard_payment_uuid="provider-payment-canary",
+    )
+
+    detail = build_staff_table_detail(
+        TABLE_ID,
+        [directory_entry()],
+        [order],
+        freshness(),
+    )
+
+    assert detail is not None
+    assert detail.table.synchronized_order_count == 0
+    assert detail.table.attention_order_count == 1
+    assert detail.table.combined_items == []
+    assert detail.table.total_amount == 0
+    assert len(detail.orders) == 1
+    assert detail.orders[0].sync_label == "verify_in_pos"
+    assert detail.orders[0].payment_status == "paid"
+    assert "provider-payment-canary" not in detail.model_dump_json()
+
+
+def test_completed_refund_leaves_current_active_workspace():
+    order = make_order(
+        payment_method="rahmat",
+        payment_status="refunded",
+        refund_sync_status="refunded",
+        alipos_sync_status="failed",
+        status="SUBMISSION_FAILED",
+    )
+
+    detail = build_staff_table_detail(
+        TABLE_ID,
+        [directory_entry()],
+        [order],
+        freshness(),
+    )
+
+    assert classify_table_order(order) is None
+    assert detail is not None
+    assert detail.table.attention_order_count == 0
+    assert detail.orders == []
+
+
+@pytest.mark.parametrize("refund_sync_status", ["queued", "sending"])
+def test_in_progress_refund_is_normalized_without_provider_state(refund_sync_status):
+    order = make_order(
+        payment_method="rahmat",
+        payment_status="refund_pending",
+        refund_sync_status=refund_sync_status,
+        alipos_sync_status="failed",
+        status="SUBMISSION_FAILED",
+    )
+
+    detail = build_staff_table_detail(
+        TABLE_ID,
+        [directory_entry()],
+        [order],
+        freshness(),
+    )
+
+    assert detail is not None
+    assert detail.orders[0].sync_label == "not_synchronized"
+    assert detail.orders[0].payment_status == "refund_pending"
+    assert refund_sync_status not in detail.model_dump_json()
+
+
+def test_ambiguous_refund_requires_verification_without_raw_error():
+    order = make_order(
+        payment_method="rahmat",
+        payment_status="refund_pending",
+        refund_sync_status="unknown",
+        refund_sync_error="provider-body-canary",
+        alipos_sync_status="failed",
+        status="SUBMISSION_FAILED",
+    )
+
+    detail = build_staff_table_detail(
+        TABLE_ID,
+        [directory_entry()],
+        [order],
+        freshness(),
+    )
+
+    assert detail is not None
+    assert detail.orders[0].sync_label == "not_synchronized"
+    assert detail.orders[0].payment_status == "refund_verification_required"
+    assert "provider-body-canary" not in detail.model_dump_json()
+
+
+def test_missing_or_rejected_refund_is_normalized_as_failed():
+    order = make_order(
+        payment_method="rahmat",
+        payment_status="refund_failed",
+        refund_sync_status="failed",
+        refund_sync_error="provider-rejection-canary",
+        alipos_sync_status="failed",
+        status="SUBMISSION_FAILED",
+    )
+
+    detail = build_staff_table_detail(
+        TABLE_ID,
+        [directory_entry()],
+        [order],
+        freshness(),
+    )
+
+    assert detail is not None
+    assert detail.orders[0].sync_label == "not_synchronized"
+    assert detail.orders[0].payment_status == "refund_failed"
+    assert "provider-rejection-canary" not in detail.model_dump_json()
+
+
+def test_cash_definite_failure_has_no_refund_status():
+    order = make_order(
+        payment_method="cash",
+        payment_status="refund_failed",
+        refund_sync_status="failed",
+        refund_sync_error="stale-refund-canary",
+        alipos_sync_status="failed",
+        status="SUBMISSION_FAILED",
+    )
+
+    detail = build_staff_table_detail(
+        TABLE_ID,
+        [directory_entry()],
+        [order],
+        freshness(),
+    )
+
+    assert detail is not None
+    assert detail.orders[0].sync_label == "not_synchronized"
+    assert detail.orders[0].payment_status is None
+    assert "stale-refund-canary" not in detail.model_dump_json()
+
+
+def test_unknown_provider_order_status_is_normalized_before_api_serialization():
+    detail = build_staff_table_detail(
+        TABLE_ID,
+        [directory_entry()],
+        [make_order(status="provider-private-status-canary")],
+        freshness(),
+    )
+
+    assert detail is not None
+    assert detail.orders[0].status == "ACTIVE"
+    assert "provider-private-status-canary" not in detail.model_dump_json().lower()
+
+
 def test_aggregate_items_keeps_different_modifier_signatures_separate():
     plain = make_order()
     spicy = make_order(

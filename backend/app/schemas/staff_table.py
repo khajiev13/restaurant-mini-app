@@ -6,7 +6,19 @@ from pydantic import BaseModel, Field
 
 StaffTableSyncState = Literal["synchronized", "processing", "attention"]
 StaffTablePaymentMethod = Literal["cash", "online"]
-StaffTablePaymentStatus = Literal["paid"]
+StaffTableOrderStatus = Literal[
+    "PAID_AWAITING_RESTAURANT",
+    "NEW",
+    "ACCEPTED_BY_RESTAURANT",
+    "READY",
+    "ACTIVE",
+]
+StaffTablePaymentStatus = Literal[
+    "paid",
+    "refund_pending",
+    "refund_verification_required",
+    "refund_failed",
+]
 StaffTableSyncLabel = Literal[
     "synchronized",
     "processing",
@@ -38,7 +50,7 @@ class StaffTableOrderResponse(BaseModel):
     id: uuid.UUID
     order_number: str | None = None
     created_at: datetime.datetime
-    status: str
+    status: StaffTableOrderStatus
     sync_state: StaffTableSyncState
     sync_label: StaffTableSyncLabel
     payment_method: StaffTablePaymentMethod

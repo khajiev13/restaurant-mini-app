@@ -239,6 +239,9 @@
     "payment_cash": "Cash",
     "payment_online": "Online",
     "payment_paid": "Paid",
+    "payment_refund_pending": "Refund pending",
+    "payment_refund_verification_required": "Refund verification required",
+    "payment_refund_failed": "Refund failed",
     "payment_unknown": "Payment status unknown"
   },
   "nav": {

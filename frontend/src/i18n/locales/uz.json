@@ -239,6 +239,9 @@
     "payment_cash": "Naqd",
     "payment_online": "Onlayn",
     "payment_paid": "To‘langan",
+    "payment_refund_pending": "Qaytarish jarayonda",
+    "payment_refund_verification_required": "Qaytarishni tekshirish kerak",
+    "payment_refund_failed": "Qaytarish amalga oshmadi",
     "payment_unknown": "To‘lov holati noma’lum"
   },
   "nav": {

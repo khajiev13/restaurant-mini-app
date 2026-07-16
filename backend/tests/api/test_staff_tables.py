@@ -11,6 +11,7 @@ from app.services import alipos_api
 TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 TABLE_2_ID = uuid.UUID("11111111-1111-4111-8111-111111111112")
 HALL_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
+PAYMENT_UUID_CANARY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def auth_headers(user: User) -> dict[str, str]:
@@ -73,12 +74,17 @@ async def create_table_order(
     status: str = "NEW",
     payment_method: str = "cash",
     payment_status: str | None = None,
+    refund_sync_status: str | None = None,
+    refund_sync_error: str | None = None,
+    multicard_payment_uuid: str | None = None,
+    items: list[dict] | None = None,
     attempted_at: datetime.datetime | None = None,
     checked_at: datetime.datetime | None = None,
 ) -> Order:
     order = Order(
         user_id=customer.telegram_id,
-        items=[
+        items=items
+        or [
             {
                 "id": "somsa",
                 "name": "Classic Somsa",
@@ -92,6 +98,9 @@ async def create_table_order(
         delivery_fee=0,
         payment_method=payment_method,
         payment_status=payment_status,
+        refund_sync_status=refund_sync_status,
+        refund_sync_error=refund_sync_error,
+        multicard_payment_uuid=multicard_payment_uuid,
         discriminator="inplace",
         table_id=table_id,
         table_title="Stol 1" if table_id == TABLE_ID else "Removed 9",
@@ -107,6 +116,123 @@ async def create_table_order(
     db_session.add(order)
     await db_session.commit()
     return order
+
+
+@pytest.mark.asyncio
+async def test_refund_states_are_normalized_without_repeating_provider_mutations(
+    client,
+    db_session,
+):
+    staff = await create_user(db_session, 8100, "staff")
+    customer = await create_user(
+        db_session,
+        8101,
+        "customer",
+        phone="+998-provider-customer-canary",
+    )
+    unknown = await create_table_order(
+        db_session,
+        customer,
+        sync="unknown",
+        status="provider-status-canary",
+        total=19800,
+        payment_method="rahmat",
+        payment_status="paid",
+        multicard_payment_uuid=PAYMENT_UUID_CANARY,
+    )
+    completed = await create_table_order(
+        db_session,
+        customer,
+        sync="failed",
+        status="SUBMISSION_FAILED",
+        total=19800,
+        payment_method="rahmat",
+        payment_status="refunded",
+        refund_sync_status="refunded",
+    )
+    pending_orders = [
+        await create_table_order(
+            db_session,
+            customer,
+            sync="failed",
+            status="SUBMISSION_FAILED",
+            total=19800,
+            payment_method="rahmat",
+            payment_status="refund_pending",
+            refund_sync_status=refund_state,
+            refund_sync_error="provider-refund-body-canary",
+        )
+        for refund_state in ("queued", "sending")
+    ]
+    ambiguous = await create_table_order(
+        db_session,
+        customer,
+        sync="failed",
+        status="SUBMISSION_FAILED",
+        total=19800,
+        payment_method="rahmat",
+        payment_status="refund_pending",
+        refund_sync_status="unknown",
+        refund_sync_error="provider-refund-body-canary",
+    )
+    failed = await create_table_order(
+        db_session,
+        customer,
+        sync="failed",
+        status="SUBMISSION_FAILED",
+        total=19800,
+        payment_method="rahmat",
+        payment_status="refund_failed",
+        refund_sync_status="failed",
+        refund_sync_error="provider-refund-body-canary",
+    )
+    cash = await create_table_order(
+        db_session,
+        customer,
+        sync="failed",
+        status="SUBMISSION_FAILED",
+        total=19800,
+    )
+    create_mutation = AsyncMock()
+    refund_mutation = AsyncMock()
+
+    with (
+        patch(
+            "app.services.staff_table_service.alipos_api.get_halls_and_tables_snapshot",
+            new=AsyncMock(return_value=directory_snapshot()),
+        ),
+        patch("app.services.alipos_api.create_order", new=create_mutation),
+        patch("app.services.multicard_api.refund_payment", new=refund_mutation),
+    ):
+        response = await client.get(
+            f"/api/staff/tables/{TABLE_ID}",
+            headers=auth_headers(staff),
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    orders = {order["id"]: order for order in data["orders"]}
+    assert str(completed.id) not in orders
+    assert orders[str(unknown.id)]["sync_label"] == "verify_in_pos"
+    assert orders[str(unknown.id)]["payment_status"] == "paid"
+    for order in pending_orders:
+        assert orders[str(order.id)]["payment_status"] == "refund_pending"
+    assert orders[str(ambiguous.id)]["payment_status"] == "refund_verification_required"
+    assert orders[str(failed.id)]["payment_status"] == "refund_failed"
+    assert orders[str(cash.id)]["payment_status"] is None
+    assert data["table"]["synchronized_order_count"] == 0
+    assert data["table"]["attention_order_count"] == 6
+    assert data["table"]["combined_items"] == []
+    assert data["table"]["total_amount"] == 0
+    for canary in (
+        "provider-status-canary",
+        PAYMENT_UUID_CANARY,
+        "provider-refund-body-canary",
+        "+998-provider-customer-canary",
+    ):
+        assert canary not in response.text
+    create_mutation.assert_not_awaited()
+    refund_mutation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
