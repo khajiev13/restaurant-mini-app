@@ -62,6 +62,10 @@ vi.mock('./pages/staff/StaffTablesPage', () => ({
   default: () => <div>Staff tables page</div>,
 }));
 
+vi.mock('./pages/staff/StaffTableDetailPage', () => ({
+  default: () => <div>Staff table detail page</div>,
+}));
+
 vi.mock('./pages/admin/AdminUsersPage', () => ({
   default: () => <div>Admin users page</div>,
 }));
@@ -223,6 +227,29 @@ describe('App', () => {
 
     expect(screen.getByText('Artisan menu page')).toBeInTheDocument();
     expect(screen.queryByText('Staff tables page')).not.toBeInTheDocument();
+  });
+
+  it('lets staff and admin open table detail but redirects customers', () => {
+    for (const role of ['staff', 'admin']) {
+      cleanup();
+      authState.user = { role };
+      render(
+        <MemoryRouter initialEntries={['/staff/tables/11111111-1111-4111-8111-111111111111']}>
+          <App />
+        </MemoryRouter>,
+      );
+      expect(screen.getByText('Staff table detail page')).toBeInTheDocument();
+    }
+
+    cleanup();
+    authState.user = { role: 'customer' };
+    render(
+      <MemoryRouter initialEntries={['/staff/tables/11111111-1111-4111-8111-111111111111']}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Artisan menu page')).toBeInTheDocument();
+    expect(screen.queryByText('Staff table detail page')).not.toBeInTheDocument();
   });
 
   it('renders the staff order detail route for admin users', () => {

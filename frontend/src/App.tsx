@@ -10,6 +10,7 @@ import StaffOrdersPage from './pages/staff/StaffOrdersPage';
 import StaffOrderDetailPage from './pages/staff/StaffOrderDetailPage';
 import StaffProfilePage from './pages/staff/StaffProfilePage';
 import StaffTablesPage from './pages/staff/StaffTablesPage';
+import StaffTableDetailPage from './pages/staff/StaffTableDetailPage';
 import AdminUsersPage from './pages/admin/AdminUsersPage';
 import { useAuthStore } from './stores/authStore';
 import { useTableOrderStore } from './stores/tableOrderStore';
@@ -195,6 +196,10 @@ export default function App() {
       <Route path="/staff/orders" element={renderStaffOrAdminRoute(<StaffOrdersPage />)} />
       <Route path="/staff/orders/:orderId" element={renderStaffOrAdminRoute(<StaffOrderDetailPage />)} />
       <Route path="/staff/tables" element={renderStaffOrAdminRoute(<StaffTablesPage />)} />
+      <Route
+        path="/staff/tables/:tableId"
+        element={renderStaffOrAdminRoute(<StaffTableDetailPage />)}
+      />
     </Routes>
   );
 }
