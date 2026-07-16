@@ -7,7 +7,7 @@ export interface AuthResponse {
   access_token: string;
 }
 
-export interface User {
+export interface BaseUser {
   telegram_id: number;
   first_name: string;
   last_name: string | null;
@@ -16,6 +16,12 @@ export interface User {
   phone_number: string | null;
   language: string;
   role: 'customer' | 'staff' | 'admin';
+}
+
+export type AdminUser = BaseUser;
+
+export interface User extends BaseUser {
+  inplace_online_payment_enabled: boolean;
 }
 
 export interface Address {

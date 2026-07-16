@@ -18,6 +18,7 @@ vi.mock('../../i18n', () => i18nMock);
 
 const staffUser: User = {
   telegram_id: 1,
+  inplace_online_payment_enabled: false,
   first_name: 'Staff',
   last_name: 'Member',
   username: 'staffer',

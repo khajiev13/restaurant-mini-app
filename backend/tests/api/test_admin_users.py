@@ -58,6 +58,7 @@ async def test_admin_can_search_users_by_phone(client, db_session):
     data = response.json()["data"]
     assert len(data) == 1
     assert data[0]["telegram_id"] == target.telegram_id
+    assert "inplace_online_payment_enabled" not in data[0]
 
 
 @pytest.mark.asyncio
@@ -75,6 +76,7 @@ async def test_admin_can_assign_staff_role(client, db_session):
     assert response.status_code == 200
     assert target.role == "staff"
     assert response.json()["data"]["role"] == "staff"
+    assert "inplace_online_payment_enabled" not in response.json()["data"]
 
 
 @pytest.mark.asyncio

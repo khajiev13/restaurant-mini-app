@@ -21,6 +21,7 @@ from app.services.order_status_service import normalize_order_status
 from app.services.table_access_service import TableAccessService
 
 logger = logging.getLogger(__name__)
+ALIPOS_PAYLOAD_BUILD_ERROR = "AliPOS order payload could not be prepared"
 
 table_access = TableAccessService(
     secret=settings.effective_table_access_secret,
@@ -69,6 +70,13 @@ class PaymentRetryConflict(RuntimeError):
     pass
 
 
+def can_use_inplace_online_payment(user: User) -> bool:
+    return (
+        settings.inplace_online_payment_enabled
+        or user.telegram_id in settings.inplace_online_payment_test_ids
+    )
+
+
 def _normalize_payment_title(value: str) -> str:
     return " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split())
 
@@ -114,6 +122,33 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _alipos_integration_total(order: Order) -> Decimal:
+    if order.discriminator == "inplace":
+        return Decimal(str(order.items_cost))
+    return Decimal(str(order.total_amount))
+
+
+def _alipos_log_fields(order: Order) -> dict[str, object]:
+    return {
+        "local_order_id": str(order.id),
+        "discriminator": order.discriminator,
+        "payment_kind": "cash" if order.payment_method == "cash" else "online",
+        "items_cost": float(order.items_cost),
+        "payable_total": float(order.total_amount),
+        "integration_total": float(_alipos_integration_total(order)),
+        "service_percent": float(order.service_percent or 0),
+    }
+
+
+def _queue_paid_submission_refund(order: Order) -> bool:
+    if order.payment_status != "paid" or order.refund_sync_status is not None:
+        return False
+    order.payment_status = "refund_pending"
+    order.refund_sync_status = "queued"
+    order.refund_sync_error = None
+    return True
+
+
 def _alipos_items(items: list[dict]) -> list[dict]:
     return [
         {
@@ -148,7 +183,7 @@ async def _build_alipos_payload(order: Order) -> dict:
         "paymentInfo": {
             "paymentId": payment_id,
             "itemsCost": float(order.items_cost),
-            "total": float(order.total_amount),
+            "total": float(_alipos_integration_total(order)),
             "deliveryFee": float(order.delivery_fee),
         },
         "items": _alipos_items(order.items),
@@ -162,45 +197,67 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
     try:
         payload = await _build_alipos_payload(order)
     except Exception as exc:
+        safe_error = (
+            str(exc)
+            if isinstance(
+                exc,
+                (PaymentMethodUnavailable, alipos_api.AliPOSPreSubmitError),
+            )
+            else ALIPOS_PAYLOAD_BUILD_ERROR
+        )
         order.alipos_sync_status = "failed"
-        order.alipos_sync_error = str(exc)
+        order.alipos_sync_error = safe_error
         order.status = "SUBMISSION_FAILED"
+        should_refund = _queue_paid_submission_refund(order)
         await db.commit()
-        raise OrderSubmissionRejected(str(exc)) from exc
+        logger.warning("alipos_submit_rejected", extra=_alipos_log_fields(order))
+        if should_refund:
+            await _dispatch_queued_refund(db, order.id)
+        raise OrderSubmissionRejected(safe_error) from None
 
     order.alipos_sync_status = "sending"
     order.alipos_sync_error = None
     await db.commit()
+    logger.info("alipos_submit_start", extra=_alipos_log_fields(order))
 
     try:
         response = await alipos_api.create_order(payload)
-    except alipos_api.AliPOSRejected as exc:
+    except (alipos_api.AliPOSRejected, alipos_api.AliPOSPreSubmitError) as exc:
         order.alipos_sync_status = "failed"
         order.alipos_sync_error = str(exc)
         order.status = "SUBMISSION_FAILED"
+        should_refund = _queue_paid_submission_refund(order)
         await db.commit()
+        log_fields = _alipos_log_fields(order)
+        if exc.status_code is not None:
+            log_fields["http_status"] = exc.status_code
+        logger.warning("alipos_submit_rejected", extra=log_fields)
+        if should_refund:
+            await _dispatch_queued_refund(db, order.id)
         raise OrderSubmissionRejected(str(exc)) from exc
     except Exception:
-        logger.exception("AliPOS order outcome unknown for local order %s", order.id)
         order.alipos_sync_status = "unknown"
         order.alipos_sync_error = "AliPOS order create outcome is unknown"
         order.status = "SYNC_UNKNOWN"
         await db.commit()
+        logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
         return
 
-    alipos_order_id = response.get("orderId")
     try:
+        alipos_order_id = response.get("orderId") if isinstance(response, dict) else None
         order.alipos_order_id = uuid.UUID(str(alipos_order_id))
-    except (TypeError, ValueError) as exc:
-        order.alipos_sync_status = "failed"
-        order.alipos_sync_error = "AliPOS response did not include a valid orderId"
-        order.status = "SUBMISSION_FAILED"
+    except (TypeError, ValueError):
+        order.alipos_sync_status = "unknown"
+        order.alipos_sync_error = "AliPOS order create outcome is unknown"
+        order.status = "SYNC_UNKNOWN"
         await db.commit()
-        raise OrderSubmissionRejected(order.alipos_sync_error) from exc
+        logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
+        return
     order.alipos_sync_status = "synced"
     order.alipos_sync_error = None
     order.status = "NEW"
     await db.commit()
+    logger.info("alipos_submit_synced", extra=_alipos_log_fields(order))
 
 
 def _ready_for_alipos_clause():
@@ -215,6 +272,26 @@ async def list_recoverable_alipos_order_ids(db: AsyncSession) -> list[uuid.UUID]
         )
     )
     return list(result.scalars())
+
+
+async def recover_interrupted_alipos_orders(db: AsyncSession) -> int:
+    """Mark interrupted create attempts unknown without repeating the mutation."""
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.alipos_sync_status == "sending",
+            Order.alipos_order_id.is_(None),
+        )
+        .with_for_update(skip_locked=True)
+    )
+    interrupted = list(result.scalars())
+    for order in interrupted:
+        order.alipos_sync_status = "unknown"
+        order.alipos_sync_error = "AliPOS order create outcome is unknown"
+        order.status = "SYNC_UNKNOWN"
+        logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
+    await db.commit()
+    return len(interrupted)
 
 
 async def _submit_queued_alipos_order(
@@ -252,6 +329,7 @@ async def dispatch_queued_alipos_order(order_id: uuid.UUID) -> None:
 async def recover_queued_alipos_orders() -> None:
     """Schedule only never-attempted cash or paid orders after a restart."""
     async with async_session() as db:
+        await recover_interrupted_alipos_orders(db)
         order_ids = await list_recoverable_alipos_order_ids(db)
     for order_id in order_ids:
         asyncio.create_task(dispatch_queued_alipos_order(order_id))
@@ -299,17 +377,17 @@ async def _dispatch_queued_refund(db: AsyncSession, order_id: uuid.UUID) -> Orde
     await db.commit()
     try:
         await multicard_api.refund_payment(order.multicard_payment_uuid)
-    except httpx.RequestError:
-        logger.exception("Multicard refund outcome unknown for local order %s", order.id)
-        order.refund_sync_status = "unknown"
-        order.refund_sync_error = "Provider refund outcome is unknown"
-        order.payment_error = "The refund is being verified"
-    except Exception:
+    except multicard_api.RefundRejected:
         logger.exception("Multicard refund rejected for local order %s", order.id)
         order.payment_status = "refund_failed"
         order.refund_sync_status = "failed"
         order.refund_sync_error = "Provider rejected the refund request"
         order.payment_error = "The online refund needs staff assistance"
+    except Exception:
+        logger.exception("Multicard refund outcome unknown for local order %s", order.id)
+        order.refund_sync_status = "unknown"
+        order.refund_sync_error = "Provider refund outcome is unknown"
+        order.payment_error = "The refund is being verified"
     else:
         order.payment_status = "refunded"
         order.refund_sync_status = "refunded"
@@ -619,6 +697,10 @@ async def retry_customer_order_payment(
     )
     if not can_retry:
         raise PaymentRetryConflict("This online payment cannot be retried safely")
+    if not can_use_inplace_online_payment(current_user):
+        raise PaymentRetryConflict(
+            "Online payment is not available for table orders"
+        )
     return await _create_order_invoice(db, order)
 
 
@@ -679,6 +761,13 @@ async def create_customer_order(
                     return submitted
                 await db.refresh(existing)
             return existing
+
+    if (
+        body.discriminator == "inplace"
+        and body.payment_method == "rahmat"
+        and not can_use_inplace_online_payment(current_user)
+    ):
+        raise CustomerOrderError("Online payment is not available for table orders")
 
     selected_address = None
     table = None

@@ -6,6 +6,7 @@ import httpx
 import pytest
 from sqlalchemy import text
 
+from app.config import settings
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import Order, User
 
@@ -422,9 +423,14 @@ async def test_switch_to_cash_keeps_online_order_when_invoice_cancel_is_unknown(
 
 
 @pytest.mark.asyncio
-async def test_failed_online_payment_can_create_a_fresh_checkout(client, db_session):
+async def test_failed_online_payment_can_create_a_fresh_checkout(
+    client,
+    db_session,
+    monkeypatch,
+):
     user, order = await _failed_online_table_order(db_session)
     token = create_jwt(user.telegram_id)
+    monkeypatch.setattr(settings, "inplace_online_payment_enabled", True)
     invoice = AsyncMock(return_value={
         "uuid": "new-invoice-uuid",
         "checkout_url": "https://pay.example/new-checkout",
@@ -447,6 +453,39 @@ async def test_failed_online_payment_can_create_a_fresh_checkout(client, db_sess
     assert response.json()["data"]["multicard_checkout_url"] == (
         "https://pay.example/new-checkout"
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_online_payment_retry_is_blocked_after_capability_disabled(
+    client,
+    db_session,
+    monkeypatch,
+):
+    user, order = await _failed_online_table_order(db_session)
+    token = create_jwt(user.telegram_id)
+    monkeypatch.setattr(settings, "inplace_online_payment_enabled", False)
+    monkeypatch.setattr(settings, "inplace_online_payment_test_telegram_ids", "")
+    invoice = AsyncMock(
+        return_value={
+            "uuid": "unexpected-invoice-uuid",
+            "checkout_url": "https://pay.example/unexpected-checkout",
+        }
+    )
+
+    with patch(
+        "app.services.order_service.multicard_api.create_invoice",
+        new=invoice,
+    ):
+        response = await client.post(
+            f"/api/orders/{order.id}/retry-payment",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Online payment is not available for table orders"
+    )
+    invoice.assert_not_awaited()
 
 
 @pytest.mark.asyncio

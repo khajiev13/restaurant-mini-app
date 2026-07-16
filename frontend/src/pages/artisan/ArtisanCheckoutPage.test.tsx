@@ -17,6 +17,10 @@ const apiMocks = vi.hoisted(() => ({
 const authState = vi.hoisted(() => ({
   isAuthenticated: true,
   authenticate: vi.fn(),
+  user: {
+    telegram_id: 7301,
+    inplace_online_payment_enabled: false,
+  },
 }));
 
 vi.mock('../../services/api', () => apiMocks);
@@ -41,6 +45,10 @@ describe('ArtisanCheckoutPage table mode', () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    authState.user = {
+      telegram_id: 7301,
+      inplace_online_payment_enabled: false,
+    };
     apiMocks.getMe.mockResolvedValue({
       data: { data: { phone_number: '+998901112233' } },
     });
@@ -77,6 +85,7 @@ describe('ArtisanCheckoutPage table mode', () => {
 
     expect(await screen.findByText('Stol 12')).toBeVisible();
     expect(screen.queryByText(/delivery address/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /karta|online/i })).not.toBeInTheDocument();
     expect(apiMocks.getAddresses).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
 
@@ -91,6 +100,10 @@ describe('ArtisanCheckoutPage table mode', () => {
 
   it('uses an immediate pay-online CTA and opens the returned checkout', async () => {
     const user = userEvent.setup();
+    authState.user = {
+      telegram_id: 7301,
+      inplace_online_payment_enabled: true,
+    };
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     apiMocks.createOrder.mockResolvedValue({
       data: {
@@ -116,6 +129,64 @@ describe('ArtisanCheckoutPage table mode', () => {
       payment_method: 'rahmat',
     });
     open.mockRestore();
+  });
+
+  it('resets a stale online selection when table payment becomes unavailable', async () => {
+    const user = userEvent.setup();
+    authState.user = {
+      telegram_id: 7301,
+      inplace_online_payment_enabled: true,
+    };
+    apiMocks.createOrder.mockResolvedValue({
+      data: {
+        data: {
+          id: 'order-capability-changed',
+          payment_method: 'cash',
+          multicard_checkout_url: null,
+        },
+      },
+    });
+    const view = render(
+      <MemoryRouter>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: /karta|online/i }));
+    authState.user = {
+      telegram_id: 7301,
+      inplace_online_payment_enabled: false,
+    };
+    view.rerender(
+      <MemoryRouter>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole('button', { name: /karta|online/i })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
+
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(1));
+    expect(apiMocks.createOrder.mock.calls[0][0]).toMatchObject({
+      discriminator: 'inplace',
+      payment_method: 'cash',
+    });
+  });
+
+  it('keeps cash and online methods for delivery regardless of table capability', async () => {
+    useTableOrderStore.setState({
+      context: null,
+      isResolving: false,
+      error: null,
+    });
+    render(
+      <MemoryRouter>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole('button', { name: /cash|naqd/i })).toBeVisible();
+    expect(screen.getByRole('button', { name: /karta|online/i })).toBeVisible();
   });
 
   it('reuses one client request ID when a timed-out checkout is retried', async () => {

@@ -22,6 +22,10 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SelfProfileResponse(UserResponse):
+    inplace_online_payment_enabled: bool = False
+
+
 class UserUpdate(BaseModel):
     phone_number: str | None = None
     language: str | None = None

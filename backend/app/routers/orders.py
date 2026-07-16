@@ -28,6 +28,7 @@ from app.services.order_status_service import apply_alipos_status_update_for_ord
 from app.services.table_access_service import InvalidTableEntry
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+ORDER_SUBMISSION_ERROR_DETAIL = "Could not submit the order to the restaurant"
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -49,7 +50,12 @@ async def create_order(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except (OrderSubmissionRejected, PaymentCheckoutError) as exc:
+    except OrderSubmissionRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=ORDER_SUBMISSION_ERROR_DETAIL,
+        ) from exc
+    except PaymentCheckoutError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
@@ -202,7 +208,7 @@ async def switch_order_to_cash(
     except OrderSubmissionRejected as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
+            detail=ORDER_SUBMISSION_ERROR_DETAIL,
         ) from exc
     return ApiResponse(
         success=True,

@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     multicard_store_id: int = 0
     rahmat_payment_timeout_seconds: int = 600
     payment_expiry_check_interval_seconds: int = 30
+    inplace_online_payment_enabled: bool = False
+    inplace_online_payment_test_telegram_ids: str = ""
 
     # Yandex Maps
     yandex_maps_api_key: str = ""
@@ -87,6 +89,16 @@ class Settings(BaseSettings):
     def bootstrap_admin_ids(self) -> set[int]:
         ids: set[int] = set()
         for raw_id in _split_csv(self.bootstrap_admin_telegram_ids):
+            try:
+                ids.add(int(raw_id))
+            except ValueError:
+                continue
+        return ids
+
+    @property
+    def inplace_online_payment_test_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for raw_id in _split_csv(self.inplace_online_payment_test_telegram_ids):
             try:
                 ids.add(int(raw_id))
             except ValueError:

@@ -46,6 +46,21 @@ class HallsTablesUnavailable(RuntimeError):
 class AliPOSRejected(RuntimeError):
     """AliPOS returned a definite HTTP error before accepting the order."""
 
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"AliPOS rejected the order (HTTP {status_code})")
+
+
+class AliPOSPreSubmitError(RuntimeError):
+    """A prerequisite failed before the order POST could be attempted."""
+
+    def __init__(self, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        detail = "AliPOS order submission prerequisite failed"
+        if status_code is not None:
+            detail = f"{detail} (HTTP {status_code})"
+        super().__init__(detail)
+
 
 class AliPOSUnknownOutcome(RuntimeError):
     """The create request may have reached AliPOS, so it must not be retried."""
@@ -96,9 +111,23 @@ async def _get_token() -> str:
     return _token
 
 
-async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
+async def _api_request(
+    method: str,
+    path: str,
+    *,
+    pre_submit: bool = False,
+    **kwargs,
+) -> httpx.Response:
     """Make an authenticated request to the AliPOS API with retry."""
-    token = await _get_token()
+    try:
+        token = await _get_token()
+    except Exception as exc:
+        if not pre_submit:
+            raise
+        status_code = (
+            exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        )
+        raise AliPOSPreSubmitError(status_code) from exc
     max_retries = 3
     last_exc: BaseException | None = None
 
@@ -119,6 +148,14 @@ async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
                 resp.raise_for_status()
                 return resp
             except httpx.HTTPStatusError as exc:
+                if pre_submit:
+                    logger.warning(
+                        "AliPOS prerequisite request rejected: %s %s -> %s",
+                        method,
+                        path,
+                        exc.response.status_code,
+                    )
+                    raise AliPOSPreSubmitError(exc.response.status_code) from exc
                 detail = _format_alipos_error(exc.response)
                 logger.warning(
                     "AliPOS API returned HTTP error: %s %s -> %s (%s)",
@@ -132,18 +169,30 @@ async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
                 ) from exc
             except httpx.RequestError as exc:
                 last_exc = exc
-                logger.warning(
-                    "AliPOS request failed (attempt %d/%d): %s %s -> %s",
-                    attempt + 1,
-                    max_retries,
-                    method,
-                    path,
-                    exc,
-                )
+                if pre_submit:
+                    logger.warning(
+                        "AliPOS prerequisite request transport failure: "
+                        "%s %s (attempt %d/%d)",
+                        method,
+                        path,
+                        attempt + 1,
+                        max_retries,
+                    )
+                else:
+                    logger.warning(
+                        "AliPOS request failed (attempt %d/%d): %s %s -> %s",
+                        attempt + 1,
+                        max_retries,
+                        method,
+                        path,
+                        exc,
+                    )
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
 
+    if pre_submit:
+        raise AliPOSPreSubmitError() from last_exc
     raise RuntimeError(
         f"AliPOS request failed after {max_retries} attempts: {last_exc}"
     ) from last_exc
@@ -271,7 +320,15 @@ async def get_halls_and_tables() -> dict:
 
 async def create_order(order_payload: dict) -> dict:
     """Send one order create attempt; an unknown outcome is never retried."""
-    token = await _get_token()
+    try:
+        token = await _get_token()
+    except AliPOSPreSubmitError:
+        raise
+    except Exception as exc:
+        status_code = (
+            exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        )
+        raise AliPOSPreSubmitError(status_code) from exc
     path = "/api/Integration/v1/order"
     try:
         async with httpx.AsyncClient() as client:
@@ -288,10 +345,7 @@ async def create_order(order_payload: dict) -> dict:
             )
             resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        detail = _format_alipos_error(exc.response)
-        raise AliPOSRejected(
-            f"AliPOS returned {exc.response.status_code}: {detail}"
-        ) from exc
+        raise AliPOSRejected(exc.response.status_code) from exc
     except httpx.RequestError as exc:
         raise AliPOSUnknownOutcome("AliPOS order create outcome is unknown") from exc
     return resp.json()
@@ -337,5 +391,6 @@ async def get_payment_methods() -> list[dict]:
     resp = await _api_request(
         "GET",
         "/api/Integration/v1/paymentMethod/all",
+        pre_submit=True,
     )
     return resp.json()
