@@ -80,7 +80,7 @@ export default function StaffTablesPage() {
   const fetchMenu = useMenuStore((state) => state.fetchMenu);
   const retryMenu = useMenuStore((state) => state.retry);
   const menuFetchStarted = useRef(false);
-  const roleRefreshStarted = useRef(false);
+  const roleRefreshInFlight = useRef<Promise<unknown> | null>(null);
   const roleBoundary = isRoleBoundary(error);
 
   const setParam = (key: 'view' | 'filter', value: string) => {
@@ -117,12 +117,23 @@ export default function StaffTablesPage() {
   }, [fetchMenu, view]);
 
   useEffect(() => {
-    if (!roleBoundary || roleRefreshStarted.current) return;
-    roleRefreshStarted.current = true;
+    if (!roleBoundary) return;
+    let request = roleRefreshInFlight.current;
+    if (!request) {
+      request = refreshMe();
+      roleRefreshInFlight.current = request;
+      const clearRequest = () => {
+        if (roleRefreshInFlight.current === request) {
+          roleRefreshInFlight.current = null;
+        }
+      };
+      void request.then(clearRequest, clearRequest);
+    }
     let cancelled = false;
-    void refreshMe().finally(() => {
+    const leaveWorkspace = () => {
       if (!cancelled) navigate('/', { replace: true });
-    });
+    };
+    void request.then(leaveWorkspace, leaveWorkspace);
     return () => { cancelled = true; };
   }, [navigate, refreshMe, roleBoundary]);
 

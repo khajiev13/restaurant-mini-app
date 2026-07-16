@@ -191,10 +191,23 @@ function renderPage(entry = '/staff/tables', strict = false) {
 
 const currentSearch = () => new URLSearchParams(screen.getByTestId('location').textContent ?? '');
 
+const setVisibility = (value: DocumentVisibilityState) => {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value,
+  });
+};
+
+const triggerVisibleRefresh = () => {
+  setVisibility('visible');
+  act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+};
+
 describe('StaffTablesPage', () => {
   let styleElement: HTMLStyleElement | null = null;
 
   afterEach(() => {
+    setVisibility('visible');
     styleElement?.remove();
     styleElement = null;
     vi.restoreAllMocks();
@@ -418,6 +431,78 @@ describe('StaffTablesPage', () => {
     expect(authState.refreshMe).toHaveBeenCalledTimes(1);
 
     act(() => { resolveRole({ role: 'staff' }); });
+    expect(await screen.findByText('Role home')).toBeInTheDocument();
+  });
+
+  it('reattaches navigation when an authorization boundary recurs during the same role refresh', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let resolveRole!: (value: { role: string }) => void;
+    const roleRefresh = new Promise<{ role: string }>((resolve) => { resolveRole = resolve; });
+    authState.refreshMe.mockReturnValue(roleRefresh);
+    apiMocks.getStaffTables
+      .mockResolvedValueOnce({ data: { success: true, data: overview } })
+      .mockRejectedValueOnce({ response: { status: 403 } })
+      .mockResolvedValueOnce({ data: { success: true, data: overview } })
+      .mockRejectedValueOnce({ response: { status: 401 } });
+    renderPage();
+    await screen.findByText('Table 2');
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.queryByText('Table 2')).not.toBeInTheDocument());
+    expect(authState.refreshMe).toHaveBeenCalledTimes(1);
+
+    triggerVisibleRefresh();
+    expect(await screen.findByText('Table 2')).toBeInTheDocument();
+
+    triggerVisibleRefresh();
+    await waitFor(() => expect(screen.queryByText('Table 2')).not.toBeInTheDocument());
+    expect(authState.refreshMe).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveRole({ role: 'staff' });
+      await roleRefresh;
+    });
+    expect(await screen.findByText('Role home')).toBeInTheDocument();
+  });
+
+  it('starts a new role refresh after a recovered boundary settles without navigation', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let resolveFirst!: (value: { role: string }) => void;
+    let resolveSecond!: (value: { role: string }) => void;
+    const firstRefresh = new Promise<{ role: string }>((resolve) => { resolveFirst = resolve; });
+    const secondRefresh = new Promise<{ role: string }>((resolve) => { resolveSecond = resolve; });
+    authState.refreshMe
+      .mockReturnValueOnce(firstRefresh)
+      .mockReturnValueOnce(secondRefresh);
+    apiMocks.getStaffTables
+      .mockResolvedValueOnce({ data: { success: true, data: overview } })
+      .mockRejectedValueOnce({ response: { status: 403 } })
+      .mockResolvedValueOnce({ data: { success: true, data: overview } })
+      .mockRejectedValueOnce({ response: { status: 403 } });
+    renderPage();
+    await screen.findByText('Table 2');
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.queryByText('Table 2')).not.toBeInTheDocument());
+    triggerVisibleRefresh();
+    expect(await screen.findByText('Table 2')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveFirst({ role: 'staff' });
+      await firstRefresh;
+    });
+    expect(screen.queryByText('Role home')).not.toBeInTheDocument();
+
+    triggerVisibleRefresh();
+    await waitFor(() => expect(screen.queryByText('Table 2')).not.toBeInTheDocument());
+    expect(authState.refreshMe).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveSecond({ role: 'staff' });
+      await secondRefresh;
+    });
     expect(await screen.findByText('Role home')).toBeInTheDocument();
   });
 
