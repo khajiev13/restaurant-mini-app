@@ -1214,6 +1214,11 @@ async def test_paid_unknown_alipos_outcome_does_not_refund(db_session, caplog):
     )
     order.multicard_payment_uuid = "payment-uuid"
     await db_session.commit()
+    create = AsyncMock(
+        side_effect=alipos_api.AliPOSUnknownOutcome(
+            "AliPOS order create outcome is unknown"
+        )
+    )
     refund = AsyncMock()
 
     with (
@@ -1225,11 +1230,7 @@ async def test_paid_unknown_alipos_outcome_does_not_refund(db_session, caplog):
         ),
         patch(
             "app.services.order_service.alipos_api.create_order",
-            new=AsyncMock(
-                side_effect=alipos_api.AliPOSUnknownOutcome(
-                    "AliPOS order create outcome is unknown"
-                )
-            ),
+            new=create,
         ),
         patch(
             "app.services.order_service.multicard_api.refund_payment",
@@ -1237,9 +1238,11 @@ async def test_paid_unknown_alipos_outcome_does_not_refund(db_session, caplog):
         ),
         caplog.at_level("INFO", logger="app.services.order_service"),
     ):
-        await submit_order_to_alipos(db_session, order)
+        await _submit_queued_alipos_order(db_session, order.id)
+        assert await _submit_queued_alipos_order(db_session, order.id) is None
 
     await db_session.refresh(order)
+    create.assert_awaited_once()
     refund.assert_not_awaited()
     assert order.payment_status == "paid"
     assert order.refund_sync_status is None
