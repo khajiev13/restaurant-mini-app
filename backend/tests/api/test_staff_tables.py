@@ -236,8 +236,14 @@ async def test_refund_states_are_normalized_without_repeating_provider_mutations
 
 
 @pytest.mark.asyncio
-async def test_customer_is_denied_but_staff_and_admin_can_list_tables(
-    client, db_session
+@pytest.mark.parametrize(
+    "path",
+    ["/api/staff/tables", f"/api/staff/tables/{TABLE_ID}"],
+)
+async def test_overview_and_detail_role_matrix_stops_denied_requests_at_boundary(
+    client,
+    db_session,
+    path,
 ):
     customer = await create_user(db_session, 8101, "customer")
     staff = await create_user(db_session, 8102, "staff")
@@ -248,13 +254,10 @@ async def test_customer_is_denied_but_staff_and_admin_can_list_tables(
         "app.services.staff_table_service.alipos_api.get_halls_and_tables_snapshot",
         new=directory,
     ):
-        denied = await client.get("/api/staff/tables", headers=auth_headers(customer))
-        allowed_staff = await client.get(
-            "/api/staff/tables", headers=auth_headers(staff)
-        )
-        allowed_admin = await client.get(
-            "/api/staff/tables", headers=auth_headers(admin)
-        )
+        denied = await client.get(path, headers=auth_headers(customer))
+        directory.assert_not_awaited()
+        allowed_staff = await client.get(path, headers=auth_headers(staff))
+        allowed_admin = await client.get(path, headers=auth_headers(admin))
 
     assert denied.status_code == 403
     assert allowed_staff.status_code == 200
@@ -347,6 +350,134 @@ async def test_detail_omits_customer_and_provider_sensitive_data(client, db_sess
         "payment_card_pan",
     ):
         assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_overview_and_detail_use_exact_allowlisted_response_shapes(
+    client,
+    db_session,
+):
+    staff = await create_user(db_session, 8125, "staff")
+    customer = await create_user(db_session, 8126, "customer")
+    order = await create_table_order(
+        db_session,
+        customer,
+        sync="synced",
+        total=20800,
+        items=[
+            {
+                "id": "somsa",
+                "name": "Classic Somsa",
+                "quantity": 1,
+                "price": 18000,
+                "modifications": [
+                    {
+                        "id": "spicy",
+                        "name": "Spicy",
+                        "quantity": 1,
+                        "price": 1000,
+                    }
+                ],
+            }
+        ],
+    )
+    freshness_keys = {
+        "generated_at",
+        "directory_stale",
+        "directory_last_success_at",
+        "order_status_stale",
+        "order_status_oldest_success_at",
+    }
+    hall_keys = {
+        "hall_id",
+        "hall_title",
+        "service_percent",
+        "is_listed",
+        "tables",
+    }
+    table_keys = {
+        "table_id",
+        "table_title",
+        "hall_id",
+        "hall_title",
+        "service_percent",
+        "is_listed",
+        "synchronized_order_count",
+        "processing_order_count",
+        "attention_order_count",
+        "combined_item_count",
+        "combined_line_count",
+        "combined_items",
+        "items_cost",
+        "service_amount",
+        "total_amount",
+    }
+    modifier_keys = {"id", "name", "quantity", "price"}
+    combined_item_keys = modifier_keys | {"modifications", "line_total"}
+    order_keys = {
+        "id",
+        "order_number",
+        "created_at",
+        "status",
+        "sync_state",
+        "sync_label",
+        "payment_method",
+        "payment_status",
+        "items",
+        "items_cost",
+        "service_amount",
+        "total_amount",
+    }
+    order_item_keys = modifier_keys | {"modifications"}
+
+    with (
+        patch(
+            "app.services.staff_table_service.alipos_api.get_halls_and_tables_snapshot",
+            new=AsyncMock(return_value=directory_snapshot()),
+        ),
+        patch(
+            "app.services.staff_table_service.alipos_api.get_order_status",
+            new=AsyncMock(return_value={"status": "NEW"}),
+        ),
+    ):
+        overview_response = await client.get(
+            "/api/staff/tables",
+            headers=auth_headers(staff),
+        )
+        detail_response = await client.get(
+            f"/api/staff/tables/{order.table_id}",
+            headers=auth_headers(staff),
+        )
+
+    assert overview_response.status_code == 200
+    assert detail_response.status_code == 200
+    overview = overview_response.json()
+    detail = detail_response.json()
+    assert set(overview) == {"success", "data", "error"}
+    assert set(detail) == {"success", "data", "error"}
+    assert set(overview["data"]) == {"freshness", "halls"}
+    assert set(detail["data"]) == {"freshness", "table", "orders"}
+    assert set(overview["data"]["freshness"]) == freshness_keys
+    assert set(detail["data"]["freshness"]) == freshness_keys
+
+    hall = overview["data"]["halls"][0]
+    overview_table = hall["tables"][0]
+    overview_item = overview_table["combined_items"][0]
+    assert set(hall) == hall_keys
+    assert set(overview_table) == table_keys
+    assert set(overview_item) == combined_item_keys
+    assert set(overview_item["modifications"][0]) == modifier_keys
+
+    detail_table = detail["data"]["table"]
+    detail_item = detail_table["combined_items"][0]
+    original_order = detail["data"]["orders"][0]
+    original_item = original_order["items"][0]
+    assert set(detail_table) == table_keys
+    assert set(detail_item) == combined_item_keys
+    assert set(detail_item["modifications"][0]) == modifier_keys
+    assert set(original_order) == order_keys
+    assert set(original_item) == order_item_keys
+    assert set(original_item["modifications"][0]) == modifier_keys
 
 
 @pytest.mark.asyncio

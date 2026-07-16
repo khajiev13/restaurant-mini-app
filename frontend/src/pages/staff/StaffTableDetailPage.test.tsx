@@ -16,6 +16,13 @@ const authState = vi.hoisted(() => ({
   user: { role: 'staff' },
   refreshMe: vi.fn<() => Promise<{ role: string }>>(),
 }));
+const PRIVATE_LOG_CANARIES = [
+  'https://private.example/api/staff/tables/private-id',
+  'private-order-id',
+  'provider-response-body',
+  'Bearer private-token',
+  '+998-private-customer',
+] as const;
 
 vi.mock('../../services/staffTablesApi', () => apiMocks);
 vi.mock('../../stores/authStore', () => ({
@@ -262,6 +269,52 @@ describe('StaffTableDetailPage', () => {
     expect(await screen.findByText('Table not found')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Table Alpha' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      'http',
+      {
+        response: {
+          status: 503,
+          data: { body: PRIVATE_LOG_CANARIES[2], customer: PRIVATE_LOG_CANARIES[4] },
+        },
+        config: {
+          url: PRIVATE_LOG_CANARIES[0],
+          headers: { Authorization: PRIVATE_LOG_CANARIES[3] },
+        },
+        orderId: PRIVATE_LOG_CANARIES[1],
+      },
+      503,
+    ],
+    [
+      'network',
+      Object.assign(new Error('network'), {
+        url: PRIVATE_LOG_CANARIES[0],
+        orderId: PRIVATE_LOG_CANARIES[1],
+        body: PRIVATE_LOG_CANARIES[2],
+        token: PRIVATE_LOG_CANARIES[3],
+        customer: PRIVATE_LOG_CANARIES[4],
+      }),
+      'network',
+    ],
+  ] as const)('logs one exact privacy-safe %s failure event', async (_kind, error, status) => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    apiMocks.getStaffTable.mockRejectedValueOnce(error);
+
+    renderRoute();
+
+    await waitFor(() => expect(consoleError).toHaveBeenCalledTimes(1));
+    expect(consoleError.mock.calls).toEqual([
+      ['staff_tables_workspace_load_failed', { status }],
+    ]);
+    expect(consoleError.mock.calls[0]).toHaveLength(2);
+    const payload = consoleError.mock.calls[0][1] as Record<string, unknown>;
+    expect(Object.keys(payload)).toEqual(['status']);
+    const logged = JSON.stringify(consoleError.mock.calls);
+    for (const canary of PRIVATE_LOG_CANARIES) {
+      expect(logged).not.toContain(canary);
+    }
   });
 
   it('keeps cached detail only for transient refresh failure and announces recovery once', async () => {

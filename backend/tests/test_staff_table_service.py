@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import re
 import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
@@ -733,10 +734,24 @@ async def test_reconcile_atomically_throttles_caps_concurrency_and_logs_safe_cou
             and record.getMessage().startswith("staff_table_status_reconcile ")
         ]
         assert len(reconcile_logs) == 1
-        assert "claimed=6 succeeded=5 failed=1" in reconcile_logs[0]
+        match = re.fullmatch(
+            r"^staff_table_status_reconcile claimed=(\d+) succeeded=(\d+) "
+            r"failed=(\d+) duration_ms=(\d+)$",
+            reconcile_logs[0],
+        )
+        assert match is not None
+        claimed, succeeded, failed, duration_ms = map(int, match.groups())
+        assert (claimed, succeeded, failed) == (6, 5, 1)
+        assert duration_ms >= 0
+        assert claimed == succeeded + failed
+        sensitive_ids = [
+            *stale_provider_ids,
+            fresh_provider_id,
+            *(row.id for row in rows),
+        ]
         assert all(
-            str(provider_id) not in reconcile_logs[0]
-            for provider_id in stale_provider_ids
+            str(sensitive_id) not in reconcile_logs[0]
+            for sensitive_id in sensitive_ids
         )
     finally:
         if engine is not None:
