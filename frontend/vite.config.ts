@@ -39,6 +39,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: './setupTests.ts',
+    css: { include: [/staff-tables\.css$/] },
   },
   server: {
     host: '0.0.0.0',

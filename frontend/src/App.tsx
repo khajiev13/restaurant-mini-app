@@ -9,6 +9,7 @@ import ArtisanOrdersPage from './pages/artisan/ArtisanOrdersPage';
 import StaffOrdersPage from './pages/staff/StaffOrdersPage';
 import StaffOrderDetailPage from './pages/staff/StaffOrderDetailPage';
 import StaffProfilePage from './pages/staff/StaffProfilePage';
+import StaffTablesPage from './pages/staff/StaffTablesPage';
 import AdminUsersPage from './pages/admin/AdminUsersPage';
 import { useAuthStore } from './stores/authStore';
 import { useTableOrderStore } from './stores/tableOrderStore';
@@ -193,6 +194,7 @@ export default function App() {
       <Route path="/admin/users" element={renderAdminRoute(<AdminUsersPage />)} />
       <Route path="/staff/orders" element={renderStaffOrAdminRoute(<StaffOrdersPage />)} />
       <Route path="/staff/orders/:orderId" element={renderStaffOrAdminRoute(<StaffOrderDetailPage />)} />
+      <Route path="/staff/tables" element={renderStaffOrAdminRoute(<StaffTablesPage />)} />
     </Routes>
   );
 }
