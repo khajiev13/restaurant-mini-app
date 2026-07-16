@@ -16,12 +16,23 @@ check, watcher check, and rollback preparation step before that single
 production push. Do not run `start.sh`, do not run a second manual build, and
 do not manually recreate the application containers during normal rollout.
 
-All commands marked **LOCAL** run from a clean release checkout. Commands
-marked **LIVE / MANUAL** run only during an authorized production window. The
-examples assume the existing SSH alias `restaurant`, Docker inside WSL, the
-production containers `restaurant_postgres`, `restaurant_backend`, and
-`restaurant_frontend`, and the systemd unit `deploy-watcher.service`. Discover
-and verify the production checkout path and image names; do not guess them.
+Use two explicit, persistent terminals for the whole release:
+
+- **Terminal A — LOCAL** is a clean release checkout on the operator's
+  workstation. Local Git, GitHub CLI, CI, push, and SSH commands run here.
+- **Terminal B — WSL** is opened once with `ssh restaurant wsl`. Production
+  checkout, Docker, schema, image, and watch commands run here. Keep it open,
+  but make every block self-contained by sourcing the protected remote state
+  pointer described in Section 3.
+
+Commands marked **LIVE / MANUAL** run only during an authorized production
+window. The examples assume the existing SSH alias `restaurant`, Docker inside
+WSL, the production containers `restaurant_postgres`, `restaurant_backend`,
+`restaurant_frontend`, `restaurant_caddy`, and `restaurant_cloudflared`, and
+the systemd unit `deploy-watcher.service`. Discover and verify the production
+checkout, Compose project name, and image names; do not guess them. Every
+watcher stop/start command is shown as an explicit LOCAL-to-WSL SSH command so
+there is no ambiguity about which systemd instance it controls.
 
 ## Evidence and privacy boundary
 
@@ -79,6 +90,35 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 git merge-base --is-ancestor "$PRE_PROD_SHA" "$CANDIDATE_SHA"
 git merge-base --is-ancestor "$MAIN_SHA" "$CANDIDATE_SHA"
 git merge-base --is-ancestor "$INPLACE_FIX_SHA" "$CANDIDATE_SHA"
+
+LOCAL_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/restaurant-mini-app/releases"
+mkdir -p "$LOCAL_STATE_ROOT"
+chmod 700 "$LOCAL_STATE_ROOT"
+LOCAL_RELEASE_STATE="$LOCAL_STATE_ROOT/staff-tables-$CANDIDATE_SHA.env"
+{
+  printf 'PRE_PROD_SHA=%q\n' "$PRE_PROD_SHA"
+  printf 'MAIN_SHA=%q\n' "$MAIN_SHA"
+  printf 'INPLACE_FIX_SHA=%q\n' "$INPLACE_FIX_SHA"
+  printf 'CANDIDATE_SHA=%q\n' "$CANDIDATE_SHA"
+  printf 'RELEASE_CHECKOUT=%q\n' "$PWD"
+} > "$LOCAL_RELEASE_STATE"
+chmod 600 "$LOCAL_RELEASE_STATE"
+```
+
+At the start of every later **Terminal A — LOCAL** block, set
+`LOCAL_RELEASE_STATE` to this recorded path, source it, and assert the checkout
+and SHAs before use:
+
+```bash
+set -euo pipefail
+set +x
+umask 077
+LOCAL_RELEASE_STATE='<absolute path recorded above>'
+test -r "$LOCAL_RELEASE_STATE"
+source "$LOCAL_RELEASE_STATE"
+cd "$RELEASE_CHECKOUT"
+test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+test "$(git rev-parse "$PRE_PROD_SHA^{commit}")" = "$PRE_PROD_SHA"
 ```
 
 Confirm all three migrations exist in the exact candidate:
@@ -198,9 +238,10 @@ disabled; they do not replace the production configuration check below.
 
 ## 3. Verify the production mechanism and rollback before release
 
-### LIVE / MANUAL preflight; no application deployment
+### LIVE / MANUAL watcher audit; no application deployment
 
-First inspect only non-secret unit metadata:
+From **Terminal A — LOCAL**, print only non-secret unit metadata. Deliberately
+do not request `ExecStart`; command arguments can contain tokens:
 
 ```bash
 ssh restaurant 'wsl bash -lc '\''
@@ -209,41 +250,31 @@ set +x
 WATCHER_UNIT=deploy-watcher.service
 sudo -n systemctl show "$WATCHER_UNIT" \
   --property=FragmentPath \
-  --property=ExecStart \
   --property=WorkingDirectory
 sudo -n systemctl is-enabled --quiet "$WATCHER_UNIT"
 sudo -n systemctl is-active --quiet "$WATCHER_UNIT"
 '\'''
 ```
 
-Privately inspect the referenced unit and executable on the host. Do not copy
-their environment or raw output into release evidence. Confirm all of the
-following from the actual deployed watcher source:
+Privately inspect the referenced unit, environment, and executable on the host.
+Do not emit raw command, environment, or file output to the terminal and do not
+retain it as evidence. Record only a yes/no audit result. Confirm all of these:
 
 1. Its working directory is the production checkout and its remote is this
    repository.
 2. It polls `origin/prod`, deploys the exact observed SHA only after that SHA's
-   `CI` push workflow is green, and never treats another SHA's green run as
-   approval.
-3. One new approved SHA causes exactly one
+   `CI` push workflow is green, and never accepts another SHA's run.
+3. One new approved SHA causes exactly one normal
    `docker compose up -d --build` from that working directory.
-4. It exposes a privacy-safe deployment-cycle marker that can be counted
+4. It has an exact privacy-safe deployment-cycle marker that can be counted
    without retaining raw logs.
 5. It can be stopped and started with noninteractive `sudo -n systemctl`.
 
-If any property is ambiguous, if `WorkingDirectory` is empty, or if a secret
-would have to be printed to prove it, stop and repair/audit the deployment
-mechanism separately.
+If any property is ambiguous, if `WorkingDirectory` is empty, or if the audit
+cannot be completed without displaying a secret, stop and repair/review the
+watcher separately.
 
-In the private WSL release shell, export the exact safe marker verified in
-step 4. It must contain no token, URL, business ID, or customer field:
-
-```bash
-export WATCHER_DEPLOY_MARKER='<exact audited safe marker>'
-test -n "$WATCHER_DEPLOY_MARKER"
-```
-
-Prove pause and resume without touching containers:
+Prove pause and resume from **Terminal A — LOCAL** without touching containers:
 
 ```bash
 ssh restaurant 'wsl bash -lc '\''
@@ -257,117 +288,305 @@ sudo -n systemctl is-active --quiet "$WATCHER_UNIT"
 '\'''
 ```
 
-Check the `prod` branch protection/ruleset before relying on a direct push.
-The repository workflow names the jobs `Backend Tests` and `Frontend Tests`:
+### LOCAL branch rules and pre-created rollback commit
+
+In **Terminal A — LOCAL**, source and verify `LOCAL_RELEASE_STATE` as described
+in Section 1. The repository workflow jobs are named `Backend Tests` and
+`Frontend Tests`. This direct-release procedure is valid only when both
+classic branch protection and all applicable repository rules are absent.
 
 ```bash
 REPO=khajiev13/restaurant-mini-app
-if REQUIRED_CHECKS="$(gh api "repos/$REPO/branches/prod/protection" \
-  --jq '.required_status_checks.contexts[]?' 2>/dev/null)"; then
-  printf '%s\n' "$REQUIRED_CHECKS" | rg -qx 'Backend Tests'
-  printf '%s\n' "$REQUIRED_CHECKS" | rg -qx 'Frontend Tests'
-  printf 'prod_branch_protection=present\n'
+DIRECT_RELEASE_AUTHORIZATION='<release-record reference for explicit authorization>'
+WATCHER_EXACT_SHA_AUDITED=1
+test -n "$DIRECT_RELEASE_AUTHORIZATION"
+test "$WATCHER_EXACT_SHA_AUDITED" -eq 1
+
+gh auth status --hostname github.com >/dev/null
+test "$(gh api "repos/$REPO" --jq .full_name)" = "$REPO"
+test "$(gh api "repos/$REPO/branches/prod" --jq .name)" = prod
+
+PROTECTION_RESPONSE="$(mktemp)"
+PROTECTION_ERROR="$(mktemp)"
+if gh api --include "repos/$REPO/branches/prod/protection" \
+  >"$PROTECTION_RESPONSE" 2>"$PROTECTION_ERROR"; then
+  PROTECTION_RC=0
 else
-  printf 'prod_branch_protection=absent\n'
+  PROTECTION_RC=$?
 fi
+PROTECTION_HTTP="$(awk '
+  toupper($1) ~ /^HTTP\// { code=$2 }
+  END { print code }
+' "$PROTECTION_RESPONSE")"
+rm -f "$PROTECTION_RESPONSE" "$PROTECTION_ERROR"
+
+case "$PROTECTION_HTTP:$PROTECTION_RC" in
+  404:*) printf 'classic_branch_protection=absent\n' ;;
+  200:0)
+    printf 'classic branch protection is present; direct release blocked\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'branch protection check was not an authenticated 404\n' >&2
+    exit 1
+    ;;
+esac
+
+APPLICABLE_RULE_COUNT="$(gh api \
+  "repos/$REPO/rules/branches/prod" --jq 'length')"
+case "$APPLICABLE_RULE_COUNT" in ''|*[!0-9]*) exit 1 ;; esac
+if [ "$APPLICABLE_RULE_COUNT" -ne 0 ]; then
+  printf 'applicable rules exist; direct release blocked\n' >&2
+  exit 1
+fi
+printf 'applicable_branch_rules=absent\n'
+
+ROLLBACK_COMMIT="$(printf '%s\n' \
+  "rollback: restore production $PRE_PROD_SHA" \
+  | git commit-tree "$PRE_PROD_SHA^{tree}" -p "$CANDIDATE_SHA")"
+test "$(git rev-parse "$ROLLBACK_COMMIT^{tree}")" = \
+  "$(git rev-parse "$PRE_PROD_SHA^{tree}")"
+test "$(git rev-parse "$ROLLBACK_COMMIT^1")" = "$CANDIDATE_SHA"
+printf 'ROLLBACK_COMMIT=%q\n' "$ROLLBACK_COMMIT" >> "$LOCAL_RELEASE_STATE"
+chmod 600 "$LOCAL_RELEASE_STATE"
 
 git push --dry-run origin "$CANDIDATE_SHA:refs/heads/prod"
+git push --dry-run origin "$ROLLBACK_COMMIT:refs/heads/prod"
 ```
 
-If protection is present, honor it and require both jobs. An absent protection
-endpoint is recorded but does not block this explicitly authorized direct
-release when the watcher's exact-SHA green-CI gate has been audited. A ruleset
-conflict, rejected dry run, or inability to prove exact-SHA watcher gating does
-block the release. Do not claim that a pull request exists or bypass a rule.
+An authenticated 404 is distinguished from permission, authentication, and
+network failures by the successful authenticated repository/branch reads and
+captured HTTP status. A 200 protection response, any applicable rule (including
+a required pull request or restricted update), or an unreadable rules endpoint
+blocks this direct path. Use a separate, reviewed protected-branch promotion
+and rollback procedure; do not bypass the rule or improvise a PR during this
+release. Absence is allowed only because explicit user authorization is
+recorded and the exact-SHA watcher gate was privately audited.
 
-### LIVE / MANUAL image discovery and rollback proof
+The rollback commit is created before production mutation. Its parent is the
+candidate and its tree is exactly pre-production, so both the candidate and
+incident rollback are non-force fast-forwards. Record `ROLLBACK_COMMIT`; never
+recreate it during an incident.
 
-Open a WSL shell on the host and substitute the already pinned 40-character
-SHAs. Do not substitute branch names:
+### LIVE / MANUAL four-service rollback proof
+
+Now open **Terminal B — WSL**. Do not set or export the marker before this
+shell is open:
 
 ```bash
 ssh restaurant wsl
 ```
 
-Then run inside WSL:
+Inside **Terminal B — WSL**, substitute only the deliberate preflight inputs
+below. `WATCHER_DEPLOY_MARKER` must be the exact marker from the private audit;
+it may contain no token, URL, business ID, or customer field.
 
 ```bash
 set -euo pipefail
 set +x
 umask 077
 
-export PRE_PROD_SHA='<40-character PRE_PROD_SHA>'
-export CANDIDATE_SHA='<40-character CANDIDATE_SHA>'
+PRE_PROD_SHA='<40-character PRE_PROD_SHA>'
+CANDIDATE_SHA='<40-character CANDIDATE_SHA>'
+ROLLBACK_COMMIT='<40-character pre-created ROLLBACK_COMMIT>'
+WATCHER_DEPLOY_MARKER='<exact audited privacy-safe marker>'
+WATCHER_AUDIT_OK=1
+WATCHER_EXACT_SHA_AUDITED=1
 WATCHER_UNIT=deploy-watcher.service
 
-case "$PRE_PROD_SHA:$CANDIDATE_SHA" in
-  *[!0-9a-f:]*|'') exit 1 ;;
-esac
+for sha in "$PRE_PROD_SHA" "$CANDIDATE_SHA" "$ROLLBACK_COMMIT"; do
+  case "$sha" in ????????-*) exit 1 ;; esac
+  test "${#sha}" -eq 40
+  case "$sha" in *[!0-9a-f]*) exit 1 ;; esac
+done
+test "$WATCHER_AUDIT_OK" -eq 1
+test "$WATCHER_EXACT_SHA_AUDITED" -eq 1
+[[ "$WATCHER_DEPLOY_MARKER" =~ ^[A-Za-z0-9_.:=-]+([[:space:]][A-Za-z0-9_.:=-]+)*$ ]]
 
 PROD_DIR="$(sudo -n systemctl show "$WATCHER_UNIT" \
   --property=WorkingDirectory --value)"
 test -n "$PROD_DIR"
 test -d "$PROD_DIR/.git"
 cd "$PROD_DIR"
-
 git fetch origin prod
 test "$(git rev-parse origin/prod)" = "$PRE_PROD_SHA"
 test "$(git branch --show-current)" = prod
 test -z "$(git status --porcelain)"
 
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/restaurant-mini-app/rollbacks"
+mkdir -p "$STATE_ROOT"
+chmod 700 "$STATE_ROOT"
+ROLLBACK_KEY="staff-tables-${PRE_PROD_SHA:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
+ROLLBACK_DIR="$STATE_ROOT/$ROLLBACK_KEY"
+PRE_PROD_SOURCE="$ROLLBACK_DIR/pre-prod-source"
+mkdir -p "$PRE_PROD_SOURCE"
+chmod 700 "$ROLLBACK_DIR" "$PRE_PROD_SOURCE"
+case "$ROLLBACK_DIR/" in "$PROD_DIR"/*) exit 1 ;; esac
+
+git archive "$PRE_PROD_SHA" | tar -xf - -C "$PRE_PROD_SOURCE"
+chmod -R go-rwx "$PRE_PROD_SOURCE"
+test -f "$PRE_PROD_SOURCE/docker-compose.yml"
+test -f "$PRE_PROD_SOURCE/Caddyfile"
+cmp "$PRE_PROD_SOURCE/docker-compose.yml" \
+  <(git show "$PRE_PROD_SHA:docker-compose.yml")
+cmp "$PRE_PROD_SOURCE/Caddyfile" <(git show "$PRE_PROD_SHA:Caddyfile")
+test ! -e "$PRE_PROD_SOURCE/.env"
+ln -s "$PROD_DIR/.env" "$PRE_PROD_SOURCE/.env"
+test "$(readlink -f "$PRE_PROD_SOURCE/.env")" = \
+  "$(readlink -f "$PROD_DIR/.env")"
+
+COMPOSE_PROJECT_NAME="$(docker inspect --format \
+  '{{index .Config.Labels "com.docker.compose.project"}}' restaurant_backend)"
+test -n "$COMPOSE_PROJECT_NAME"
+for mapping in \
+  backend:restaurant_backend \
+  frontend:restaurant_frontend \
+  caddy:restaurant_caddy \
+  cloudflared:restaurant_cloudflared
+do
+  SERVICE_NAME="${mapping%%:*}"
+  CONTAINER_NAME="${mapping#*:}"
+  test "$(docker inspect --format \
+    '{{index .Config.Labels "com.docker.compose.project"}}' "$CONTAINER_NAME")" = \
+    "$COMPOSE_PROJECT_NAME"
+  test "$(docker inspect --format \
+    '{{index .Config.Labels "com.docker.compose.service"}}' "$CONTAINER_NAME")" = \
+    "$SERVICE_NAME"
+done
+
 BACKEND_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_backend)"
 FRONTEND_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_frontend)"
+CADDY_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_caddy)"
+CLOUDFLARED_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_cloudflared)"
 BACKEND_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_backend)"
 FRONTEND_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_frontend)"
+CADDY_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_caddy)"
+CLOUDFLARED_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_cloudflared)"
+BACKEND_CONTAINER_ID="$(docker inspect --format '{{.Id}}' restaurant_backend)"
+FRONTEND_CONTAINER_ID="$(docker inspect --format '{{.Id}}' restaurant_frontend)"
+CADDY_CONTAINER_ID="$(docker inspect --format '{{.Id}}' restaurant_caddy)"
+CLOUDFLARED_CONTAINER_ID="$(docker inspect --format '{{.Id}}' restaurant_cloudflared)"
+POSTGRES_CONTAINER_ID="$(docker inspect --format '{{.Id}}' restaurant_postgres)"
 
-test -n "$BACKEND_COMPOSE_IMAGE"
-test -n "$FRONTEND_COMPOSE_IMAGE"
-COMPOSE_IMAGES="$(docker compose config --images)"
-printf '%s\n' "$COMPOSE_IMAGES" | rg -Fx -- "$BACKEND_COMPOSE_IMAGE"
-printf '%s\n' "$COMPOSE_IMAGES" | rg -Fx -- "$FRONTEND_COMPOSE_IMAGE"
+for id in "$BACKEND_IMAGE_ID" "$FRONTEND_IMAGE_ID" "$CADDY_IMAGE_ID" \
+  "$CLOUDFLARED_IMAGE_ID"; do
+  case "$id" in sha256:*) ;; *) exit 1 ;; esac
+done
+
+COMPOSE_IMAGES="$(docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PROD_DIR" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PROD_DIR/docker-compose.yml" config --images)"
+for image in "$BACKEND_COMPOSE_IMAGE" "$FRONTEND_COMPOSE_IMAGE" \
+  "$CADDY_COMPOSE_IMAGE" "$CLOUDFLARED_COMPOSE_IMAGE"; do
+  printf '%s\n' "$COMPOSE_IMAGES" | rg -Fx -- "$image" >/dev/null
+done
 unset COMPOSE_IMAGES
-case "$BACKEND_IMAGE_ID:$FRONTEND_IMAGE_ID" in
-  sha256:*:sha256:*) ;;
-  *) exit 1 ;;
-esac
 
-ROLLBACK_KEY="staff-tables-${PRE_PROD_SHA%%????????????????????????????}-$(date -u +%Y%m%dT%H%M%SZ)"
+test "$(docker inspect --format '{{len .Config.Cmd}}' restaurant_cloudflared)" -eq 7
+test "$(docker inspect --format '{{index .Config.Cmd 2}}' restaurant_cloudflared)" = --protocol
+test "$(docker inspect --format '{{index .Config.Cmd 3}}' restaurant_cloudflared)" = quic
+test "$(docker inspect --format '{{index .Config.Cmd 5}}' restaurant_cloudflared)" = --token
+
 BACKEND_ROLLBACK_TAG="restaurant-release-rollback/backend:$ROLLBACK_KEY"
 FRONTEND_ROLLBACK_TAG="restaurant-release-rollback/frontend:$ROLLBACK_KEY"
-
+CADDY_ROLLBACK_TAG="restaurant-release-rollback/caddy:$ROLLBACK_KEY"
+CLOUDFLARED_ROLLBACK_TAG="restaurant-release-rollback/cloudflared:$ROLLBACK_KEY"
 docker image tag "$BACKEND_IMAGE_ID" "$BACKEND_ROLLBACK_TAG"
 docker image tag "$FRONTEND_IMAGE_ID" "$FRONTEND_ROLLBACK_TAG"
-test "$(docker image inspect --format '{{.Id}}' "$BACKEND_ROLLBACK_TAG")" = "$BACKEND_IMAGE_ID"
-test "$(docker image inspect --format '{{.Id}}' "$FRONTEND_ROLLBACK_TAG")" = "$FRONTEND_IMAGE_ID"
+docker image tag "$CADDY_IMAGE_ID" "$CADDY_ROLLBACK_TAG"
+docker image tag "$CLOUDFLARED_IMAGE_ID" "$CLOUDFLARED_ROLLBACK_TAG"
 
-ROLLBACK_DIR="$PROD_DIR/.release-rollback/$ROLLBACK_KEY"
-mkdir -p "$ROLLBACK_DIR"
-cat > "$ROLLBACK_DIR/images.env" <<EOF
-PRE_PROD_SHA=$PRE_PROD_SHA
-CANDIDATE_SHA=$CANDIDATE_SHA
-BACKEND_COMPOSE_IMAGE=$BACKEND_COMPOSE_IMAGE
-FRONTEND_COMPOSE_IMAGE=$FRONTEND_COMPOSE_IMAGE
-BACKEND_IMAGE_ID=$BACKEND_IMAGE_ID
-FRONTEND_IMAGE_ID=$FRONTEND_IMAGE_ID
-BACKEND_ROLLBACK_TAG=$BACKEND_ROLLBACK_TAG
-FRONTEND_ROLLBACK_TAG=$FRONTEND_ROLLBACK_TAG
+for pair in \
+  "$BACKEND_ROLLBACK_TAG|$BACKEND_IMAGE_ID" \
+  "$FRONTEND_ROLLBACK_TAG|$FRONTEND_IMAGE_ID" \
+  "$CADDY_ROLLBACK_TAG|$CADDY_IMAGE_ID" \
+  "$CLOUDFLARED_ROLLBACK_TAG|$CLOUDFLARED_IMAGE_ID"
+do
+  TAG="${pair%%|*}"
+  IMAGE_ID="${pair#*|}"
+  test "$(docker image inspect --format '{{.Id}}' "$TAG")" = "$IMAGE_ID"
+done
+
+ROLLBACK_OVERRIDE="$ROLLBACK_DIR/rollback-images.yml"
+cat > "$ROLLBACK_OVERRIDE" <<EOF
+services:
+  backend:
+    image: $BACKEND_ROLLBACK_TAG
+  frontend:
+    image: $FRONTEND_ROLLBACK_TAG
+  caddy:
+    image: $CADDY_ROLLBACK_TAG
+  cloudflared:
+    image: $CLOUDFLARED_ROLLBACK_TAG
 EOF
-chmod 600 "$ROLLBACK_DIR/images.env"
+chmod 600 "$ROLLBACK_OVERRIDE"
 
-docker compose --dry-run up -d --no-build --force-recreate backend frontend >/dev/null
+REMOTE_RELEASE_STATE="$ROLLBACK_DIR/release.env"
+for variable in \
+  PRE_PROD_SHA CANDIDATE_SHA ROLLBACK_COMMIT PROD_DIR COMPOSE_PROJECT_NAME \
+  ROLLBACK_DIR PRE_PROD_SOURCE ROLLBACK_OVERRIDE WATCHER_DEPLOY_MARKER \
+  BACKEND_COMPOSE_IMAGE FRONTEND_COMPOSE_IMAGE CADDY_COMPOSE_IMAGE \
+  CLOUDFLARED_COMPOSE_IMAGE BACKEND_IMAGE_ID FRONTEND_IMAGE_ID \
+  CADDY_IMAGE_ID CLOUDFLARED_IMAGE_ID BACKEND_CONTAINER_ID \
+  FRONTEND_CONTAINER_ID CADDY_CONTAINER_ID CLOUDFLARED_CONTAINER_ID \
+  POSTGRES_CONTAINER_ID BACKEND_ROLLBACK_TAG FRONTEND_ROLLBACK_TAG \
+  CADDY_ROLLBACK_TAG CLOUDFLARED_ROLLBACK_TAG
+do
+  printf '%s=%q\n' "$variable" "${!variable}"
+done > "$REMOTE_RELEASE_STATE"
+chmod 600 "$REMOTE_RELEASE_STATE"
+
+REMOTE_POINTER="$STATE_ROOT/current-staff-tables.env"
+printf 'ROLLBACK_DIR=%q\n' "$ROLLBACK_DIR" > "$REMOTE_POINTER"
+chmod 600 "$REMOTE_POINTER"
+
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PRE_PROD_SOURCE" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PRE_PROD_SOURCE/docker-compose.yml" \
+  -f "$ROLLBACK_OVERRIDE" \
+  --dry-run up -d --no-build --force-recreate --no-deps \
+  backend frontend caddy cloudflared >/dev/null
 ```
 
-The rollback file contains no application secret. Record its path, Compose
-image names, immutable IDs, and tags. If the unique tags do not resolve to the
-saved immutable IDs, the watcher cannot be paused, or the exact no-build dry
-run is unsupported, stop. Do not proceed on the theory that an old tag can be
-reconstructed later.
+The rollback directory is mode 700, every state file is mode 600, and the
+archived source, Compose project name, old service image/container IDs, unique
+tags, Caddyfile, and pre-release `quic` command are recorded outside
+`PROD_DIR`. The dry run uses that exact PRE_PROD source, the current production
+`.env`, the exact Compose project, and all four non-database services. If any
+mapping, permission, tag, command shape, or dry run fails, stop. PostgreSQL is
+never included and `--no-deps` prevents Compose from recreating it.
+
+At the start of every later **Terminal B — WSL** block, re-establish and test
+the complete remote context with this preamble:
+
+```bash
+set -euo pipefail
+set +x
+umask 077
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/restaurant-mini-app/rollbacks"
+REMOTE_POINTER="$STATE_ROOT/current-staff-tables.env"
+test -r "$REMOTE_POINTER"
+source "$REMOTE_POINTER"
+test -d "$ROLLBACK_DIR"
+test -r "$ROLLBACK_DIR/release.env"
+source "$ROLLBACK_DIR/release.env"
+test -d "$PROD_DIR/.git"
+test -d "$PRE_PROD_SOURCE"
+test -n "$WATCHER_DEPLOY_MARKER"
+test "${#ROLLBACK_COMMIT}" -eq 40
+case "$ROLLBACK_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+```
 
 ## 4. Verify production configuration without printing values
 
 ### LIVE / MANUAL
 
-Run in the same WSL production shell. This prints only a success marker:
+Run in **Terminal B — WSL**. First run the complete remote-context preamble at
+the end of Section 3, then run this block. It prints only a success marker:
 
 ```bash
 set -euo pipefail
@@ -389,6 +608,7 @@ test -z "${INPLACE_ONLINE_PAYMENT_TEST_TELEGRAM_IDS:-}"
 if [ -z "${BOOTSTRAP_ADMIN_TELEGRAM_IDS:-}" ]; then
   DURABLE_ADMIN_REQUIRED=1
 else
+  [[ "$BOOTSTRAP_ADMIN_TELEGRAM_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
   DURABLE_ADMIN_REQUIRED=0
 fi
 
@@ -403,9 +623,11 @@ and its tester allowlist is empty. If the gate is to be enabled later, that is
 a separate controlled rollout.
 
 There must also be a controlled admin path: either a durable admin already
-exists or a narrowly controlled bootstrap admin input is present. The `role`
-column does not exist until the first migration is applied, so run the
-aggregate-only durable-admin check in Section 5, not here. Do not record
+exists or a narrowly controlled bootstrap admin input is present. A nonempty
+bootstrap value must have the application's comma-separated positive-integer
+shape; invalid or partially ignored input blocks release without printing it.
+The `role` column does not exist until the first migration is applied, so run
+the aggregate-only durable-admin check in Section 5, not here. Do not record
 bootstrap IDs. If bootstrap is needed, the controlled admin must authenticate
 after deployment, become durable, and broad bootstrap input must not be left
 configured longer than necessary.
@@ -419,7 +641,9 @@ recreates `uq_orders_one_active_delivery_per_staff`; index recreation takes a
 database lock. Do not apply it during a delivery surge, and do not interrupt or
 blindly retry it while DDL is in progress.
 
-Pause the watcher and prove that `prod` has not moved:
+In **Terminal A — LOCAL**, source and verify `LOCAL_RELEASE_STATE` as described
+in Section 1. Pause the watcher through explicit SSH/WSL context and prove that
+`prod` has not moved:
 
 ```bash
 ssh restaurant 'wsl bash -lc '\''
@@ -452,13 +676,17 @@ done
 ```
 
 Do not run any of these production migrations a second time in this release.
-Verify schema metadata only:
+Verify and compare full schema definitions, not names only. The first three
+queries output the actual definitions for the release record; the final block
+raises an error on a column shape or structural index/constraint mismatch:
 
 ```bash
 ssh restaurant \
   'wsl docker exec -i restaurant_postgres sh -lc '\''psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'\''' \
   <<'SQL'
-SELECT table_name, column_name, data_type, is_nullable
+SELECT table_name, column_name, data_type, column_default,
+       character_maximum_length, numeric_precision, numeric_scale,
+       datetime_precision, is_nullable
 FROM information_schema.columns
 WHERE (table_name = 'users' AND column_name = 'role')
    OR (table_name = 'orders' AND column_name IN (
@@ -472,11 +700,11 @@ WHERE (table_name = 'users' AND column_name = 'role')
    ))
 ORDER BY table_name, column_name;
 
-SELECT conname
+SELECT conname, pg_get_constraintdef(oid, true) AS constraint_definition
 FROM pg_constraint
 WHERE conname = 'ck_users_role_valid';
 
-SELECT indexname
+SELECT indexname, indexdef
 FROM pg_indexes
 WHERE schemaname = 'public'
   AND indexname IN (
@@ -491,15 +719,141 @@ WHERE schemaname = 'public'
     'idx_orders_inplace_workspace'
   )
 ORDER BY indexname;
+
+DO $$
+DECLARE
+  mismatch_count integer;
+BEGIN
+  WITH expected(
+    table_name, column_name, data_type, nullable, char_length,
+    numeric_precision, numeric_scale, datetime_precision, default_kind
+  ) AS (VALUES
+    ('users', 'role', 'character varying', 'NO', 32, NULL, NULL, NULL, 'customer'),
+    ('orders', 'assigned_staff_id', 'bigint', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'assigned_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
+    ('orders', 'delivered_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
+    ('orders', 'items_cost', 'numeric', 'NO', NULL, 12, 2, NULL, 'zero'),
+    ('orders', 'delivery_info', 'jsonb', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'table_id', 'uuid', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'table_title', 'character varying', 'YES', 100, NULL, NULL, NULL, 'none'),
+    ('orders', 'hall_id', 'uuid', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'hall_title', 'character varying', 'YES', 100, NULL, NULL, NULL, 'none'),
+    ('orders', 'service_percent', 'numeric', 'NO', NULL, 5, 2, NULL, 'zero'),
+    ('orders', 'table_access_expires_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
+    ('orders', 'alipos_sync_status', 'character varying', 'YES', 32, NULL, NULL, NULL, 'none'),
+    ('orders', 'alipos_sync_error', 'text', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'cancel_requested_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
+    ('orders', 'client_request_id', 'uuid', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'refund_sync_status', 'character varying', 'YES', 32, NULL, NULL, NULL, 'none'),
+    ('orders', 'refund_sync_error', 'text', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'alipos_status_check_attempted_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
+    ('orders', 'alipos_status_checked_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none')
+  ), actual AS (
+    SELECT table_name, column_name, data_type, is_nullable,
+           character_maximum_length, numeric_precision, numeric_scale,
+           datetime_precision, column_default
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+  )
+  SELECT count(*) INTO mismatch_count
+  FROM expected e
+  LEFT JOIN actual a USING (table_name, column_name)
+  WHERE a.column_name IS NULL
+     OR a.data_type <> e.data_type
+     OR a.is_nullable <> e.nullable
+     OR a.character_maximum_length IS DISTINCT FROM e.char_length
+     OR (e.data_type = 'numeric' AND (
+       a.numeric_precision IS DISTINCT FROM e.numeric_precision
+       OR a.numeric_scale IS DISTINCT FROM e.numeric_scale
+     ))
+     OR a.datetime_precision IS DISTINCT FROM e.datetime_precision
+     OR (e.default_kind = 'none' AND a.column_default IS NOT NULL)
+     OR (e.default_kind = 'customer' AND
+       a.column_default IS DISTINCT FROM '''customer''::character varying')
+     OR (e.default_kind = 'zero' AND
+       regexp_replace(coalesce(a.column_default, ''),
+         '[()''.:[:space:]]', '', 'g')
+         NOT IN ('0', '0numeric'));
+
+  IF mismatch_count <> 0 THEN
+    RAISE EXCEPTION 'release column definition mismatch count=%', mismatch_count;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    WHERE c.conname = 'ck_users_role_valid'
+      AND t.relname = 'users'
+      AND c.contype = 'c'
+      AND pg_get_constraintdef(c.oid, true) LIKE 'CHECK%'
+      AND pg_get_constraintdef(c.oid, true) LIKE '%role%'
+      AND pg_get_constraintdef(c.oid, true) LIKE '%customer%'
+      AND pg_get_constraintdef(c.oid, true) LIKE '%staff%'
+      AND pg_get_constraintdef(c.oid, true) LIKE '%admin%'
+  ) THEN
+    RAISE EXCEPTION 'role constraint definition mismatch';
+  END IF;
+
+  WITH expected(index_name, is_unique, columns, predicate_tokens) AS (VALUES
+    ('idx_orders_assigned_staff_id', false, 'assigned_staff_id', NULL),
+    ('idx_orders_delivered_at', false, 'delivered_at', NULL),
+    ('idx_orders_staff_available', false, 'status, assigned_staff_id, discriminator', NULL),
+    ('uq_orders_one_active_delivery_per_staff', true, 'assigned_staff_id',
+      'assigned_staff_id|delivery|delivered_at|DELIVERED|CANCELLED|CANCELED'),
+    ('idx_orders_table_id', false, 'table_id', NULL),
+    ('idx_orders_alipos_sync_status', false, 'alipos_sync_status', NULL),
+    ('idx_orders_refund_sync_status', false, 'refund_sync_status', NULL),
+    ('uq_orders_user_request', true, 'user_id, client_request_id', 'client_request_id'),
+    ('idx_orders_inplace_workspace', false,
+      'table_id, alipos_sync_status, status, alipos_status_check_attempted_at',
+      'discriminator|inplace')
+  ), actual AS (
+    SELECT i.relname AS index_name, x.indisunique AS is_unique,
+           string_agg(pg_get_indexdef(i.oid, s.n, true), ', ' ORDER BY s.n) AS columns,
+           coalesce(pg_get_expr(x.indpred, x.indrelid), '') AS predicate
+    FROM pg_index x
+    JOIN pg_class i ON i.oid = x.indexrelid
+    JOIN pg_class t ON t.oid = x.indrelid AND t.relname = 'orders'
+    CROSS JOIN LATERAL generate_series(1, x.indnkeyatts) AS s(n)
+    WHERE i.relname IN (
+      'idx_orders_assigned_staff_id', 'idx_orders_delivered_at',
+      'idx_orders_staff_available', 'uq_orders_one_active_delivery_per_staff',
+      'idx_orders_table_id', 'idx_orders_alipos_sync_status',
+      'idx_orders_refund_sync_status', 'uq_orders_user_request',
+      'idx_orders_inplace_workspace'
+    )
+    GROUP BY i.relname, x.indisunique, x.indpred, x.indrelid
+  )
+  SELECT count(*) INTO mismatch_count
+  FROM expected e
+  LEFT JOIN actual a USING (index_name)
+  WHERE a.index_name IS NULL
+     OR a.is_unique <> e.is_unique
+     OR a.columns <> e.columns
+     OR (e.predicate_tokens IS NULL AND a.predicate <> '')
+     OR (e.predicate_tokens IS NOT NULL AND EXISTS (
+       SELECT 1
+       FROM unnest(string_to_array(e.predicate_tokens, '|')) token
+       WHERE position(token IN a.predicate) = 0
+     ));
+
+  IF mismatch_count <> 0 THEN
+    RAISE EXCEPTION 'release index definition mismatch count=%', mismatch_count;
+  END IF;
+END $$;
 SQL
 ```
 
-Compare the metadata output with all three migration files. If any column,
-constraint, or index is absent, stop with the watcher paused. Do not push
-`prod`. Diagnose the migration without dumping data or environments.
+Compare the emitted defaults, lengths, precision/scale, nullability,
+`pg_get_constraintdef`, and complete `indexdef` text with all three reviewed
+migration files. The catalog assertions are a second executable check, not a
+replacement for that comparison. On any mismatch, stop with the watcher
+paused. Do not push `prod` or dump data/environments.
 
-Now verify the controlled-admin path after the `role` column exists. Run in
-the same WSL production checkout; this prints only an aggregate count:
+Now verify the controlled-admin path after the `role` column exists. In
+**Terminal B — WSL**, first run the Section 3 remote-context preamble, then run
+this block. It prints only an aggregate count:
 
 ```bash
 set -a
@@ -509,6 +863,7 @@ set +a
 if [ -z "${BOOTSTRAP_ADMIN_TELEGRAM_IDS:-}" ]; then
   DURABLE_ADMIN_REQUIRED=1
 else
+  [[ "$BOOTSTRAP_ADMIN_TELEGRAM_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
   DURABLE_ADMIN_REQUIRED=0
 fi
 unset BOOTSTRAP_ADMIN_TELEGRAM_IDS
@@ -537,8 +892,10 @@ The old application containers remain running while the watcher is paused.
 
 ### LOCAL, then LIVE / MANUAL
 
-Recheck the remote and push exactly the clean pinned commit as a non-force
-fast-forward. Migration completion is a prerequisite for this command:
+In **Terminal A — LOCAL**, source and verify `LOCAL_RELEASE_STATE` as described
+in Section 1. Recheck the remote and push exactly the clean pinned commit as a
+non-force fast-forward. Migration completion is a prerequisite. This is the
+only normal production push in the runbook:
 
 ```bash
 git fetch origin prod
@@ -550,38 +907,53 @@ git merge-base --is-ancestor "$PRE_PROD_SHA" "$CANDIDATE_SHA"
 git push origin "$CANDIDATE_SHA:refs/heads/prod"
 ```
 
-Find and watch only the `CI` push run whose `headSha` equals the pinned
-candidate:
+Discover the exact candidate run with a ten-minute bound, watch it, and assert
+each named job separately:
 
 ```bash
 REPO=khajiev13/restaurant-mini-app
-RUN_ID="$(gh run list \
-  --repo "$REPO" \
-  --workflow CI \
-  --branch prod \
-  --event push \
-  --limit 20 \
-  --json databaseId,headSha \
-  --jq ".[] | select(.headSha == \"$CANDIDATE_SHA\") | .databaseId" \
-  | head -n 1)"
-
+RUN_DISCOVERY_DEADLINE=$(( $(date +%s) + 600 ))
+RUN_ID=''
+while [ "$(date +%s)" -lt "$RUN_DISCOVERY_DEADLINE" ]; do
+  RUN_ID="$(gh run list \
+    --repo "$REPO" \
+    --workflow CI \
+    --branch prod \
+    --event push \
+    --limit 100 \
+    --json databaseId,headSha \
+    --jq "map(select(.headSha == \"$CANDIDATE_SHA\")) \
+      | max_by(.databaseId).databaseId // empty")"
+  [ -n "$RUN_ID" ] && break
+  sleep 10
+done
 test -n "$RUN_ID"
 test "$(gh run view "$RUN_ID" --repo "$REPO" --json headSha --jq .headSha)" = "$CANDIDATE_SHA"
 gh run watch "$RUN_ID" --repo "$REPO" --exit-status
 test "$(gh run view "$RUN_ID" --repo "$REPO" --json conclusion --jq .conclusion)" = success
+
+for job in 'Backend Tests' 'Frontend Tests'; do
+  test "$(gh run view "$RUN_ID" --repo "$REPO" --json jobs \
+    --jq "[.jobs[] | select(.name == \"$job\" and .conclusion == \"success\")] | length")" -eq 1
+done
 ```
 
 If CI fails, keep the watcher paused and execute the non-force rollback-commit
 portion of Section 10 before resuming it. Never deploy a different SHA because
 its CI happened to be green.
 
-Immediately before resuming the watcher, record a UTC deployment wait start:
+In **Terminal B — WSL**, run the Section 3 remote-context preamble. Record the
+UTC deployment wait start in the protected remote state file; do not rely on a
+variable from another terminal:
 
 ```bash
-export DEPLOY_WAIT_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+DEPLOY_WAIT_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'DEPLOY_WAIT_START=%q\n' "$DEPLOY_WAIT_START" >> "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
 ```
 
-Resume the watcher. Do not invoke Docker Compose or `start.sh` yourself:
+From **Terminal A — LOCAL**, resume the watcher through explicit SSH/WSL
+context. Do not invoke Docker Compose or `start.sh` yourself:
 
 ```bash
 ssh restaurant 'wsl bash -lc '\''
@@ -592,17 +964,39 @@ sudo -n systemctl is-active --quiet deploy-watcher.service
 '\'''
 ```
 
-Wait for the watcher to finish its one CI-gated build, then verify the exact
-checkout and healthy containers in WSL:
+In **Terminal B — WSL**, rerun the Section 3 remote-context preamble, which now
+also re-establishes `DEPLOY_WAIT_START`. Poll for at most 20 minutes until the
+checkout, remote branch, and every expected service state converge together:
 
 ```bash
 cd "$PROD_DIR"
-test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-test "$(git rev-parse origin/prod)" = "$CANDIDATE_SHA"
+test -n "$DEPLOY_WAIT_START"
+DEPLOY_DEADLINE=$(( $(date +%s) + 1200 ))
+DEPLOY_READY=0
+while [ "$(date +%s)" -lt "$DEPLOY_DEADLINE" ]; do
+  git fetch origin prod
+  CHECKOUT_SHA="$(git rev-parse HEAD)"
+  REMOTE_SHA="$(git rev-parse origin/prod)"
+  POSTGRES_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_postgres 2>/dev/null || true)"
+  BACKEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend 2>/dev/null || true)"
+  FRONTEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend 2>/dev/null || true)"
+  CADDY_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy 2>/dev/null || true)"
+  CLOUDFLARED_RUNNING="$(docker inspect --format '{{.State.Running}}' restaurant_cloudflared 2>/dev/null || true)"
 
-test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend)" = healthy
-test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend)" = healthy
-test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy)" = healthy
+  if [ "$CHECKOUT_SHA" = "$CANDIDATE_SHA" ] \
+    && [ "$REMOTE_SHA" = "$CANDIDATE_SHA" ] \
+    && [ "$POSTGRES_HEALTH" = healthy ] \
+    && [ "$BACKEND_HEALTH" = healthy ] \
+    && [ "$FRONTEND_HEALTH" = healthy ] \
+    && [ "$CADDY_HEALTH" = healthy ] \
+    && [ "$CLOUDFLARED_RUNNING" = true ]; then
+    DEPLOY_READY=1
+    break
+  fi
+  sleep 10
+done
+test "$DEPLOY_READY" -eq 1
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
 
 curl -fsS http://127.0.0.1:8080/healthz >/dev/null
 curl -fsS http://127.0.0.1:8080/api/health >/dev/null
@@ -616,12 +1010,65 @@ curl -fsS "${PUBLIC_APP_URL%/}/api/health" >/dev/null
 unset PUBLIC_APP_URL
 ```
 
-Count the privacy-safe watcher cycle marker identified in preflight between
-`DEPLOY_WAIT_START` and now. The aggregate must be exactly one; do not retain
-raw journal output:
+Capture each post-deploy Compose image name and immutable running image ID.
+Verify the four names against the candidate Compose mapping, verify each name
+resolves to the running ID, require backend/frontend to differ from their
+rollback IDs, and safely assert `http2` without reading the token argument:
+
+```bash
+NEW_BACKEND_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_backend)"
+NEW_FRONTEND_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_frontend)"
+NEW_CADDY_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_caddy)"
+NEW_CLOUDFLARED_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_cloudflared)"
+NEW_BACKEND_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_backend)"
+NEW_FRONTEND_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_frontend)"
+NEW_CADDY_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_caddy)"
+NEW_CLOUDFLARED_IMAGE_ID="$(docker inspect --format '{{.Image}}' restaurant_cloudflared)"
+
+CANDIDATE_COMPOSE_IMAGES="$(docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PROD_DIR" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PROD_DIR/docker-compose.yml" config --images)"
+for pair in \
+  "$NEW_BACKEND_COMPOSE_IMAGE|$NEW_BACKEND_IMAGE_ID" \
+  "$NEW_FRONTEND_COMPOSE_IMAGE|$NEW_FRONTEND_IMAGE_ID" \
+  "$NEW_CADDY_COMPOSE_IMAGE|$NEW_CADDY_IMAGE_ID" \
+  "$NEW_CLOUDFLARED_COMPOSE_IMAGE|$NEW_CLOUDFLARED_IMAGE_ID"
+do
+  IMAGE_NAME="${pair%%|*}"
+  RUNNING_ID="${pair#*|}"
+  printf '%s\n' "$CANDIDATE_COMPOSE_IMAGES" | rg -Fx -- "$IMAGE_NAME" >/dev/null
+  test "$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME")" = "$RUNNING_ID"
+done
+unset CANDIDATE_COMPOSE_IMAGES
+test "$NEW_BACKEND_IMAGE_ID" != "$BACKEND_IMAGE_ID"
+test "$NEW_FRONTEND_IMAGE_ID" != "$FRONTEND_IMAGE_ID"
+
+test "$(docker inspect --format '{{len .Config.Cmd}}' restaurant_cloudflared)" -eq 7
+test "$(docker inspect --format '{{index .Config.Cmd 2}}' restaurant_cloudflared)" = --protocol
+test "$(docker inspect --format '{{index .Config.Cmd 3}}' restaurant_cloudflared)" = http2
+test "$(docker inspect --format '{{index .Config.Cmd 5}}' restaurant_cloudflared)" = --token
+
+for variable in \
+  NEW_BACKEND_COMPOSE_IMAGE NEW_FRONTEND_COMPOSE_IMAGE \
+  NEW_CADDY_COMPOSE_IMAGE NEW_CLOUDFLARED_COMPOSE_IMAGE \
+  NEW_BACKEND_IMAGE_ID NEW_FRONTEND_IMAGE_ID NEW_CADDY_IMAGE_ID \
+  NEW_CLOUDFLARED_IMAGE_ID
+do
+  printf '%s=%q\n' "$variable" "${!variable}"
+done >> "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
+```
+
+Count the audited privacy-safe watcher marker between the persisted start and
+end. The aggregate must be exactly one; the raw journal never reaches the
+terminal or a file:
 
 ```bash
 DEPLOY_WAIT_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'DEPLOY_WAIT_END=%q\n' "$DEPLOY_WAIT_END" >> "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
 test -n "${WATCHER_DEPLOY_MARKER:-}"
 DEPLOY_CYCLES="$(sudo -n journalctl \
   -u deploy-watcher.service \
@@ -635,9 +1082,10 @@ printf 'watcher_deploy_cycles=%s\n' "$DEPLOY_CYCLES"
 
 The variable must contain the exact marker verified in Section 3. An unset or
 unsafe marker, two cycles, wrong checkout SHA, unhealthy container, or failed
-local/public health check blocks acceptance and triggers rollback. Record the
-new backend/frontend `Config.Image` names and immutable IDs without inspecting
-environments.
+local/public health check blocks acceptance and triggers rollback. The
+post-deploy capture proves the running four-service mapping, the two rebuilt
+application images, and the protocol change without printing the token-bearing
+cloudflared command.
 
 ## 7. Read-only smoke tests before the watch
 
@@ -673,6 +1121,22 @@ Before `WATCH_START`:
    staff Delivery pages still load normally. Do not create, assign, deliver,
    cancel, refund, or pay for an order as part of this release smoke.
 
+Run the responsive workspace smoke as the full 3-by-3 matrix below, not one
+representative width. For every cell, inspect Tables overview, one table
+detail, and browse-only Menu:
+
+| Locale | 320 px | 375 px | 430 px |
+| --- | --- | --- | --- |
+| English (`en`) | pass/fail | pass/fail | pass/fail |
+| Russian (`ru`) | pass/fail | pass/fail | pass/fail |
+| Uzbek (`uz`) | pass/fail | pass/fail | pass/fail |
+
+At each width, require no horizontal page scroll, clipped status/price text,
+overlap, hidden order boundary, or inaccessible control. Verify toggle,
+filters, table rows/cards, refresh, and navigation remain keyboard/touch
+reachable with at least 44-by-44-pixel targets. Record only the nine pass/fail
+results; screenshots and response/request details remain prohibited.
+
 Browser Network is authoritative for the controlled 403/5xx result. Uvicorn
 access-log counts are only an aggregate cross-check.
 
@@ -680,8 +1144,9 @@ access-log counts are only an aggregate cross-check.
 
 ### LIVE / MANUAL
 
-Use a stable provider window. Do not manufacture a production outage, clear
-the directory cache, or induce an empty directory.
+Use a stable provider window. In **Terminal B — WSL**, first run the Section 3
+remote-context preamble. Do not manufacture a production outage, clear the
+directory cache, or induce an empty directory.
 
 In WSL, define an eligible-set snapshot that emits a count and SHA-256
 fingerprint only. Raw order IDs stream directly into `sha256sum`; they are
@@ -731,7 +1196,9 @@ case "$ELIGIBLE_START" in ''|*[!0-9]*) exit 1 ;; esac
 Immediately after that snapshot, set the exact UTC boundary:
 
 ```bash
-export WATCH_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+WATCH_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'WATCH_START=%q\n' "$WATCH_START" >> "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
 ```
 
 In both controlled staff and admin browsers, clear Console and Network so the
@@ -752,7 +1219,9 @@ At 15 minutes, set the end boundary before any other action and snapshot the
 eligible set again:
 
 ```bash
-export WATCH_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+WATCH_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'WATCH_END=%q\n' "$WATCH_END" >> "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
 IFS='|' read -r ELIGIBLE_END ELIGIBLE_FINGERPRINT_END \
   <<< "$(eligible_snapshot)"
 ```
@@ -778,9 +1247,10 @@ docker logs \
   --until "$WATCH_END" \
   restaurant_backend 2>&1 \
 | awk '
-  /staff_table_status_reconcile / {
-    if (match($0, /staff_table_status_reconcile claimed=[0-9]+ succeeded=[0-9]+ failed=[0-9]+ duration_ms=[0-9]+/)) {
+  /staff_table_status_reconcile/ {
+    if (match($0, /staff_table_status_reconcile claimed=[0-9]+ succeeded=[0-9]+ failed=[0-9]+ duration_ms=[0-9]+[[:space:]]*$/)) {
       safe = substr($0, RSTART, RLENGTH)
+      sub(/[[:space:]]+$/, "", safe)
       print safe
       reconcile_lines += 1
       split(safe, fields, " ")
@@ -825,6 +1295,12 @@ docker logs \
 Do not redirect `docker logs` before the sanitizer and do not retain shell
 scrollback containing anything other than its sanitized output. Record from
 the browsers only these aggregates:
+
+The sanitizer treats a line as valid only when the safe event ends at the
+duration digits, allowing logger-added trailing whitespace only. Any line that
+contains the marker but has a missing/reordered field, punctuation, or any
+content after the duration increments `reconcile_malformed`; raw malformed
+text is never printed.
 
 ```text
 controlled_workspace_reads=<n>
@@ -897,104 +1373,274 @@ rollback trigger unless accompanied by a functional failure.
 
 ## 10. Immediate rollback
 
-Rollback restores backend and frontend together. Leave all additive migration
-columns, constraints, and indexes in place. Schema removal is a separately
-reviewed maintenance change.
+Rollback restores backend, frontend, Caddy configuration, and the cloudflared
+`quic` command together from the archived PRE_PROD source. Leave all additive
+migration columns, constraints, and indexes in place; schema removal is a
+separately reviewed maintenance change.
 
-### LIVE / MANUAL: restore saved immutable images first
+### LIVE / MANUAL: immediate four-service no-build restore
 
-Pause the watcher before touching image tags:
-
-```bash
-sudo -n systemctl stop deploy-watcher.service
-! sudo -n systemctl is-active --quiet deploy-watcher.service
-```
-
-Load the protected mapping created before deployment and verify every value:
+From **Terminal A — LOCAL**, pause the watcher through explicit SSH/WSL
+context before touching containers:
 
 ```bash
+ssh restaurant 'wsl bash -lc '\''
 set -euo pipefail
 set +x
-cd "$PROD_DIR"
-source "$ROLLBACK_DIR/images.env"
-
-test "$(docker image inspect --format '{{.Id}}' "$BACKEND_ROLLBACK_TAG")" = "$BACKEND_IMAGE_ID"
-test "$(docker image inspect --format '{{.Id}}' "$FRONTEND_ROLLBACK_TAG")" = "$FRONTEND_IMAGE_ID"
-
-docker image tag "$BACKEND_ROLLBACK_TAG" "$BACKEND_COMPOSE_IMAGE"
-docker image tag "$FRONTEND_ROLLBACK_TAG" "$FRONTEND_COMPOSE_IMAGE"
-test "$(docker image inspect --format '{{.Id}}' "$BACKEND_COMPOSE_IMAGE")" = "$BACKEND_IMAGE_ID"
-test "$(docker image inspect --format '{{.Id}}' "$FRONTEND_COMPOSE_IMAGE")" = "$FRONTEND_IMAGE_ID"
-
-docker compose up -d --no-build --force-recreate backend frontend
+sudo -n systemctl stop deploy-watcher.service
+! sudo -n systemctl is-active --quiet deploy-watcher.service
+'\'''
 ```
 
-That is the only manual container recreation in the runbook. It must include
-`--no-build`. Verify restored health immediately:
+In **Terminal B — WSL**, run the Section 3 remote-context preamble. Verify the
+pre-created rollback identity, four unique image tags, archived sources,
+current `.env` link, Compose project, and unchanged PostgreSQL container. Then
+perform the one incident-only manual recreation:
 
 ```bash
-test "$(docker inspect --format '{{.Image}}' restaurant_backend)" = "$BACKEND_IMAGE_ID"
-test "$(docker inspect --format '{{.Image}}' restaurant_frontend)" = "$FRONTEND_IMAGE_ID"
+test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA"
+test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$CANDIDATE_SHA"
+test "${#ROLLBACK_COMMIT}" -eq 40
+case "$ROLLBACK_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+cmp "$PRE_PROD_SOURCE/docker-compose.yml" \
+  <(git -C "$PROD_DIR" show "$PRE_PROD_SHA:docker-compose.yml")
+cmp "$PRE_PROD_SOURCE/Caddyfile" \
+  <(git -C "$PROD_DIR" show "$PRE_PROD_SHA:Caddyfile")
+test "$(readlink -f "$PRE_PROD_SOURCE/.env")" = \
+  "$(readlink -f "$PROD_DIR/.env")"
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
+
+for pair in \
+  "$BACKEND_ROLLBACK_TAG|$BACKEND_IMAGE_ID" \
+  "$FRONTEND_ROLLBACK_TAG|$FRONTEND_IMAGE_ID" \
+  "$CADDY_ROLLBACK_TAG|$CADDY_IMAGE_ID" \
+  "$CLOUDFLARED_ROLLBACK_TAG|$CLOUDFLARED_IMAGE_ID"
+do
+  TAG="${pair%%|*}"
+  IMAGE_ID="${pair#*|}"
+  test "$(docker image inspect --format '{{.Id}}' "$TAG")" = "$IMAGE_ID"
+done
+
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PRE_PROD_SOURCE" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PRE_PROD_SOURCE/docker-compose.yml" \
+  -f "$ROLLBACK_OVERRIDE" \
+  up -d --no-build --force-recreate --no-deps \
+  backend frontend caddy cloudflared
+```
+
+`--no-deps` excludes PostgreSQL, and all four non-database services are
+explicit. Verify exact restored images, Compose labels, health, old Caddy
+source behavior, and the `quic` command without reading the token-bearing
+argument:
+
+```bash
+for mapping in \
+  "backend|restaurant_backend|$BACKEND_IMAGE_ID|$BACKEND_ROLLBACK_TAG" \
+  "frontend|restaurant_frontend|$FRONTEND_IMAGE_ID|$FRONTEND_ROLLBACK_TAG" \
+  "caddy|restaurant_caddy|$CADDY_IMAGE_ID|$CADDY_ROLLBACK_TAG" \
+  "cloudflared|restaurant_cloudflared|$CLOUDFLARED_IMAGE_ID|$CLOUDFLARED_ROLLBACK_TAG"
+do
+  SERVICE_NAME="${mapping%%|*}"
+  REST="${mapping#*|}"
+  CONTAINER_NAME="${REST%%|*}"
+  REST="${REST#*|}"
+  EXPECTED_ID="${REST%%|*}"
+  EXPECTED_NAME="${REST#*|}"
+  test "$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME")" = "$EXPECTED_ID"
+  test "$(docker inspect --format '{{.Config.Image}}' "$CONTAINER_NAME")" = "$EXPECTED_NAME"
+  test "$(docker inspect --format \
+    '{{index .Config.Labels "com.docker.compose.project"}}' "$CONTAINER_NAME")" = \
+    "$COMPOSE_PROJECT_NAME"
+  test "$(docker inspect --format \
+    '{{index .Config.Labels "com.docker.compose.service"}}' "$CONTAINER_NAME")" = \
+    "$SERVICE_NAME"
+done
+
+test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_postgres)" = healthy
 test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend)" = healthy
 test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend)" = healthy
+test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy)" = healthy
+test "$(docker inspect --format '{{.State.Running}}' restaurant_cloudflared)" = true
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
+test "$(docker inspect --format '{{len .Config.Cmd}}' restaurant_cloudflared)" -eq 7
+test "$(docker inspect --format '{{index .Config.Cmd 2}}' restaurant_cloudflared)" = --protocol
+test "$(docker inspect --format '{{index .Config.Cmd 3}}' restaurant_cloudflared)" = quic
+test "$(docker inspect --format '{{index .Config.Cmd 5}}' restaurant_cloudflared)" = --token
 
 curl -fsS http://127.0.0.1:8080/healthz >/dev/null
 curl -fsS http://127.0.0.1:8080/api/health >/dev/null
-
 set -a
-source .env
+source "$PROD_DIR/.env"
 set +a
+test -n "${PUBLIC_APP_URL:-}"
 curl -fsS "${PUBLIC_APP_URL%/}/healthz" >/dev/null
 curl -fsS "${PUBLIC_APP_URL%/}/api/health" >/dev/null
 unset PUBLIC_APP_URL
 ```
 
-### LOCAL: make `prod` a non-force rollback commit
+### LOCAL: push only the pre-created exact rollback SHA
 
-Do not reset or force-push `prod`. Create a new commit whose tree is exactly
-the old production tree and whose parent is the candidate:
+In **Terminal A — LOCAL**, source and verify `LOCAL_RELEASE_STATE`. Do not
+create another commit, reset, or force-push. Re-verify the recorded object's
+tree and parent, ensure remote `prod` is exactly the candidate, then push the
+pre-created non-force fast-forward rollback SHA:
 
 ```bash
 git fetch origin prod
 test "$(git rev-parse origin/prod)" = "$CANDIDATE_SHA"
-
-ROLLBACK_COMMIT="$(printf '%s\n' \
-  "rollback: restore production $PRE_PROD_SHA" \
-  | git commit-tree "$PRE_PROD_SHA^{tree}" -p "$CANDIDATE_SHA")"
-
 test "$(git rev-parse "$ROLLBACK_COMMIT^{tree}")" = \
   "$(git rev-parse "$PRE_PROD_SHA^{tree}")"
 test "$(git rev-parse "$ROLLBACK_COMMIT^1")" = "$CANDIDATE_SHA"
+git merge-base --is-ancestor "$CANDIDATE_SHA" "$ROLLBACK_COMMIT"
 
 git push origin "$ROLLBACK_COMMIT:refs/heads/prod"
 ```
 
-Find the `CI` push run whose `headSha` is exactly `ROLLBACK_COMMIT`, wait for
-both jobs to pass using the Section 6 `gh run list/view/watch` procedure, and
-keep the watcher paused throughout. After green CI, resume it:
+Keep the watcher paused. Discover only the rollback SHA's own `CI` push run
+with a ten-minute bound, watch it, and independently assert both named jobs:
 
 ```bash
-sudo -n systemctl start deploy-watcher.service
-sudo -n systemctl is-active --quiet deploy-watcher.service
+REPO=khajiev13/restaurant-mini-app
+ROLLBACK_RUN_DISCOVERY_DEADLINE=$(( $(date +%s) + 600 ))
+ROLLBACK_RUN_ID=''
+while [ "$(date +%s)" -lt "$ROLLBACK_RUN_DISCOVERY_DEADLINE" ]; do
+  ROLLBACK_RUN_ID="$(gh run list \
+    --repo "$REPO" \
+    --workflow CI \
+    --branch prod \
+    --event push \
+    --limit 100 \
+    --json databaseId,headSha \
+    --jq "map(select(.headSha == \"$ROLLBACK_COMMIT\")) \
+      | max_by(.databaseId).databaseId // empty")"
+  [ -n "$ROLLBACK_RUN_ID" ] && break
+  sleep 10
+done
+test -n "$ROLLBACK_RUN_ID"
+test "$(gh run view "$ROLLBACK_RUN_ID" --repo "$REPO" \
+  --json headSha --jq .headSha)" = "$ROLLBACK_COMMIT"
+gh run watch "$ROLLBACK_RUN_ID" --repo "$REPO" --exit-status
+test "$(gh run view "$ROLLBACK_RUN_ID" --repo "$REPO" \
+  --json conclusion --jq .conclusion)" = success
+
+for job in 'Backend Tests' 'Frontend Tests'; do
+  test "$(gh run view "$ROLLBACK_RUN_ID" --repo "$REPO" --json jobs \
+    --jq "[.jobs[] | select(.name == \"$job\" and .conclusion == \"success\")] | length")" -eq 1
+done
 ```
 
-The watcher will make the branch and running stack converge on the rollback
-commit's old tree. Verify checkout tree equality, healthy containers, and
-local/public health again. If the exact pause, tag, no-build restore, non-force
-rollback commit, CI, or resume command cannot be verified live, block the
-original release rather than improvising during an incident.
+If rollback CI fails, leave the four-service no-build restore running and the
+watcher paused; escalate rather than deploying an unapproved SHA.
+
+### LIVE / MANUAL: resume and verify rollback convergence
+
+In **Terminal B — WSL**, rerun the Section 3 remote-context preamble, set and
+persist the rollback wait boundary, then return to **Terminal A — LOCAL**:
+
+```bash
+ROLLBACK_WAIT_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'ROLLBACK_WAIT_START=%q\n' "$ROLLBACK_WAIT_START" >> "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
+```
+
+From **Terminal A — LOCAL**, explicitly resume the WSL watcher only after the
+exact rollback CI and both jobs are green:
+
+```bash
+ssh restaurant 'wsl bash -lc '\''
+set -euo pipefail
+set +x
+sudo -n systemctl start deploy-watcher.service
+sudo -n systemctl is-active --quiet deploy-watcher.service
+'\'''
+```
+
+In **Terminal B — WSL**, rerun the remote-context preamble. Poll for at most 20
+minutes until the checkout is the exact rollback commit, its tree is exactly
+PRE_PROD, and every service state is healthy/running together:
+
+```bash
+test -n "$ROLLBACK_WAIT_START"
+ROLLBACK_DEPLOY_DEADLINE=$(( $(date +%s) + 1200 ))
+ROLLBACK_READY=0
+while [ "$(date +%s)" -lt "$ROLLBACK_DEPLOY_DEADLINE" ]; do
+  git -C "$PROD_DIR" fetch origin prod
+  CHECKOUT_SHA="$(git -C "$PROD_DIR" rev-parse HEAD)"
+  REMOTE_SHA="$(git -C "$PROD_DIR" rev-parse origin/prod)"
+  CHECKOUT_TREE="$(git -C "$PROD_DIR" rev-parse 'HEAD^{tree}')"
+  PRE_PROD_TREE="$(git -C "$PROD_DIR" rev-parse "$PRE_PROD_SHA^{tree}")"
+  POSTGRES_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_postgres 2>/dev/null || true)"
+  BACKEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend 2>/dev/null || true)"
+  FRONTEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend 2>/dev/null || true)"
+  CADDY_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy 2>/dev/null || true)"
+  CLOUDFLARED_RUNNING="$(docker inspect --format '{{.State.Running}}' restaurant_cloudflared 2>/dev/null || true)"
+
+  if [ "$CHECKOUT_SHA" = "$ROLLBACK_COMMIT" ] \
+    && [ "$REMOTE_SHA" = "$ROLLBACK_COMMIT" ] \
+    && [ "$CHECKOUT_TREE" = "$PRE_PROD_TREE" ] \
+    && [ "$POSTGRES_HEALTH" = healthy ] \
+    && [ "$BACKEND_HEALTH" = healthy ] \
+    && [ "$FRONTEND_HEALTH" = healthy ] \
+    && [ "$CADDY_HEALTH" = healthy ] \
+    && [ "$CLOUDFLARED_RUNNING" = true ]; then
+    ROLLBACK_READY=1
+    break
+  fi
+  sleep 10
+done
+test "$ROLLBACK_READY" -eq 1
+test "$(git -C "$PROD_DIR" rev-parse "$ROLLBACK_COMMIT^{tree}")" = \
+  "$(git -C "$PROD_DIR" rev-parse "$PRE_PROD_SHA^{tree}")"
+test "$(git -C "$PROD_DIR" rev-parse "$ROLLBACK_COMMIT^1")" = "$CANDIDATE_SHA"
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
+test "$(docker inspect --format '{{len .Config.Cmd}}' restaurant_cloudflared)" -eq 7
+test "$(docker inspect --format '{{index .Config.Cmd 2}}' restaurant_cloudflared)" = --protocol
+test "$(docker inspect --format '{{index .Config.Cmd 3}}' restaurant_cloudflared)" = quic
+test "$(docker inspect --format '{{index .Config.Cmd 5}}' restaurant_cloudflared)" = --token
+
+curl -fsS http://127.0.0.1:8080/healthz >/dev/null
+curl -fsS http://127.0.0.1:8080/api/health >/dev/null
+set -a
+source "$PROD_DIR/.env"
+set +a
+curl -fsS "${PUBLIC_APP_URL%/}/healthz" >/dev/null
+curl -fsS "${PUBLIC_APP_URL%/}/api/health" >/dev/null
+unset PUBLIC_APP_URL
+
+ROLLBACK_WAIT_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+test -n "$WATCHER_DEPLOY_MARKER"
+ROLLBACK_DEPLOY_CYCLES="$(sudo -n journalctl \
+  -u deploy-watcher.service \
+  --since "$ROLLBACK_WAIT_START" \
+  --until "$ROLLBACK_WAIT_END" \
+  --no-pager \
+  | rg -F -c -- "$WATCHER_DEPLOY_MARKER")"
+test "$ROLLBACK_DEPLOY_CYCLES" -eq 1
+printf 'rollback_watcher_deploy_cycles=%s\n' "$ROLLBACK_DEPLOY_CYCLES"
+```
+
+If the archived source, exact images, exact rollback SHA, rollback CI, explicit
+remote resume, bounded convergence, restored `quic` command, or one-cycle
+count cannot be verified, block the original release rather than improvising
+during an incident.
 
 ## Release record checklist
 
 - [ ] Clean pinned `PRE_PROD_SHA`, `MAIN_SHA`, sibling SHA, and `CANDIDATE_SHA`
 - [ ] Full `origin/prod..CANDIDATE_SHA` review approval
 - [ ] Complete local backend, Ruff, frontend, build, Pandoc, static, and migration-twice gates
-- [ ] Branch protection and exact-SHA CI gating verified
+- [ ] Authenticated classic-protection 404 and zero applicable rules verified; otherwise separate protected procedure used
+- [ ] Exact-SHA watcher gate and explicit direct-release authorization recorded
 - [ ] Watcher working directory, pause/resume, one-build behavior, and marker verified
-- [ ] Exact Compose image names, immutable IDs, rollback tags, and no-build dry run verified
+- [ ] Pre-created rollback SHA tree/parent and both non-force dry-run paths verified
+- [ ] External mode-700 rollback state, PRE source, exact Compose project, four image mappings/tags, and four-service no-build dry run verified
 - [ ] Secret shape, controlled admin path, and default-false online gate verified without values
 - [ ] Three production migrations applied once in order before `prod` push; metadata verified
 - [ ] Exact candidate CI green; watcher deployed exactly once; health and SHA verified
 - [ ] Customer 403 and controlled staff/admin 200/privacy/read-only smokes passed
+- [ ] Responsive Tables/detail/Menu matrix passed at 320/375/430 px in en/ru/uz
 - [ ] Stable 15-minute watch met every numeric threshold
 - [ ] No raw logs, URLs, headers, bodies, business IDs, tokens, or unsafe screenshots retained
