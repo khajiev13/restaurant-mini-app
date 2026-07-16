@@ -47,10 +47,20 @@ function StaffTableDetailWorkspace({
     15_000,
     tableId,
   );
-  const roleBoundary = isRoleBoundary(error);
+  const directRoleBoundary = isRoleBoundary(error);
+  const [roleBoundarySeen, setRoleBoundarySeen] = useState(false);
+  const roleBoundary = directRoleBoundary || (roleBoundarySeen && error !== null);
   const notFound = httpStatus(error) === 404;
   const canShowCached = data !== null && (error === null || isTransient(error));
   const hasCachedError = data !== null && error !== null && isTransient(error);
+
+  useEffect(() => {
+    if (directRoleBoundary) {
+      setRoleBoundarySeen(true);
+    } else if (error === null) {
+      setRoleBoundarySeen(false);
+    }
+  }, [directRoleBoundary, error]);
 
   useEffect(() => {
     if (!roleBoundary) return;

@@ -81,7 +81,9 @@ export default function StaffTablesPage() {
   const retryMenu = useMenuStore((state) => state.retry);
   const menuFetchStarted = useRef(false);
   const roleRefreshInFlight = useRef<Promise<unknown> | null>(null);
-  const roleBoundary = isRoleBoundary(error);
+  const directRoleBoundary = isRoleBoundary(error);
+  const [roleBoundarySeen, setRoleBoundarySeen] = useState(false);
+  const roleBoundary = directRoleBoundary || (roleBoundarySeen && error !== null);
 
   const setParam = (key: 'view' | 'filter', value: string) => {
     const params = new URLSearchParams(searchParams);
@@ -109,6 +111,14 @@ export default function StaffTablesPage() {
     [data?.halls],
   );
   const hasCachedError = error !== null && data !== null && !roleBoundary;
+
+  useEffect(() => {
+    if (directRoleBoundary) {
+      setRoleBoundarySeen(true);
+    } else if (error === null) {
+      setRoleBoundarySeen(false);
+    }
+  }, [directRoleBoundary, error]);
 
   useEffect(() => {
     if (view !== 'menu' || menuFetchStarted.current) return;

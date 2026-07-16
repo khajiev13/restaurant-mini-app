@@ -343,6 +343,44 @@ describe('StaffTableDetailPage', () => {
     expect(await screen.findByText('Role home')).toBeInTheDocument();
   });
 
+  it.each([
+    [401, { response: { status: 503 } }],
+    [403, new Error('network')],
+  ] as const)(
+    'keeps cached detail hidden after boundary %i when the next poll also fails',
+    async (status, nextFailure) => {
+      const user = userEvent.setup();
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      let resolveRole!: (value: { role: string }) => void;
+      const roleRefresh = new Promise<{ role: string }>((resolve) => { resolveRole = resolve; });
+      authState.refreshMe.mockReturnValue(roleRefresh);
+      apiMocks.getStaffTable
+        .mockResolvedValueOnce(success())
+        .mockRejectedValueOnce({ response: { status } })
+        .mockRejectedValueOnce(nextFailure);
+      renderRoute();
+      await screen.findByRole('heading', { name: 'Table Alpha' });
+
+      await user.click(screen.getByRole('button', { name: 'Refresh' }));
+      await waitFor(() => expect(screen.queryByRole('heading', { name: 'Table Alpha' })).not.toBeInTheDocument());
+      triggerVisibleRefresh();
+      await waitFor(() => expect(apiMocks.getStaffTable).toHaveBeenCalledTimes(3));
+
+      expect(screen.queryByRole('heading', { name: 'Table Alpha' })).not.toBeInTheDocument();
+      expect(screen.queryByText('Combined Somsa × 1')).not.toBeInTheDocument();
+      expect(screen.queryByText('Could not refresh. Showing cached data.')).not.toBeInTheDocument();
+      expect(screen.queryByText('Tables are temporarily unavailable.')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Loading...')).toBeInTheDocument();
+      expect(authState.refreshMe).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveRole({ role: 'staff' });
+        await roleRefresh;
+      });
+      expect(await screen.findByText('Role home')).toBeInTheDocument();
+    },
+  );
+
   it('reattaches navigation when an authorization boundary recurs during the same role refresh', async () => {
     const user = userEvent.setup();
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
