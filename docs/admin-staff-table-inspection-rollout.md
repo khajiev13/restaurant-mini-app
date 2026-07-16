@@ -15,6 +15,10 @@ before `prod` is pushed. Complete every production migration, configuration
 check, watcher check, and rollback preparation step before that single
 production push. Do not run `start.sh`, do not run a second manual build, and
 do not manually recreate the application containers during normal rollout.
+Across the complete release there is exactly one normal watcher build. An
+incident adds one four-service no-build restore; rollback checkout convergence
+is manual and the resumed watcher must be an audited zero-marker no-op, never a
+second build.
 
 Use two explicit, persistent terminals for the whole release:
 
@@ -269,10 +273,14 @@ retain it as evidence. Record only a yes/no audit result. Confirm all of these:
 4. It has an exact privacy-safe deployment-cycle marker that can be counted
    without retaining raw logs.
 5. It can be stopped and started with noninteractive `sudo -n systemctl`.
+6. When its clean checkout `HEAD` already equals `origin/prod`, starting or
+   polling it is a strict no-op: it runs no Compose build/up command, emits no
+   deployment-cycle marker, and does not recreate or replace a container.
 
 If any property is ambiguous, if `WorkingDirectory` is empty, or if the audit
-cannot be completed without displaying a secret, stop and repair/review the
-watcher separately.
+cannot be completed without displaying a secret, or equal-SHA no-op behavior
+cannot be proven from the deployed source, stop and repair/review the watcher
+separately. Rollback in this runbook depends on that no-op guarantee.
 
 Prove pause and resume from **Terminal A — LOCAL** without touching containers:
 
@@ -299,12 +307,46 @@ classic branch protection and all applicable repository rules are absent.
 REPO=khajiev13/restaurant-mini-app
 DIRECT_RELEASE_AUTHORIZATION='<release-record reference for explicit authorization>'
 WATCHER_EXACT_SHA_AUDITED=1
-test -n "$DIRECT_RELEASE_AUTHORIZATION"
+case "$DIRECT_RELEASE_AUTHORIZATION" in
+  ''|'<release-record reference for explicit authorization>') exit 1 ;;
+esac
 test "$WATCHER_EXACT_SHA_AUDITED" -eq 1
 
-gh auth status --hostname github.com >/dev/null
+gh auth status --hostname github.com >/dev/null 2>&1
 test "$(gh api "repos/$REPO" --jq .full_name)" = "$REPO"
 test "$(gh api "repos/$REPO/branches/prod" --jq .name)" = prod
+test "$(gh api "repos/$REPO" --jq '.permissions.admin')" = true
+
+AUTHORITY_RESPONSE="$(mktemp)"
+AUTHORITY_ERROR="$(mktemp)"
+if gh api --include user >"$AUTHORITY_RESPONSE" 2>"$AUTHORITY_ERROR"; then
+  AUTHORITY_RC=0
+else
+  AUTHORITY_RC=$?
+fi
+AUTHORITY_HTTP="$(awk '
+  toupper($1) ~ /^HTTP\// { code=$2 }
+  END { print code }
+' "$AUTHORITY_RESPONSE")"
+AUTHORITY_SCOPES="$(awk '
+  {
+    line=$0
+    if (tolower(line) ~ /^x-oauth-scopes:/) {
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      gsub(/\r/, "", line)
+      gsub(/[[:space:]]/, "", line)
+      scopes=line
+    }
+  }
+  END { print scopes }
+' "$AUTHORITY_RESPONSE")"
+rm -f "$AUTHORITY_RESPONSE" "$AUTHORITY_ERROR"
+test "$AUTHORITY_HTTP:$AUTHORITY_RC" = 200:0
+case ",$AUTHORITY_SCOPES," in
+  *,repo,*) ;;
+  *) printf 'classic repo scope cannot be proven; direct release blocked\n' >&2; exit 1 ;;
+esac
+unset AUTHORITY_SCOPES
 
 PROTECTION_RESPONSE="$(mktemp)"
 PROTECTION_ERROR="$(mktemp)"
@@ -354,14 +396,17 @@ git push --dry-run origin "$CANDIDATE_SHA:refs/heads/prod"
 git push --dry-run origin "$ROLLBACK_COMMIT:refs/heads/prod"
 ```
 
-An authenticated 404 is distinguished from permission, authentication, and
-network failures by the successful authenticated repository/branch reads and
-captured HTTP status. A 200 protection response, any applicable rule (including
-a required pull request or restricted update), or an unreadable rules endpoint
-blocks this direct path. Use a separate, reviewed protected-branch promotion
-and rollback procedure; do not bypass the rule or improvise a PR during this
-release. Absence is allowed only because explicit user authorization is
-recorded and the exact-SHA watcher gate was privately audited.
+The protection 404 is treated as conclusive only because two independent
+authority checks ran first without printing credential data: the active
+credential proved the classic `repo` OAuth scope and the authenticated viewer
+proved ADMIN permission on this repository. A missing scope header, a
+fine-grained credential whose Administration-read permission cannot be proved
+by this procedure, non-ADMIN permission, authentication/network failure, or an
+unreadable rules endpoint blocks this path. A 200 protection response or any
+applicable rule also blocks it. Use a separate, reviewed protected-branch
+promotion and rollback procedure; do not bypass the rule or improvise a PR.
+Absence is allowed only with this authority proof, explicit user
+authorization, and the privately audited exact-SHA watcher gate.
 
 The rollback commit is created before production mutation. Its parent is the
 candidate and its tree is exactly pre-production, so both the candidate and
@@ -392,6 +437,7 @@ ROLLBACK_COMMIT='<40-character pre-created ROLLBACK_COMMIT>'
 WATCHER_DEPLOY_MARKER='<exact audited privacy-safe marker>'
 WATCHER_AUDIT_OK=1
 WATCHER_EXACT_SHA_AUDITED=1
+WATCHER_EQUAL_SHA_NOOP_AUDITED=1
 WATCHER_UNIT=deploy-watcher.service
 
 for sha in "$PRE_PROD_SHA" "$CANDIDATE_SHA" "$ROLLBACK_COMMIT"; do
@@ -401,6 +447,7 @@ for sha in "$PRE_PROD_SHA" "$CANDIDATE_SHA" "$ROLLBACK_COMMIT"; do
 done
 test "$WATCHER_AUDIT_OK" -eq 1
 test "$WATCHER_EXACT_SHA_AUDITED" -eq 1
+test "$WATCHER_EQUAL_SHA_NOOP_AUDITED" -eq 1
 [[ "$WATCHER_DEPLOY_MARKER" =~ ^[A-Za-z0-9_.:=-]+([[:space:]][A-Za-z0-9_.:=-]+)*$ ]]
 
 PROD_DIR="$(sudo -n systemctl show "$WATCHER_UNIT" \
@@ -430,6 +477,12 @@ test -f "$PRE_PROD_SOURCE/Caddyfile"
 cmp "$PRE_PROD_SOURCE/docker-compose.yml" \
   <(git show "$PRE_PROD_SHA:docker-compose.yml")
 cmp "$PRE_PROD_SOURCE/Caddyfile" <(git show "$PRE_PROD_SHA:Caddyfile")
+PRE_PROD_COMPOSE_SHA256="$(sha256sum "$PRE_PROD_SOURCE/docker-compose.yml" | awk '{print $1}')"
+PRE_PROD_CADDY_SHA256="$(sha256sum "$PRE_PROD_SOURCE/Caddyfile" | awk '{print $1}')"
+for digest in "$PRE_PROD_COMPOSE_SHA256" "$PRE_PROD_CADDY_SHA256"; do
+  test "${#digest}" -eq 64
+  case "$digest" in *[!0-9a-f]*) exit 1 ;; esac
+done
 test ! -e "$PRE_PROD_SOURCE/.env"
 ln -s "$PROD_DIR/.env" "$PRE_PROD_SOURCE/.env"
 test "$(readlink -f "$PRE_PROD_SOURCE/.env")" = \
@@ -526,7 +579,9 @@ chmod 600 "$ROLLBACK_OVERRIDE"
 REMOTE_RELEASE_STATE="$ROLLBACK_DIR/release.env"
 for variable in \
   PRE_PROD_SHA CANDIDATE_SHA ROLLBACK_COMMIT PROD_DIR COMPOSE_PROJECT_NAME \
-  ROLLBACK_DIR PRE_PROD_SOURCE ROLLBACK_OVERRIDE WATCHER_DEPLOY_MARKER \
+  ROLLBACK_DIR PRE_PROD_SOURCE PRE_PROD_COMPOSE_SHA256 \
+  PRE_PROD_CADDY_SHA256 ROLLBACK_OVERRIDE WATCHER_DEPLOY_MARKER \
+  WATCHER_EQUAL_SHA_NOOP_AUDITED \
   BACKEND_COMPOSE_IMAGE FRONTEND_COMPOSE_IMAGE CADDY_COMPOSE_IMAGE \
   CLOUDFLARED_COMPOSE_IMAGE BACKEND_IMAGE_ID FRONTEND_IMAGE_ID \
   CADDY_IMAGE_ID CLOUDFLARED_IMAGE_ID BACKEND_CONTAINER_ID \
@@ -577,6 +632,7 @@ source "$ROLLBACK_DIR/release.env"
 test -d "$PROD_DIR/.git"
 test -d "$PRE_PROD_SOURCE"
 test -n "$WATCHER_DEPLOY_MARKER"
+test "$WATCHER_EQUAL_SHA_NOOP_AUDITED" -eq 1
 test "${#ROLLBACK_COMMIT}" -eq 40
 case "$ROLLBACK_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 ```
@@ -593,7 +649,7 @@ set -euo pipefail
 set +x
 cd "$PROD_DIR"
 set -a
-source .env
+source "$PROD_DIR/.env"
 set +a
 
 test -n "${TABLE_ACCESS_SECRET:-}"
@@ -608,7 +664,7 @@ test -z "${INPLACE_ONLINE_PAYMENT_TEST_TELEGRAM_IDS:-}"
 if [ -z "${BOOTSTRAP_ADMIN_TELEGRAM_IDS:-}" ]; then
   DURABLE_ADMIN_REQUIRED=1
 else
-  [[ "$BOOTSTRAP_ADMIN_TELEGRAM_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
+  [[ "$BOOTSTRAP_ADMIN_TELEGRAM_IDS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]
   DURABLE_ADMIN_REQUIRED=0
 fi
 
@@ -631,6 +687,11 @@ the aggregate-only durable-admin check in Section 5, not here. Do not record
 bootstrap IDs. If bootstrap is needed, the controlled admin must authenticate
 after deployment, become durable, and broad bootstrap input must not be left
 configured longer than necessary.
+
+When no durable admin exists and bootstrap is used, the operator must privately
+confirm the intended controlled identity and enter a non-placeholder,
+non-secret release-record reference in `BOOTSTRAP_IDENTITY_CONFIRMATION`.
+Neither the confirmation step nor the release record may contain the ID.
 
 ## 5. Pause the watcher and migrate before pushing `prod`
 
@@ -676,7 +737,7 @@ done
 ```
 
 Do not run any of these production migrations a second time in this release.
-Verify and compare full schema definitions, not names only. The first three
+Verify and compare full schema definitions, not names only. The first four
 queries output the actual definitions for the release record; the final block
 raises an error on a column shape or structural index/constraint mismatch:
 
@@ -703,6 +764,14 @@ ORDER BY table_name, column_name;
 SELECT conname, pg_get_constraintdef(oid, true) AS constraint_definition
 FROM pg_constraint
 WHERE conname = 'ck_users_role_valid';
+
+SELECT c.conname, pg_get_constraintdef(c.oid, true) AS constraint_definition
+FROM pg_constraint c
+JOIN pg_class source_table ON source_table.oid = c.conrelid
+WHERE source_table.relname = 'orders'
+  AND c.contype = 'f'
+  AND pg_get_constraintdef(c.oid, true)
+    LIKE 'FOREIGN KEY (assigned_staff_id) REFERENCES users(telegram_id)%';
 
 SELECT indexname, indexdef
 FROM pg_indexes
@@ -795,6 +864,38 @@ BEGIN
     RAISE EXCEPTION 'role constraint definition mismatch';
   END IF;
 
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class source_table ON source_table.oid = c.conrelid
+    JOIN pg_namespace source_schema ON source_schema.oid = source_table.relnamespace
+    JOIN pg_class target_table ON target_table.oid = c.confrelid
+    JOIN pg_namespace target_schema ON target_schema.oid = target_table.relnamespace
+    WHERE c.contype = 'f'
+      AND source_schema.nspname = 'public'
+      AND source_table.relname = 'orders'
+      AND target_schema.nspname = 'public'
+      AND target_table.relname = 'users'
+      AND c.conkey = ARRAY[(
+        SELECT attnum
+        FROM pg_attribute
+        WHERE attrelid = source_table.oid
+          AND attname = 'assigned_staff_id'
+          AND NOT attisdropped
+      )]::smallint[]
+      AND c.confkey = ARRAY[(
+        SELECT attnum
+        FROM pg_attribute
+        WHERE attrelid = target_table.oid
+          AND attname = 'telegram_id'
+          AND NOT attisdropped
+      )]::smallint[]
+      AND c.confdeltype = 'n'
+      AND pg_get_constraintdef(c.oid, true) LIKE '%ON DELETE SET NULL%'
+  ) THEN
+    RAISE EXCEPTION 'assigned_staff_id foreign key definition mismatch';
+  END IF;
+
   WITH expected(index_name, is_unique, columns, predicate_tokens) AS (VALUES
     ('idx_orders_assigned_staff_id', false, 'assigned_staff_id', NULL),
     ('idx_orders_delivered_at', false, 'delivered_at', NULL),
@@ -846,7 +947,7 @@ SQL
 ```
 
 Compare the emitted defaults, lengths, precision/scale, nullability,
-`pg_get_constraintdef`, and complete `indexdef` text with all three reviewed
+both `pg_get_constraintdef` results, and complete `indexdef` text with all three reviewed
 migration files. The catalog assertions are a second executable check, not a
 replacement for that comparison. On any mismatch, stop with the watcher
 paused. Do not push `prod` or dump data/environments.
@@ -857,13 +958,15 @@ this block. It prints only an aggregate count:
 
 ```bash
 set -a
-source .env
+source "$PROD_DIR/.env"
 set +a
+
+BOOTSTRAP_IDENTITY_CONFIRMATION='<non-secret operator confirmation reference>'
 
 if [ -z "${BOOTSTRAP_ADMIN_TELEGRAM_IDS:-}" ]; then
   DURABLE_ADMIN_REQUIRED=1
 else
-  [[ "$BOOTSTRAP_ADMIN_TELEGRAM_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]
+  [[ "$BOOTSTRAP_ADMIN_TELEGRAM_IDS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]
   DURABLE_ADMIN_REQUIRED=0
 fi
 unset BOOTSTRAP_ADMIN_TELEGRAM_IDS
@@ -882,6 +985,13 @@ if [ "$DURABLE_ADMIN_COUNT" -eq 0 ] && [ "$DURABLE_ADMIN_REQUIRED" -eq 1 ]; then
   printf 'no controlled admin path\n' >&2
   exit 1
 fi
+
+if [ "$DURABLE_ADMIN_COUNT" -eq 0 ] && [ "$DURABLE_ADMIN_REQUIRED" -eq 0 ]; then
+  case "$BOOTSTRAP_IDENTITY_CONFIRMATION" in
+    ''|'<non-secret operator confirmation reference>') exit 1 ;;
+  esac
+fi
+unset BOOTSTRAP_IDENTITY_CONFIRMATION
 
 printf 'controlled_admin_path=ok durable_admin_count=%s\n' "$DURABLE_ADMIN_COUNT"
 ```
@@ -929,8 +1039,22 @@ while [ "$(date +%s)" -lt "$RUN_DISCOVERY_DEADLINE" ]; do
 done
 test -n "$RUN_ID"
 test "$(gh run view "$RUN_ID" --repo "$REPO" --json headSha --jq .headSha)" = "$CANDIDATE_SHA"
-gh run watch "$RUN_ID" --repo "$REPO" --exit-status
-test "$(gh run view "$RUN_ID" --repo "$REPO" --json conclusion --jq .conclusion)" = success
+RUN_WAIT_DEADLINE=$(( $(date +%s) + 1800 ))
+while :; do
+  RUN_STATE="$(gh run view "$RUN_ID" --repo "$REPO" \
+    --json headSha,status,conclusion \
+    --jq '[.headSha, .status, (.conclusion // "")] | @tsv')"
+  IFS=$'\t' read -r RUN_HEAD_SHA RUN_STATUS RUN_CONCLUSION <<< "$RUN_STATE"
+  test "$RUN_HEAD_SHA" = "$CANDIDATE_SHA"
+  case "$RUN_STATUS" in
+    completed) break ;;
+    queued|in_progress|pending|requested|waiting) ;;
+    *) exit 1 ;;
+  esac
+  test "$(date +%s)" -lt "$RUN_WAIT_DEADLINE"
+  sleep 10
+done
+test "$RUN_CONCLUSION" = success
 
 for job in 'Backend Tests' 'Frontend Tests'; do
   test "$(gh run view "$RUN_ID" --repo "$REPO" --json jobs \
@@ -952,16 +1076,34 @@ printf 'DEPLOY_WAIT_START=%q\n' "$DEPLOY_WAIT_START" >> "$ROLLBACK_DIR/release.e
 chmod 600 "$ROLLBACK_DIR/release.env"
 ```
 
-From **Terminal A — LOCAL**, resume the watcher through explicit SSH/WSL
-context. Do not invoke Docker Compose or `start.sh` yourself:
+From **Terminal A — LOCAL**, acquire the exclusive production release freeze
+and enter its non-secret record reference. The freeze prohibits any other
+`prod` push or production checkout mutation until acceptance or rollback is
+complete. In the same SSH/WSL handoff that resumes the watcher, fetch `prod`
+and require its exact candidate SHA immediately before `systemctl start`. Do
+not invoke Docker Compose or `start.sh` yourself:
 
 ```bash
-ssh restaurant 'wsl bash -lc '\''
+EXCLUSIVE_RELEASE_FREEZE_CONFIRMATION='<exclusive release-freeze record reference>'
+case "$EXCLUSIVE_RELEASE_FREEZE_CONFIRMATION" in
+  ''|'<exclusive release-freeze record reference>') exit 1 ;;
+esac
+
+ssh restaurant wsl bash -s -- "$CANDIDATE_SHA" <<'WSL'
 set -euo pipefail
 set +x
-sudo -n systemctl start deploy-watcher.service
-sudo -n systemctl is-active --quiet deploy-watcher.service
-'\'''
+CANDIDATE_SHA="$1"
+test "${#CANDIDATE_SHA}" -eq 40
+case "$CANDIDATE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+WATCHER_UNIT=deploy-watcher.service
+PROD_DIR="$(sudo -n systemctl show "$WATCHER_UNIT" \
+  --property=WorkingDirectory --value)"
+test -d "$PROD_DIR/.git"
+git -C "$PROD_DIR" fetch origin prod
+test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$CANDIDATE_SHA"
+sudo -n systemctl start "$WATCHER_UNIT"
+sudo -n systemctl is-active --quiet "$WATCHER_UNIT"
+WSL
 ```
 
 In **Terminal B — WSL**, rerun the Section 3 remote-context preamble, which now
@@ -998,15 +1140,15 @@ done
 test "$DEPLOY_READY" -eq 1
 test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
 
-curl -fsS http://127.0.0.1:8080/healthz >/dev/null
-curl -fsS http://127.0.0.1:8080/api/health >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/healthz >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/api/health >/dev/null
 
 set -a
-source .env
+source "$PROD_DIR/.env"
 set +a
 test -n "${PUBLIC_APP_URL:-}"
-curl -fsS "${PUBLIC_APP_URL%/}/healthz" >/dev/null
-curl -fsS "${PUBLIC_APP_URL%/}/api/health" >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/healthz" >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/api/health" >/dev/null
 unset PUBLIC_APP_URL
 ```
 
@@ -1393,19 +1535,21 @@ sudo -n systemctl stop deploy-watcher.service
 ```
 
 In **Terminal B — WSL**, run the Section 3 remote-context preamble. Verify the
-pre-created rollback identity, four unique image tags, archived sources,
-current `.env` link, Compose project, and unchanged PostgreSQL container. Then
-perform the one incident-only manual recreation:
+recorded release-boundary SHA shapes, four unique image tags, immutable
+archived-source digests, current `.env` link, Compose project, and unchanged
+PostgreSQL container. This restore deliberately does not inspect checkout HEAD
+or `origin/prod`, because a wrong/stalled checkout is itself a rollback trigger.
+Then perform the one incident-only manual recreation:
 
 ```bash
-test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA"
-test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$CANDIDATE_SHA"
-test "${#ROLLBACK_COMMIT}" -eq 40
-case "$ROLLBACK_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
-cmp "$PRE_PROD_SOURCE/docker-compose.yml" \
-  <(git -C "$PROD_DIR" show "$PRE_PROD_SHA:docker-compose.yml")
-cmp "$PRE_PROD_SOURCE/Caddyfile" \
-  <(git -C "$PROD_DIR" show "$PRE_PROD_SHA:Caddyfile")
+for sha in "$PRE_PROD_SHA" "$CANDIDATE_SHA" "$ROLLBACK_COMMIT"; do
+  test "${#sha}" -eq 40
+  case "$sha" in *[!0-9a-f]*) exit 1 ;; esac
+done
+test "$(sha256sum "$PRE_PROD_SOURCE/docker-compose.yml" | awk '{print $1}')" = \
+  "$PRE_PROD_COMPOSE_SHA256"
+test "$(sha256sum "$PRE_PROD_SOURCE/Caddyfile" | awk '{print $1}')" = \
+  "$PRE_PROD_CADDY_SHA256"
 test "$(readlink -f "$PRE_PROD_SOURCE/.env")" = \
   "$(readlink -f "$PROD_DIR/.env")"
 test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
@@ -1437,6 +1581,26 @@ source behavior, and the `quic` command without reading the token-bearing
 argument:
 
 ```bash
+RESTORE_HEALTH_DEADLINE=$(( $(date +%s) + 600 ))
+RESTORE_HEALTH_READY=0
+while [ "$(date +%s)" -lt "$RESTORE_HEALTH_DEADLINE" ]; do
+  POSTGRES_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_postgres 2>/dev/null || true)"
+  BACKEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend 2>/dev/null || true)"
+  FRONTEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend 2>/dev/null || true)"
+  CADDY_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy 2>/dev/null || true)"
+  CLOUDFLARED_RUNNING="$(docker inspect --format '{{.State.Running}}' restaurant_cloudflared 2>/dev/null || true)"
+  if [ "$POSTGRES_HEALTH" = healthy ] \
+    && [ "$BACKEND_HEALTH" = healthy ] \
+    && [ "$FRONTEND_HEALTH" = healthy ] \
+    && [ "$CADDY_HEALTH" = healthy ] \
+    && [ "$CLOUDFLARED_RUNNING" = true ]; then
+    RESTORE_HEALTH_READY=1
+    break
+  fi
+  sleep 5
+done
+test "$RESTORE_HEALTH_READY" -eq 1
+
 for mapping in \
   "backend|restaurant_backend|$BACKEND_IMAGE_ID|$BACKEND_ROLLBACK_TAG" \
   "frontend|restaurant_frontend|$FRONTEND_IMAGE_ID|$FRONTEND_ROLLBACK_TAG" \
@@ -1470,14 +1634,14 @@ test "$(docker inspect --format '{{index .Config.Cmd 2}}' restaurant_cloudflared
 test "$(docker inspect --format '{{index .Config.Cmd 3}}' restaurant_cloudflared)" = quic
 test "$(docker inspect --format '{{index .Config.Cmd 5}}' restaurant_cloudflared)" = --token
 
-curl -fsS http://127.0.0.1:8080/healthz >/dev/null
-curl -fsS http://127.0.0.1:8080/api/health >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/healthz >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/api/health >/dev/null
 set -a
 source "$PROD_DIR/.env"
 set +a
 test -n "${PUBLIC_APP_URL:-}"
-curl -fsS "${PUBLIC_APP_URL%/}/healthz" >/dev/null
-curl -fsS "${PUBLIC_APP_URL%/}/api/health" >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/healthz" >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/api/health" >/dev/null
 unset PUBLIC_APP_URL
 ```
 
@@ -1522,9 +1686,23 @@ done
 test -n "$ROLLBACK_RUN_ID"
 test "$(gh run view "$ROLLBACK_RUN_ID" --repo "$REPO" \
   --json headSha --jq .headSha)" = "$ROLLBACK_COMMIT"
-gh run watch "$ROLLBACK_RUN_ID" --repo "$REPO" --exit-status
-test "$(gh run view "$ROLLBACK_RUN_ID" --repo "$REPO" \
-  --json conclusion --jq .conclusion)" = success
+ROLLBACK_RUN_WAIT_DEADLINE=$(( $(date +%s) + 1800 ))
+while :; do
+  ROLLBACK_RUN_STATE="$(gh run view "$ROLLBACK_RUN_ID" --repo "$REPO" \
+    --json headSha,status,conclusion \
+    --jq '[.headSha, .status, (.conclusion // "")] | @tsv')"
+  IFS=$'\t' read -r ROLLBACK_RUN_HEAD_SHA ROLLBACK_RUN_STATUS \
+    ROLLBACK_RUN_CONCLUSION <<< "$ROLLBACK_RUN_STATE"
+  test "$ROLLBACK_RUN_HEAD_SHA" = "$ROLLBACK_COMMIT"
+  case "$ROLLBACK_RUN_STATUS" in
+    completed) break ;;
+    queued|in_progress|pending|requested|waiting) ;;
+    *) exit 1 ;;
+  esac
+  test "$(date +%s)" -lt "$ROLLBACK_RUN_WAIT_DEADLINE"
+  sleep 10
+done
+test "$ROLLBACK_RUN_CONCLUSION" = success
 
 for job in 'Backend Tests' 'Frontend Tests'; do
   test "$(gh run view "$ROLLBACK_RUN_ID" --repo "$REPO" --json jobs \
@@ -1535,111 +1713,167 @@ done
 If rollback CI fails, leave the four-service no-build restore running and the
 watcher paused; escalate rather than deploying an unapproved SHA.
 
-### LIVE / MANUAL: resume and verify rollback convergence
+### LIVE / MANUAL: fast-forward checkout and resume as an audited no-op
 
-In **Terminal B — WSL**, rerun the Section 3 remote-context preamble, set and
-persist the rollback wait boundary, then return to **Terminal A — LOCAL**:
+Keep the watcher paused after rollback CI. In **Terminal B — WSL**, rerun the
+Section 3 remote-context preamble. Without running Docker or Compose, fetch and
+cleanly fast-forward the production checkout to the pre-created rollback
+commit. Then prove the tree is PRE_PROD and the four containers still run the
+immutable images restored by the incident-only no-build command:
 
 ```bash
-ROLLBACK_WAIT_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf 'ROLLBACK_WAIT_START=%q\n' "$ROLLBACK_WAIT_START" >> "$ROLLBACK_DIR/release.env"
+! sudo -n systemctl is-active --quiet deploy-watcher.service
+test "$WATCHER_EQUAL_SHA_NOOP_AUDITED" -eq 1
+test -z "$(git -C "$PROD_DIR" status --porcelain)"
+test "$(git -C "$PROD_DIR" branch --show-current)" = prod
+git -C "$PROD_DIR" fetch origin prod
+test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$ROLLBACK_COMMIT"
+git -C "$PROD_DIR" merge --ff-only origin/prod
+test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$ROLLBACK_COMMIT"
+test "$(git -C "$PROD_DIR" rev-parse 'HEAD^{tree}')" = \
+  "$(git -C "$PROD_DIR" rev-parse "$PRE_PROD_SHA^{tree}")"
+test "$(git -C "$PROD_DIR" rev-parse "$ROLLBACK_COMMIT^1")" = "$CANDIDATE_SHA"
+
+for pair in \
+  "restaurant_backend|$BACKEND_IMAGE_ID" \
+  "restaurant_frontend|$FRONTEND_IMAGE_ID" \
+  "restaurant_caddy|$CADDY_IMAGE_ID" \
+  "restaurant_cloudflared|$CLOUDFLARED_IMAGE_ID"
+do
+  CONTAINER_NAME="${pair%%|*}"
+  EXPECTED_IMAGE_ID="${pair#*|}"
+  test "$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME")" = \
+    "$EXPECTED_IMAGE_ID"
+done
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
+
+ROLLBACK_NOOP_WAIT_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'ROLLBACK_NOOP_WAIT_START=%q\n' "$ROLLBACK_NOOP_WAIT_START" >> \
+  "$ROLLBACK_DIR/release.env"
 chmod 600 "$ROLLBACK_DIR/release.env"
 ```
 
-From **Terminal A — LOCAL**, explicitly resume the WSL watcher only after the
-exact rollback CI and both jobs are green:
+From **Terminal A — LOCAL**, resume the WSL watcher only after the manual
+fast-forward. The same handoff independently reloads protected state, fetches
+`prod`, proves `HEAD == origin/prod == ROLLBACK_COMMIT`, and requires the
+audited equal-SHA no-op flag before starting:
 
 ```bash
-ssh restaurant 'wsl bash -lc '\''
+ssh restaurant 'wsl bash -s' <<'WSL'
 set -euo pipefail
 set +x
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/restaurant-mini-app/rollbacks"
+source "$STATE_ROOT/current-staff-tables.env"
+source "$ROLLBACK_DIR/release.env"
+test "$WATCHER_EQUAL_SHA_NOOP_AUDITED" -eq 1
+! sudo -n systemctl is-active --quiet deploy-watcher.service
+git -C "$PROD_DIR" fetch origin prod
+test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$ROLLBACK_COMMIT"
+test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$ROLLBACK_COMMIT"
 sudo -n systemctl start deploy-watcher.service
 sudo -n systemctl is-active --quiet deploy-watcher.service
-'\'''
+WSL
 ```
 
-In **Terminal B — WSL**, rerun the remote-context preamble. Poll for at most 20
-minutes until the checkout is the exact rollback commit, its tree is exactly
-PRE_PROD, and every service state is healthy/running together:
+In **Terminal B — WSL**, rerun the remote-context preamble. Observe the watcher
+for exactly 60 seconds. Any SHA drift, image replacement, inactive watcher, or
+deployment marker stops the watcher and blocks the release:
 
 ```bash
-test -n "$ROLLBACK_WAIT_START"
-ROLLBACK_DEPLOY_DEADLINE=$(( $(date +%s) + 1200 ))
-ROLLBACK_READY=0
-while [ "$(date +%s)" -lt "$ROLLBACK_DEPLOY_DEADLINE" ]; do
-  git -C "$PROD_DIR" fetch origin prod
-  CHECKOUT_SHA="$(git -C "$PROD_DIR" rev-parse HEAD)"
-  REMOTE_SHA="$(git -C "$PROD_DIR" rev-parse origin/prod)"
-  CHECKOUT_TREE="$(git -C "$PROD_DIR" rev-parse 'HEAD^{tree}')"
-  PRE_PROD_TREE="$(git -C "$PROD_DIR" rev-parse "$PRE_PROD_SHA^{tree}")"
-  POSTGRES_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_postgres 2>/dev/null || true)"
-  BACKEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend 2>/dev/null || true)"
-  FRONTEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend 2>/dev/null || true)"
-  CADDY_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy 2>/dev/null || true)"
-  CLOUDFLARED_RUNNING="$(docker inspect --format '{{.State.Running}}' restaurant_cloudflared 2>/dev/null || true)"
+test -n "$ROLLBACK_NOOP_WAIT_START"
 
-  if [ "$CHECKOUT_SHA" = "$ROLLBACK_COMMIT" ] \
-    && [ "$REMOTE_SHA" = "$ROLLBACK_COMMIT" ] \
-    && [ "$CHECKOUT_TREE" = "$PRE_PROD_TREE" ] \
-    && [ "$POSTGRES_HEALTH" = healthy ] \
-    && [ "$BACKEND_HEALTH" = healthy ] \
-    && [ "$FRONTEND_HEALTH" = healthy ] \
-    && [ "$CADDY_HEALTH" = healthy ] \
-    && [ "$CLOUDFLARED_RUNNING" = true ]; then
-    ROLLBACK_READY=1
-    break
-  fi
-  sleep 10
+rollback_noop_fail() {
+  sudo -n systemctl stop deploy-watcher.service
+  printf 'rollback watcher no-op verification failed\n' >&2
+  exit 1
+}
+
+ROLLBACK_NOOP_DEADLINE=$(( $(date +%s) + 60 ))
+while [ "$(date +%s)" -lt "$ROLLBACK_NOOP_DEADLINE" ]; do
+  sudo -n systemctl is-active --quiet deploy-watcher.service || rollback_noop_fail
+  git -C "$PROD_DIR" fetch origin prod || rollback_noop_fail
+  test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$ROLLBACK_COMMIT" || rollback_noop_fail
+  test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$ROLLBACK_COMMIT" || rollback_noop_fail
+  for pair in \
+    "restaurant_backend|$BACKEND_IMAGE_ID" \
+    "restaurant_frontend|$FRONTEND_IMAGE_ID" \
+    "restaurant_caddy|$CADDY_IMAGE_ID" \
+    "restaurant_cloudflared|$CLOUDFLARED_IMAGE_ID"
+  do
+    CONTAINER_NAME="${pair%%|*}"
+    EXPECTED_IMAGE_ID="${pair#*|}"
+    test "$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME")" = \
+      "$EXPECTED_IMAGE_ID" || rollback_noop_fail
+  done
+  sleep 5
 done
-test "$ROLLBACK_READY" -eq 1
-test "$(git -C "$PROD_DIR" rev-parse "$ROLLBACK_COMMIT^{tree}")" = \
-  "$(git -C "$PROD_DIR" rev-parse "$PRE_PROD_SHA^{tree}")"
-test "$(git -C "$PROD_DIR" rev-parse "$ROLLBACK_COMMIT^1")" = "$CANDIDATE_SHA"
-test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
-test "$(docker inspect --format '{{len .Config.Cmd}}' restaurant_cloudflared)" -eq 7
-test "$(docker inspect --format '{{index .Config.Cmd 2}}' restaurant_cloudflared)" = --protocol
-test "$(docker inspect --format '{{index .Config.Cmd 3}}' restaurant_cloudflared)" = quic
-test "$(docker inspect --format '{{index .Config.Cmd 5}}' restaurant_cloudflared)" = --token
 
-curl -fsS http://127.0.0.1:8080/healthz >/dev/null
-curl -fsS http://127.0.0.1:8080/api/health >/dev/null
+ROLLBACK_NOOP_WAIT_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if ! ROLLBACK_DEPLOY_CYCLES="$(sudo -n journalctl \
+  -u deploy-watcher.service \
+  --since "$ROLLBACK_NOOP_WAIT_START" \
+  --until "$ROLLBACK_NOOP_WAIT_END" \
+  --no-pager \
+  | awk -v marker="$WATCHER_DEPLOY_MARKER" '
+      index($0, marker) { count += 1 }
+      END { print count + 0 }
+    ')"; then
+  rollback_noop_fail
+fi
+test "$ROLLBACK_DEPLOY_CYCLES" -eq 0 || rollback_noop_fail
+
+for pair in \
+  "restaurant_backend|$BACKEND_IMAGE_ID" \
+  "restaurant_frontend|$FRONTEND_IMAGE_ID" \
+  "restaurant_caddy|$CADDY_IMAGE_ID" \
+  "restaurant_cloudflared|$CLOUDFLARED_IMAGE_ID"
+do
+  CONTAINER_NAME="${pair%%|*}"
+  EXPECTED_IMAGE_ID="${pair#*|}"
+  test "$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME")" = \
+    "$EXPECTED_IMAGE_ID" || rollback_noop_fail
+done
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = \
+  "$POSTGRES_CONTAINER_ID" || rollback_noop_fail
+test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend)" = healthy || rollback_noop_fail
+test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend)" = healthy || rollback_noop_fail
+test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy)" = healthy || rollback_noop_fail
+test "$(docker inspect --format '{{.State.Running}}' restaurant_cloudflared)" = true || rollback_noop_fail
+test "$(docker inspect --format '{{index .Config.Cmd 3}}' restaurant_cloudflared)" = quic || rollback_noop_fail
+
+curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/healthz >/dev/null || rollback_noop_fail
+curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/api/health >/dev/null || rollback_noop_fail
 set -a
 source "$PROD_DIR/.env"
 set +a
-curl -fsS "${PUBLIC_APP_URL%/}/healthz" >/dev/null
-curl -fsS "${PUBLIC_APP_URL%/}/api/health" >/dev/null
+curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/healthz" >/dev/null || rollback_noop_fail
+curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/api/health" >/dev/null || rollback_noop_fail
 unset PUBLIC_APP_URL
-
-ROLLBACK_WAIT_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-test -n "$WATCHER_DEPLOY_MARKER"
-ROLLBACK_DEPLOY_CYCLES="$(sudo -n journalctl \
-  -u deploy-watcher.service \
-  --since "$ROLLBACK_WAIT_START" \
-  --until "$ROLLBACK_WAIT_END" \
-  --no-pager \
-  | rg -F -c -- "$WATCHER_DEPLOY_MARKER")"
-test "$ROLLBACK_DEPLOY_CYCLES" -eq 1
 printf 'rollback_watcher_deploy_cycles=%s\n' "$ROLLBACK_DEPLOY_CYCLES"
 ```
 
-If the archived source, exact images, exact rollback SHA, rollback CI, explicit
-remote resume, bounded convergence, restored `quic` command, or one-cycle
-count cannot be verified, block the original release rather than improvising
-during an incident.
+This release permits exactly one normal watcher build for the candidate and,
+only during an incident, one manual four-service `--no-build` restore. It never
+permits a rollback rebuild. If equal-SHA no-op behavior, the manual
+fast-forward, exact image preservation, or zero marker count cannot be proven,
+stop and leave the watcher paused until a separately reviewed rollback mode
+exists.
 
 ## Release record checklist
 
 - [ ] Clean pinned `PRE_PROD_SHA`, `MAIN_SHA`, sibling SHA, and `CANDIDATE_SHA`
 - [ ] Full `origin/prod..CANDIDATE_SHA` review approval
 - [ ] Complete local backend, Ruff, frontend, build, Pandoc, static, and migration-twice gates
-- [ ] Authenticated classic-protection 404 and zero applicable rules verified; otherwise separate protected procedure used
+- [ ] Classic `repo` scope plus ADMIN viewer authority proved privately before accepting protection 404; zero applicable rules verified
 - [ ] Exact-SHA watcher gate and explicit direct-release authorization recorded
-- [ ] Watcher working directory, pause/resume, one-build behavior, and marker verified
+- [ ] Exclusive release freeze recorded before candidate resume and held through acceptance or rollback
+- [ ] Watcher working directory, pause/resume, one-build behavior, marker, and equal-SHA no-op verified
 - [ ] Pre-created rollback SHA tree/parent and both non-force dry-run paths verified
 - [ ] External mode-700 rollback state, PRE source, exact Compose project, four image mappings/tags, and four-service no-build dry run verified
 - [ ] Secret shape, controlled admin path, and default-false online gate verified without values
 - [ ] Three production migrations applied once in order before `prod` push; metadata verified
-- [ ] Exact candidate CI green; watcher deployed exactly once; health and SHA verified
+- [ ] Exact candidate CI green; watcher performed the release's one normal build; health and SHA verified
+- [ ] Incident path, if used, performed one four-service no-build restore, manual rollback fast-forward, zero-marker watcher no-op, and no rollback rebuild
 - [ ] Customer 403 and controlled staff/admin 200/privacy/read-only smokes passed
 - [ ] Responsive Tables/detail/Menu matrix passed at 320/375/430 px in en/ru/uz
 - [ ] Stable 15-minute watch met every numeric threshold
