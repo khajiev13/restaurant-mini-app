@@ -13,6 +13,8 @@ export function useVisiblePolling<T>(
   const mountedRef = useRef(false);
   const generationRef = useRef(0);
   const inFlightRef = useRef<Promise<void> | null>(null);
+  const activeRequestKeyRef = useRef<unknown>(undefined);
+  const hasActiveRequestKeyRef = useRef(false);
 
   const refresh = useCallback((): Promise<void> => {
     if (inFlightRef.current) {
@@ -50,11 +52,18 @@ export function useVisiblePolling<T>(
 
   useEffect(() => {
     mountedRef.current = true;
-    generationRef.current += 1;
-    inFlightRef.current = null;
-    setData(null);
-    setError(null);
-    setLoading(true);
+    const requestKeyChanged =
+      !hasActiveRequestKeyRef.current ||
+      !Object.is(activeRequestKeyRef.current, requestKey);
+    if (requestKeyChanged) {
+      hasActiveRequestKeyRef.current = true;
+      activeRequestKeyRef.current = requestKey;
+      generationRef.current += 1;
+      inFlightRef.current = null;
+      setData(null);
+      setError(null);
+      setLoading(true);
+    }
     let timer: number | undefined;
 
     const stop = () => {
@@ -84,20 +93,11 @@ export function useVisiblePolling<T>(
     start();
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      generationRef.current += 1;
+      mountedRef.current = false;
       stop();
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [intervalMs, refresh, requestKey]);
-
-  useEffect(
-    () => () => {
-      mountedRef.current = false;
-      generationRef.current += 1;
-      inFlightRef.current = null;
-    },
-    [],
-  );
 
   return { data, loading, error, refresh };
 }
