@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import uuid
 from contextlib import asynccontextmanager
@@ -7,13 +8,18 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
-from sqlalchemy import select
+import pytest_asyncio
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from app import main as app_main
 from app.config import settings
+from app.main import app
 from app.models.models import Order, User
 from app.schemas.order import OrderCreate
-from app.services import alipos_api, multicard_api
+from app.services import alipos_api, multicard_api, order_service
 from app.services.menu_catalog_service import PricedCart
 from app.services.order_service import (
     CustomerOrderError,
@@ -53,6 +59,32 @@ TABLE = TableDirectoryEntry(
     hall_title="Asosiy zal",
     service_percent=Decimal("10"),
 )
+
+
+@pytest_asyncio.fixture
+async def refund_sessions(db_session):
+    _ = db_session  # Ensure the schema exists before opening independent connections.
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    sessions = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    created_user_ids: list[int] = []
+    try:
+        yield sessions, created_user_ids
+    finally:
+        if created_user_ids:
+            async with sessions() as cleanup_db:
+                await cleanup_db.execute(
+                    delete(Order).where(Order.user_id.in_(created_user_ids))
+                )
+                await cleanup_db.execute(
+                    delete(User).where(User.telegram_id.in_(created_user_ids))
+                )
+                await cleanup_db.commit()
+        await engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -447,6 +479,49 @@ async def _queued_order(
     return order
 
 
+async def _committed_refund_order(
+    refund_sessions,
+    *,
+    refund_sync_status: str,
+) -> tuple[uuid.UUID, str]:
+    sessions, created_user_ids = refund_sessions
+    user_id = 8_000_000_000 + uuid.uuid4().int % 1_000_000_000
+    payment_uuid = f"refund-{uuid.uuid4()}"
+    async with sessions() as db:
+        user = User(
+            telegram_id=user_id,
+            first_name="Refund customer",
+            last_name=None,
+            username=None,
+        )
+        order = Order(
+            user_id=user_id,
+            items=[],
+            delivery_info={
+                "clientName": "Refund customer",
+                "phoneNumber": "+998900000000",
+            },
+            items_cost=10000,
+            total_amount=11000,
+            delivery_fee=0,
+            payment_method="rahmat",
+            payment_provider="multicard",
+            payment_status="refund_pending",
+            multicard_payment_uuid=payment_uuid,
+            refund_sync_status=refund_sync_status,
+            discriminator="inplace",
+            table_id=uuid.uuid4(),
+            alipos_eats_id=f"refund-{uuid.uuid4().hex}",
+            alipos_sync_status="failed",
+            status="SUBMISSION_FAILED",
+        )
+        db.add_all([user, order])
+        await db.commit()
+        order_id = order.id
+    created_user_ids.append(user_id)
+    return order_id, payment_uuid
+
+
 @pytest.mark.asyncio
 async def test_recovery_includes_cash_and_paid_online_but_not_unpaid_online(db_session):
     user = await _customer(db_session)
@@ -548,6 +623,376 @@ async def test_unknown_refund_is_reconciled_without_repeating_delete(db_session)
     lookup.assert_awaited_once_with("payment-uuid")
     assert order.payment_status == "refunded"
     assert order.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        multicard_api.RefundRejected(400),
+        multicard_api.RefundOutcomeUnknown("Multicard refund outcome is unknown"),
+    ],
+    ids=["rejected", "unknown"],
+)
+async def test_refund_terminal_state_cannot_be_downgraded_by_stale_dispatch_writer(
+    refund_sessions,
+    provider_error,
+):
+    sessions, _ = refund_sessions
+    order_id, payment_uuid = await _committed_refund_order(
+        refund_sessions,
+        refund_sync_status="queued",
+    )
+
+    async def terminal_callback_wins(_payment_uuid: str) -> None:
+        async with sessions() as callback_db:
+            await callback_db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .values(
+                    payment_status="refunded",
+                    refund_sync_status="refunded",
+                    refund_sync_error=None,
+                    payment_error=None,
+                )
+            )
+            await callback_db.commit()
+        raise provider_error
+
+    refund = AsyncMock(side_effect=terminal_callback_wins)
+    with patch(
+        "app.services.order_service.multicard_api.refund_payment",
+        new=refund,
+    ):
+        async with sessions() as stale_dispatch_db:
+            await _dispatch_queued_refund(stale_dispatch_db, order_id)
+
+    refund.assert_awaited_once_with(payment_uuid)
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "refunded"
+        assert persisted.refund_sync_status == "refunded"
+        assert persisted.refund_sync_error is None
+        assert persisted.payment_error is None
+
+
+@pytest.mark.asyncio
+async def test_refund_terminal_state_cannot_be_downgraded_by_stale_reconciler(
+    refund_sessions,
+):
+    sessions, _ = refund_sessions
+    order_id, payment_uuid = await _committed_refund_order(
+        refund_sessions,
+        refund_sync_status="unknown",
+    )
+
+    async def terminal_callback_wins(_payment_uuid: str) -> dict:
+        async with sessions() as callback_db:
+            await callback_db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .values(
+                    payment_status="refunded",
+                    refund_sync_status="refunded",
+                    refund_sync_error=None,
+                    payment_error=None,
+                )
+            )
+            await callback_db.commit()
+        raise RuntimeError("unsafe provider reconciliation failure")
+
+    lookup = AsyncMock(side_effect=terminal_callback_wins)
+    with patch(
+        "app.services.order_service.multicard_api.get_payment",
+        new=lookup,
+    ):
+        async with sessions() as stale_reconcile_db:
+            await reconcile_unknown_refunds(stale_reconcile_db)
+
+    lookup.assert_awaited_once_with(payment_uuid)
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "refunded"
+        assert persisted.refund_sync_status == "refunded"
+        assert persisted.refund_sync_error is None
+        assert persisted.payment_error is None
+
+
+@pytest.mark.asyncio
+async def test_refund_reconciliation_provider_reads_run_outside_transactions(
+    db_session,
+):
+    user = await _customer(db_session)
+    orders = []
+    for index in range(2):
+        order = await _queued_order(
+            db_session,
+            user,
+            payment_method="rahmat",
+            payment_status="refund_pending",
+        )
+        order.refund_sync_status = "unknown"
+        order.multicard_payment_uuid = f"payment-{index}"
+        orders.append(order)
+    await db_session.commit()
+    transaction_states: list[bool] = []
+
+    async def observe_transaction(_payment_uuid: str) -> dict[str, str]:
+        transaction_states.append(db_session.in_transaction())
+        return {"status": "revert"}
+
+    with patch(
+        "app.services.order_service.multicard_api.get_payment",
+        new=AsyncMock(side_effect=observe_transaction),
+    ):
+        reconciled = await reconcile_unknown_refunds(db_session)
+
+    assert reconciled == 2
+    assert transaction_states == [False, False]
+    for order in orders:
+        await db_session.refresh(order)
+        assert order.payment_status == "refunded"
+        assert order.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_runtime_unknown_refund_is_reconciled_without_restart(refund_sessions):
+    sessions, _ = refund_sessions
+    order_id, payment_uuid = await _committed_refund_order(
+        refund_sessions,
+        refund_sync_status="unknown",
+    )
+    lookup = AsyncMock(return_value={"status": "revert"})
+
+    with (
+        patch.object(order_service, "async_session", sessions),
+        patch(
+            "app.services.order_service.multicard_api.get_payment",
+            new=lookup,
+        ),
+    ):
+        await order_service.reconcile_provider_operations()
+
+    lookup.assert_awaited_once_with(payment_uuid)
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "refunded"
+        assert persisted.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_refund_error_log_excludes_payment_uuid_and_provider_url(
+    db_session,
+    caplog,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="refund_pending",
+    )
+    payment_uuid = "refund-canary-2f0de170"
+    credential_canary = "credential-canary-91a3"
+    order.refund_sync_status = "queued"
+    order.multicard_payment_uuid = payment_uuid
+    await db_session.commit()
+
+    unsafe_url = f"https://provider-secret.example/payment/{payment_uuid}"
+    request = httpx.Request(
+        "DELETE",
+        unsafe_url,
+        headers={"Authorization": f"Bearer {credential_canary}"},
+    )
+    client = Mock()
+    client.delete = AsyncMock(
+        side_effect=httpx.ReadTimeout(
+            f"raw response details at {unsafe_url} using {credential_canary}",
+            request=request,
+        )
+    )
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    original_refund = multicard_api.refund_payment
+    captured_error: dict[str, Exception] = {}
+
+    async def capture_safe_refund_error(refund_uuid: str) -> dict:
+        try:
+            return await original_refund(refund_uuid)
+        except Exception as exc:
+            captured_error["error"] = exc
+            raise
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=capture_safe_refund_error,
+        ),
+        caplog.at_level("WARNING", logger="app.services.order_service"),
+    ):
+        await _dispatch_queued_refund(db_session, order.id)
+
+    assert client.delete.await_count == 1
+    error = captured_error["error"]
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True
+    assert payment_uuid not in caplog.text
+    assert "/payment/" not in caplog.text
+    assert "raw response details" not in caplog.text
+    assert credential_canary not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_provider_reconciliation_loop_runs_after_startup_survives_tick_error_and_stops_on_shutdown(
+    refund_sessions,
+    monkeypatch,
+    caplog,
+):
+    sessions, created_user_ids = refund_sessions
+    real_reconcile = order_service.reconcile_provider_operations
+    first_tick_failed = asyncio.Event()
+    tick_count = 0
+    log_canary = "tick-secret-/payment/refund-canary-4421"
+
+    async def flaky_reconcile() -> tuple[int, int]:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 1:
+            first_tick_failed.set()
+            raise RuntimeError(log_canary)
+        return await real_reconcile()
+
+    monkeypatch.setattr(order_service, "async_session", sessions)
+    monkeypatch.setattr(order_service, "reconcile_provider_operations", flaky_reconcile)
+    monkeypatch.setattr(
+        order_service,
+        "recover_queued_alipos_orders",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(order_service, "recover_refund_operations", AsyncMock())
+    monkeypatch.setattr(app_main, "_expire_pending_payments", AsyncMock())
+    monkeypatch.setattr(settings, "provider_reconciliation_interval_seconds", 0.01)
+    monkeypatch.setattr(settings, "public_app_url", "")
+    monkeypatch.setattr(settings, "public_backend_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+
+    refund_lookup = AsyncMock(return_value={"status": "revert"})
+    cancel_lookup = AsyncMock(return_value={"status": "CANCELLED"})
+    refund_delete = AsyncMock()
+    cancel_delete = AsyncMock()
+    task = None
+    with (
+        patch(
+            "app.services.order_service.multicard_api.get_payment",
+            new=refund_lookup,
+        ),
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=cancel_lookup,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund_delete,
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel_delete,
+        ),
+        caplog.at_level("WARNING", logger="app.main"),
+    ):
+        async with app.router.lifespan_context(app):
+            await asyncio.wait_for(first_tick_failed.wait(), timeout=1)
+            task = app.state.provider_reconciliation_task
+
+            user_id = 8_000_000_000 + uuid.uuid4().int % 1_000_000_000
+            refund_payment_uuid = f"refund-{uuid.uuid4()}"
+            cancel_provider_id = uuid.uuid4()
+            async with sessions() as seed_db:
+                user = User(
+                    telegram_id=user_id,
+                    first_name="Runtime reconciliation customer",
+                    last_name=None,
+                    username=None,
+                )
+                refund_order = Order(
+                    user_id=user_id,
+                    items=[],
+                    delivery_info={},
+                    items_cost=10000,
+                    total_amount=11000,
+                    delivery_fee=0,
+                    payment_method="rahmat",
+                    payment_provider="multicard",
+                    payment_status="refund_pending",
+                    multicard_payment_uuid=refund_payment_uuid,
+                    refund_sync_status="unknown",
+                    discriminator="inplace",
+                    table_id=uuid.uuid4(),
+                    alipos_eats_id=f"runtime-refund-{uuid.uuid4().hex}",
+                    alipos_sync_status="failed",
+                    status="SUBMISSION_FAILED",
+                )
+                cancel_order = Order(
+                    user_id=user_id,
+                    items=[],
+                    delivery_info={},
+                    items_cost=10000,
+                    total_amount=11000,
+                    delivery_fee=0,
+                    payment_method="cash",
+                    discriminator="inplace",
+                    table_id=uuid.uuid4(),
+                    alipos_order_id=cancel_provider_id,
+                    alipos_eats_id=f"runtime-cancel-{uuid.uuid4().hex}",
+                    alipos_sync_status="synced",
+                    alipos_cancel_status="unknown",
+                    cancel_requested_at=datetime.datetime.now(datetime.UTC).replace(
+                        tzinfo=None
+                    ),
+                    status="NEW",
+                )
+                seed_db.add_all([user, refund_order, cancel_order])
+                await seed_db.commit()
+                refund_order_id = refund_order.id
+                cancel_order_id = cancel_order.id
+            created_user_ids.append(user_id)
+
+            deadline = asyncio.get_running_loop().time() + 2
+            while True:
+                async with sessions() as inspect_db:
+                    persisted_refund = await inspect_db.get(Order, refund_order_id)
+                    persisted_cancel = await inspect_db.get(Order, cancel_order_id)
+                    if (
+                        persisted_refund is not None
+                        and persisted_refund.payment_status == "refunded"
+                        and persisted_refund.refund_sync_status == "refunded"
+                        and persisted_cancel is not None
+                        and persisted_cancel.status == "CANCELLED"
+                        and persisted_cancel.alipos_cancel_status == "cancelled"
+                    ):
+                        break
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("runtime provider reconciliation did not complete")
+                await asyncio.sleep(0.01)
+
+    assert tick_count >= 2
+    assert task is not None
+    assert task.done()
+    assert getattr(app.state, "provider_reconciliation_task", None) is None
+    assert "provider_reconciliation_tick_failed" in caplog.text
+    assert log_canary not in caplog.text
+    refund_lookup.assert_awaited_once_with(refund_payment_uuid)
+    cancel_lookup.assert_awaited_once_with(str(cancel_provider_id))
+    refund_delete.assert_not_awaited()
+    cancel_delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio

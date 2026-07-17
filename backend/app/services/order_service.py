@@ -28,6 +28,7 @@ ALIPOS_PAYLOAD_BUILD_ERROR = "AliPOS order payload could not be prepared"
 ALIPOS_CANCEL_COMMENT = "Mijoz yangi buyurtmani bekor qildi"
 ALIPOS_CANCEL_UNKNOWN_ERROR = "AliPOS cancellation outcome is unknown"
 ALIPOS_CANCEL_RECONCILE_LIMIT = 5
+REFUND_RECONCILE_LIMIT = 5
 ALIPOS_CANCEL_PENDING_STATUSES = (None, "not_started", "sending", "unknown")
 ALIPOS_CANCEL_REPAIRABLE_STATUSES = (*ALIPOS_CANCEL_PENDING_STATUSES, "not_cancelled")
 ALIPOS_CANCELLABLE_LOCAL_STATUSES = ("NEW", "PAID_AWAITING_RESTAURANT")
@@ -410,6 +411,40 @@ async def list_recoverable_refund_order_ids(db: AsyncSession) -> list[uuid.UUID]
     return list(result.scalars())
 
 
+async def _finalize_refund_attempt(
+    db: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    payment_status: str,
+    refund_sync_status: str,
+    refund_sync_error: str | None,
+    payment_error: str | None,
+    load_order: bool = True,
+) -> tuple[Order | None, bool]:
+    result = await db.execute(
+        update(Order)
+        .where(
+            Order.id == order_id,
+            Order.payment_status == "refund_pending",
+            Order.refund_sync_status.in_(("sending", "unknown")),
+        )
+        .values(
+            payment_status=payment_status,
+            refund_sync_status=refund_sync_status,
+            refund_sync_error=refund_sync_error,
+            payment_error=payment_error,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    changed = result.rowcount > 0
+    await db.commit()
+    if not load_order:
+        return None, changed
+    order = await db.get(Order, order_id, populate_existing=True)
+    await db.commit()
+    return order, changed
+
+
 async def _dispatch_queued_refund(db: AsyncSession, order_id: uuid.UUID) -> Order | None:
     """Claim and attempt one never-attempted refund.
 
@@ -442,22 +477,46 @@ async def _dispatch_queued_refund(db: AsyncSession, order_id: uuid.UUID) -> Orde
     try:
         await multicard_api.refund_payment(order.multicard_payment_uuid)
     except multicard_api.RefundRejected:
-        logger.exception("Multicard refund rejected for local order %s", order.id)
-        order.payment_status = "refund_failed"
-        order.refund_sync_status = "failed"
-        order.refund_sync_error = "Provider rejected the refund request"
-        order.payment_error = "The online refund needs staff assistance"
+        logger.warning(
+            "multicard_refund_result",
+            extra={
+                "local_order_id": str(order.id),
+                "refund_outcome": "rejected",
+            },
+        )
+        order, _ = await _finalize_refund_attempt(
+            db,
+            order.id,
+            payment_status="refund_failed",
+            refund_sync_status="failed",
+            refund_sync_error="Provider rejected the refund request",
+            payment_error="The online refund needs staff assistance",
+        )
     except Exception:
-        logger.exception("Multicard refund outcome unknown for local order %s", order.id)
-        order.refund_sync_status = "unknown"
-        order.refund_sync_error = "Provider refund outcome is unknown"
-        order.payment_error = "The refund is being verified"
+        logger.warning(
+            "multicard_refund_result",
+            extra={
+                "local_order_id": str(order.id),
+                "refund_outcome": "unknown",
+            },
+        )
+        order, _ = await _finalize_refund_attempt(
+            db,
+            order.id,
+            payment_status="refund_pending",
+            refund_sync_status="unknown",
+            refund_sync_error="Provider refund outcome is unknown",
+            payment_error="The refund is being verified",
+        )
     else:
-        order.payment_status = "refunded"
-        order.refund_sync_status = "refunded"
-        order.refund_sync_error = None
-        order.payment_error = None
-    await db.commit()
+        order, _ = await _finalize_refund_attempt(
+            db,
+            order.id,
+            payment_status="refunded",
+            refund_sync_status="refunded",
+            refund_sync_error=None,
+            payment_error=None,
+        )
     return order
 
 
@@ -466,40 +525,78 @@ async def dispatch_queued_refund(order_id: uuid.UUID) -> None:
         await _dispatch_queued_refund(db, order_id)
 
 
-async def reconcile_unknown_refunds(db: AsyncSession) -> int:
+async def reconcile_unknown_refunds(
+    db: AsyncSession,
+    *,
+    limit: int = REFUND_RECONCILE_LIMIT,
+) -> int:
     """Confirm completed refunds after a timeout or process interruption.
 
     Non-refunded provider states remain unknown for staff review; this function
     never repeats a potentially completed refund request.
     """
+    bounded_limit = min(max(limit, 0), REFUND_RECONCILE_LIMIT)
+    if bounded_limit == 0:
+        return 0
     result = await db.execute(
-        select(Order).where(
+        select(Order.id, Order.multicard_payment_uuid)
+        .where(
             Order.payment_status == "refund_pending",
-            Order.refund_sync_status.in_(["sending", "unknown"]),
+            Order.refund_sync_status.in_(("sending", "unknown")),
             Order.multicard_payment_uuid.is_not(None),
         )
+        .order_by(Order.updated_at, Order.id)
+        .limit(bounded_limit)
     )
+    refunds = list(result.all())
+    await db.commit()
+
     reconciled = 0
-    for order in result.scalars():
+    for order_id, payment_uuid in refunds:
         try:
-            payment = await multicard_api.get_payment(order.multicard_payment_uuid)
+            payment = await multicard_api.get_payment(payment_uuid)
         except Exception:
-            order.refund_sync_status = "unknown"
-            order.refund_sync_error = "Could not verify provider refund state"
+            logger.warning(
+                "multicard_refund_result",
+                extra={
+                    "local_order_id": str(order_id),
+                    "refund_outcome": "lookup_failed",
+                },
+            )
+            await _finalize_refund_attempt(
+                db,
+                order_id,
+                payment_status="refund_pending",
+                refund_sync_status="unknown",
+                refund_sync_error="Could not verify provider refund state",
+                payment_error="The refund is being verified",
+                load_order=False,
+            )
             continue
         provider_status = str(
             payment.get("status") or payment.get("payment_status") or ""
         ).casefold()
         if provider_status in {"revert", "reverted", "refunded", "refund"}:
-            order.payment_status = "refunded"
-            order.refund_sync_status = "refunded"
-            order.refund_sync_error = None
-            order.payment_error = None
-            reconciled += 1
+            _, changed = await _finalize_refund_attempt(
+                db,
+                order_id,
+                payment_status="refunded",
+                refund_sync_status="refunded",
+                refund_sync_error=None,
+                payment_error=None,
+                load_order=False,
+            )
+            reconciled += int(changed)
         else:
-            order.refund_sync_status = "unknown"
-            order.refund_sync_error = "Provider does not report a completed refund"
-    await db.commit()
+            await _finalize_refund_attempt(
+                db,
+                order_id,
+                payment_status="refund_pending",
+                refund_sync_status="unknown",
+                refund_sync_error="Provider does not report a completed refund",
+                payment_error="The refund is being verified",
+                load_order=False,
+            )
     return reconciled
 
 
@@ -827,6 +924,14 @@ async def reconcile_unknown_alipos_cancellations(
     for order_id in order_ids:
         reconciled += int(await _reconcile_alipos_cancellation(db, order_id))
     return reconciled
+
+
+async def reconcile_provider_operations() -> tuple[int, int]:
+    """Run one bounded GET-only pass for ambiguous refund and cancellation outcomes."""
+    async with async_session() as db:
+        reconciled_refunds = await reconcile_unknown_refunds(db)
+        reconciled_cancellations = await reconcile_unknown_alipos_cancellations(db)
+    return reconciled_refunds, reconciled_cancellations
 
 
 async def cancel_customer_order(

@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     multicard_store_id: int = 0
     rahmat_payment_timeout_seconds: int = 600
     payment_expiry_check_interval_seconds: int = 30
+    provider_reconciliation_interval_seconds: int = 30
     inplace_online_payment_enabled: bool = False
     inplace_online_payment_test_telegram_ids: str = ""
 

@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -24,6 +25,8 @@ from app.routers import (
 
 logger = logging.getLogger(__name__)
 PAYMENTS_EXPIRY_LOCK_ID = 841_337_204
+PROVIDER_RECONCILIATION_MIN_INTERVAL_SECONDS = 1
+PROVIDER_RECONCILIATION_MAX_INTERVAL_SECONDS = 3600
 TELEGRAM_ALLOWED_UPDATES = ["message"]
 
 app = FastAPI(title="Mr.Pub Restaurant API", version="0.1.0")
@@ -113,6 +116,54 @@ async def recover_paid_alipos_queue() -> None:
 
     await recover_queued_alipos_orders()
     await recover_refund_operations()
+
+
+def _provider_reconciliation_interval_seconds() -> float:
+    return min(
+        max(
+            float(settings.provider_reconciliation_interval_seconds),
+            PROVIDER_RECONCILIATION_MIN_INTERVAL_SECONDS,
+        ),
+        PROVIDER_RECONCILIATION_MAX_INTERVAL_SECONDS,
+    )
+
+
+async def _reconcile_provider_operations_periodically() -> None:
+    from app.services.order_service import reconcile_provider_operations
+
+    while True:
+        try:
+            await reconcile_provider_operations()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.error(
+                "provider_reconciliation_tick_failed",
+                extra={"reconciliation_outcome": "tick_error"},
+            )
+        await asyncio.sleep(_provider_reconciliation_interval_seconds())
+
+
+@app.on_event("startup")
+async def start_provider_reconciliation_task() -> None:
+    current = getattr(app.state, "provider_reconciliation_task", None)
+    if current is not None and not current.done():
+        return
+    app.state.provider_reconciliation_task = asyncio.create_task(
+        _reconcile_provider_operations_periodically(),
+        name="provider-reconciliation",
+    )
+
+
+@app.on_event("shutdown")
+async def stop_provider_reconciliation_task() -> None:
+    task = getattr(app.state, "provider_reconciliation_task", None)
+    app.state.provider_reconciliation_task = None
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 async def _expire_pending_payments() -> None:
