@@ -24,6 +24,8 @@ UNSAFE_ADMIN_CONCURRENCY_DATABASE_URLS = (
     "postgresql+asyncpg://gate:secret@127.0.0.1:5432/restaurant_db",
     "postgresql+asyncpg://gate:secret@127.0.0.1:5432/contest-production",
     "postgresql+asyncpg://gate:secret@127.0.0.1:5432/admin_concurrency_gate_",
+    "postgresql+asyncpg://gate:secret@127.0.0.1:5432/admin_concurrency_gate_local?host=db.internal",
+    "postgresql+asyncpg://gate:secret@127.0.0.1:5432/admin_concurrency_gate_local?database=restaurant_db",
 )
 
 
@@ -31,7 +33,8 @@ def _is_admin_concurrency_gate_database(database_url: str) -> bool:
     url = make_url(database_url)
     database_name = (url.database or "").lower()
     return (
-        (url.host or "").lower() in LOOPBACK_DATABASE_HOSTS
+        not url.query
+        and (url.host or "").lower() in LOOPBACK_DATABASE_HOSTS
         and database_name.startswith(ADMIN_CONCURRENCY_DATABASE_PREFIX)
         and database_name != ADMIN_CONCURRENCY_DATABASE_PREFIX
     )
