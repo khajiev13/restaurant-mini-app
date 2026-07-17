@@ -261,14 +261,30 @@ restaurant-mini-app/
 
 ## QR Table Ordering
 
-Each physical table gets a Telegram deep link from the admin-only manifest plus its six-character fallback code. Generate the current manifest after the app is configured:
+Manual entry uses the trailing table number from the AliPOS title: `Stol 12`
+uses code `12`. Codes must be unique across all halls. New QR links use signed
+`t2_` parameters; already printed signed `t_` links remain compatible.
+
+After deploying and verifying the public app, download the admin manifest without
+printing the JWT:
 
 ```bash
-curl -H "Authorization: Bearer $ADMIN_JWT" \
-  "$PUBLIC_APP_URL/api/tables/manifest"
+test -n "$ADMIN_JWT"
+curl -fsS -H "Authorization: Bearer $ADMIN_JWT" \
+  https://restaurant.labtutor.app/api/tables/manifest \
+  -o /private/tmp/olot-table-manifest.json
 ```
 
-Encode each item's `deep_link` as the table QR and print its `manual_code` next to it. A scan opens the existing menu with a session-scoped table context. Customers at the same table keep separate carts and orders; they never see a shared table bill.
+Generate and verify the assets outside the repository:
+
+```bash
+uv run --script scripts/generate_table_qr_assets.py \
+  --manifest /private/tmp/olot-table-manifest.json \
+  --verify-api https://restaurant.labtutor.app/api \
+  --output /private/tmp/olot-table-qr-codes
+```
+
+A scan opens the existing menu with a session-scoped table context. Customers at the same table keep separate carts and orders; they never see a shared table bill.
 
 Payment behavior:
 
