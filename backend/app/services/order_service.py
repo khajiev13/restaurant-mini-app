@@ -591,11 +591,13 @@ async def _finalize_alipos_cancelled(
     expected_statuses: tuple[str | None, ...],
 ) -> tuple[Order | None, bool, bool]:
     now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    is_cancellable = Order.status.in_(ALIPOS_CANCELLABLE_LOCAL_STATUSES)
     is_terminal = Order.status.in_(TERMINAL_LOCAL_STATUSES)
+    is_locally_cancelled = Order.status.in_(("CANCELLED", "CANCELED"))
     should_queue_refund = and_(
         Order.payment_status == "paid",
         Order.refund_sync_status.is_(None),
-        Order.status != "DELIVERED",
+        or_(is_cancellable, is_locally_cancelled),
         Order.delivered_at.is_(None),
     )
     result = await db.execute(
@@ -606,14 +608,17 @@ async def _finalize_alipos_cancelled(
         )
         .values(
             status=case(
-                (is_terminal, Order.status),
-                else_="CANCELLED",
+                (is_cancellable, "CANCELLED"),
+                else_=Order.status,
             ),
             status_updated_at=case(
-                (is_terminal, Order.status_updated_at),
-                else_=now,
+                (is_cancellable, now),
+                else_=Order.status_updated_at,
             ),
-            alipos_cancel_status="cancelled",
+            alipos_cancel_status=case(
+                (or_(is_cancellable, is_terminal), "cancelled"),
+                else_="not_cancelled",
+            ),
             alipos_cancel_error=None,
             payment_status=case(
                 (should_queue_refund, "refund_pending"),
@@ -867,7 +872,7 @@ async def cancel_customer_order(
         )
         if order is None:
             raise CustomerOrderNotFound("Order not found")
-        if not finalized and order.alipos_cancel_status == "not_cancelled":
+        if order.alipos_cancel_status == "not_cancelled":
             raise CancellationConflict(
                 "The restaurant has already accepted this order, so it cannot be cancelled"
             )
@@ -983,7 +988,7 @@ async def cancel_customer_order(
     )
     if order is None:
         raise CustomerOrderNotFound("Order not found")
-    if not finalized and order.alipos_cancel_status == "not_cancelled":
+    if order.alipos_cancel_status == "not_cancelled":
         raise CancellationConflict(
             "The restaurant has already accepted this order, so it cannot be cancelled"
         )

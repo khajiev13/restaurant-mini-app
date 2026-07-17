@@ -763,6 +763,186 @@ async def test_not_cancelled_reconciliation_preserves_concurrent_ready_status(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_reconciliation_preserves_concurrent_ready_without_refund(
+    cancellation_sessions,
+):
+    _, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _table_order(seed_db, paid=True)
+        created_user_ids.append(user.telegram_id)
+        order_id = order.id
+        ready_at = datetime.datetime.now(datetime.UTC).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=5)
+        order.alipos_cancel_status = "unknown"
+        order.cancel_requested_at = datetime.datetime.now(datetime.UTC).replace(
+            tzinfo=None
+        )
+        await seed_db.commit()
+
+    async def ready_wins_before_get_returns(_provider_order_id: str) -> dict[str, str]:
+        async with sessions() as race_db:
+            await race_db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .values(status="READY", status_updated_at=ready_at)
+            )
+            await race_db.commit()
+        return {"status": "CANCELLED"}
+
+    refund = AsyncMock()
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=AsyncMock(side_effect=ready_wins_before_get_returns),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=AsyncMock(),
+        ) as cancel,
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        async with sessions() as reconcile_db:
+            reconciled = await order_service.reconcile_unknown_alipos_cancellations(
+                reconcile_db,
+                limit=5,
+            )
+
+    assert reconciled == 1
+    cancel.assert_not_awaited()
+    refund.assert_not_awaited()
+    async with sessions() as observer_db:
+        persisted = await observer_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.status == "READY"
+        assert persisted.status_updated_at == ready_at
+        assert persisted.alipos_cancel_status == "not_cancelled"
+        assert persisted.payment_status == "paid"
+        assert persisted.refund_sync_status is None
+
+
+@pytest.mark.asyncio
+async def test_first_cancel_preserves_ready_that_wins_before_cancelled_get_returns(
+    cancellation_sessions,
+):
+    committing_client, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _table_order(seed_db, paid=True)
+        created_user_ids.append(user.telegram_id)
+        user_id = user.telegram_id
+        order_id = order.id
+        ready_at = datetime.datetime.now(datetime.UTC).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=5)
+
+    async def ready_wins_before_get_returns(_provider_order_id: str) -> dict[str, str]:
+        async with sessions() as race_db:
+            await race_db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .values(status="READY", status_updated_at=ready_at)
+            )
+            await race_db.commit()
+        return {"status": "CANCELLED"}
+
+    cancel = AsyncMock()
+    refund = AsyncMock()
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=AsyncMock(side_effect=ready_wins_before_get_returns),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        response = await committing_client.delete(
+            f"/api/orders/{order_id}",
+            headers={"Authorization": f"Bearer {create_jwt(user_id)}"},
+        )
+
+    assert response.status_code == 409
+    cancel.assert_not_awaited()
+    refund.assert_not_awaited()
+    async with sessions() as observer_db:
+        persisted = await observer_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.status == "READY"
+        assert persisted.status_updated_at == ready_at
+        assert persisted.alipos_cancel_status == "not_cancelled"
+        assert persisted.payment_status == "paid"
+        assert persisted.refund_sync_status is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_delete_success_preserves_ready_that_wins_before_finalize(
+    cancellation_sessions,
+):
+    committing_client, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _table_order(seed_db, paid=True)
+        created_user_ids.append(user.telegram_id)
+        user_id = user.telegram_id
+        order_id = order.id
+        ready_at = datetime.datetime.now(datetime.UTC).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=5)
+
+    async def ready_wins_before_finalize(
+        _provider_order_id: str,
+        _comment: str,
+    ) -> None:
+        async with sessions() as race_db:
+            await race_db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .values(status="READY", status_updated_at=ready_at)
+            )
+            await race_db.commit()
+
+    cancel = AsyncMock(side_effect=ready_wins_before_finalize)
+    refund = AsyncMock()
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=AsyncMock(return_value={"status": "NEW"}),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        response = await committing_client.delete(
+            f"/api/orders/{order_id}",
+            headers={"Authorization": f"Bearer {create_jwt(user_id)}"},
+        )
+
+    assert response.status_code == 409
+    cancel.assert_awaited_once()
+    refund.assert_not_awaited()
+    async with sessions() as observer_db:
+        persisted = await observer_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.status == "READY"
+        assert persisted.status_updated_at == ready_at
+        assert persisted.alipos_cancel_status == "not_cancelled"
+        assert persisted.payment_status == "paid"
+        assert persisted.refund_sync_status is None
+
+
+@pytest.mark.asyncio
 async def test_cancel_reconciliation_clamps_requested_batch_size(cancellation_sessions):
     _, sessions, created_user_ids = cancellation_sessions
     async with sessions() as seed_db:
