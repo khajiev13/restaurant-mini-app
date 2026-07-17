@@ -1,7 +1,8 @@
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import type { StaffOrder } from '../../types/staff';
 import { formatDateTime, formatPrice } from '../../utils/format';
 import { COLORS, FONTS, Icon } from '../artisan/ArtisanLayout';
+import './staff-order-card.css';
 
 function getItemSummary(order: StaffOrder): string {
   return order.items
@@ -43,25 +44,18 @@ export default function StaffOrderCard({
   onTake?: (order: StaffOrder) => void;
   order: StaffOrder;
 }) {
-  const navigate = useNavigate();
   const cashOrder = order.payment_method === 'cash';
-  const canOpenOrder = mode !== 'available' || !disabled;
   const deliveryDuration = getDeliveryDuration(order);
+  const orderLabel = `#${order.order_number ?? order.id.slice(0, 6)}`;
 
   return (
     <article
-      onClick={() => {
-        if (canOpenOrder) {
-          navigate(`/staff/orders/${order.id}`);
-        }
-      }}
       style={{
         margin: '0 20px 16px',
         padding: 18,
         borderRadius: 16,
         backgroundColor: COLORS.surfaceContainerLowest,
         boxShadow: '0 12px 32px rgba(45, 47, 47, 0.08)',
-        cursor: canOpenOrder ? 'pointer' : 'default',
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -86,7 +80,7 @@ export default function StaffOrderCard({
               lineHeight: 1.2,
             }}
           >
-            #{order.order_number ?? order.id.slice(0, 6)}
+            {orderLabel}
           </h2>
         </div>
         <strong
@@ -169,6 +163,14 @@ export default function StaffOrderCard({
           ) : null}
         </div>
       ) : null}
+
+      <Link
+        to={`/staff/orders/${order.id}`}
+        aria-label={`View order ${orderLabel} details`}
+        className="staff-order-card__details"
+      >
+        View Details
+      </Link>
     </article>
   );
 }

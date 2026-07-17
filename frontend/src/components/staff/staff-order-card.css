@@ -1,0 +1,17 @@
+.staff-order-card__details {
+  min-height: 48px;
+  margin-top: 12px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f0f1f1;
+  color: #2d2f2f;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.staff-order-card__details:focus-visible {
+  outline: 3px solid #a33800;
+  outline-offset: 3px;
+}

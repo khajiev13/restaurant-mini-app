@@ -4,6 +4,7 @@ import type { ApiResponse } from '../types/api';
 import type { StaffOrder } from '../types/staff';
 
 const TAKE_ORDER_TIMEOUT_MS = 15000;
+const TAKE_ORDER_TIMEOUT_DETAIL = 'Could not refresh order status. Try again.';
 const RECONCILIATION_READ_TIMEOUT_MS = 2000;
 const RECONCILIATION_READ_OFFSETS_MS = [0, 5000, 11000] as const;
 
@@ -16,8 +17,17 @@ export type StaffOrderTakeReconciliationResult =
   | { outcome: 'different'; order: StaffOrder }
   | { outcome: 'none' };
 
-export const isStaffOrderTakeTransportAmbiguity = (error: unknown): boolean =>
-  isAxiosError(error) && !error.response;
+export const isStaffOrderTakeTransportAmbiguity = (error: unknown): boolean => {
+  if (!isAxiosError(error)) {
+    return false;
+  }
+  if (!error.response) {
+    return true;
+  }
+
+  const responseDetail = (error.response.data as { detail?: unknown } | undefined)?.detail;
+  return error.response.status === 503 && responseDetail === TAKE_ORDER_TIMEOUT_DETAIL;
+};
 
 const abortReason = (signal: AbortSignal): Error =>
   signal.reason instanceof Error

@@ -103,6 +103,42 @@ describe('staffApi take-order safety', () => {
     expect(isStaffOrderTakeTransportAmbiguity(new Error('render failed'))).toBe(false);
   });
 
+  it('classifies only the take-operation 503 response as ambiguous', () => {
+    const takeTimeoutResponse = {
+      ...success<StaffOrder | null>(null),
+      status: 503,
+      statusText: 'Service Unavailable',
+      data: { detail: 'Could not refresh order status. Try again.' },
+    } as unknown as AxiosResponse;
+    const unrelatedResponse = {
+      ...takeTimeoutResponse,
+      data: { detail: 'Another service is unavailable.' },
+    } as AxiosResponse;
+
+    expect(
+      isStaffOrderTakeTransportAmbiguity(
+        new AxiosError(
+          'take timed out',
+          'ERR_BAD_RESPONSE',
+          undefined,
+          undefined,
+          takeTimeoutResponse,
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isStaffOrderTakeTransportAmbiguity(
+        new AxiosError(
+          'unrelated failure',
+          'ERR_BAD_RESPONSE',
+          undefined,
+          undefined,
+          unrelatedResponse,
+        ),
+      ),
+    ).toBe(false);
+  });
+
   it('returns same immediately and passes the exact bounded read config', async () => {
     const order = makeOrder('target-order');
     const controller = new AbortController();

@@ -408,6 +408,22 @@ describe('StaffTablesPage', () => {
     expect(await screen.findByText('AliPOS returned no tables.')).toBeInTheDocument();
   });
 
+  it('shows an empty live-directory notice alongside retained unlisted orders', async () => {
+    apiMocks.getStaffTables.mockResolvedValue({
+      data: {
+        success: true,
+        data: { freshness, halls: [overview.halls[1]] },
+      },
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('AliPOS returned no tables.')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Unlisted tables' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Removed 9' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
   it('direct-loads menu view, preserves filter, and never supplies order controls', async () => {
     renderPage('/staff/tables?view=menu&filter=attention');
 

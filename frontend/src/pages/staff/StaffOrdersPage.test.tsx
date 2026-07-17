@@ -1,5 +1,5 @@
 import { AxiosError, AxiosHeaders, type AxiosResponse } from 'axios';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -132,6 +132,59 @@ describe('StaffOrdersPage', () => {
 
     await user.click(screen.getByLabelText(/i have collected/i));
     expect(confirmButton).toBeEnabled();
+  });
+
+  it('names, traps, closes, and restores focus for the delivery dialog', async () => {
+    const user = userEvent.setup();
+    apiMocks.getActiveStaffOrder.mockResolvedValue({
+      data: { data: { ...staffOrder, assigned_at: '2026-07-07T10:01:00Z' } },
+    });
+    render(
+      <MemoryRouter initialEntries={['/staff/orders?tab=active']}>
+        <StaffOrdersPage />
+      </MemoryRouter>,
+    );
+
+    const markButton = await screen.findByRole('button', { name: 'Mark Delivered' });
+    await user.click(markButton);
+
+    const dialog = screen.getByRole('dialog', { name: 'Confirm Delivery' });
+    const checkbox = screen.getByRole('checkbox');
+    const cancelButton = screen.getByRole('button', { name: 'Cancel' });
+    await waitFor(() => expect(checkbox).toHaveFocus());
+    expect(markButton.closest('[inert]')).not.toBeNull();
+
+    await user.tab({ shift: true });
+    expect(cancelButton).toHaveFocus();
+    await user.tab();
+    expect(checkbox).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    expect(dialog).not.toBeInTheDocument();
+    await waitFor(() => expect(markButton).toHaveFocus());
+    expect(markButton.closest('[inert]')).toBeNull();
+  });
+
+  it('opens order details from a semantic keyboard link separate from Take', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/staff/orders?tab=available']}>
+        <Routes>
+          <Route path="/staff/orders" element={<StaffOrdersPage />} />
+          <Route path="/staff/orders/:orderId" element={<div>Order detail route</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const detailLink = await screen.findByRole('link', {
+      name: 'View order #A7-492 details',
+    });
+    const takeButton = screen.getByRole('button', { name: 'Take Order' });
+    expect(detailLink.parentElement).toBe(takeButton.parentElement);
+
+    detailLink.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByText('Order detail route')).toBeInTheDocument();
   });
 
   it('does not navigate to an available order when another delivery is already active', async () => {
@@ -405,5 +458,6 @@ describe('StaffOrdersPage', () => {
     );
 
     expect(await screen.findByText(/27 min/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'View order #A7-492 details' })).toBeInTheDocument();
   });
 });

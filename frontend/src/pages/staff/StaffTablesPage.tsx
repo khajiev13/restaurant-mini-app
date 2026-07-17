@@ -107,7 +107,10 @@ export default function StaffTablesPage() {
     }))
     .filter((hall) => hall.tables.length > 0), [data?.halls, filter]);
   const directoryTableCount = useMemo(
-    () => (data?.halls ?? []).reduce((sum, hall) => sum + hall.tables.length, 0),
+    () => (data?.halls ?? []).reduce(
+      (sum, hall) => sum + (hall.is_listed ? hall.tables.length : 0),
+      0,
+    ),
     [data?.halls],
   );
   const hasCachedError = error !== null && data !== null && !roleBoundary;
@@ -253,36 +256,39 @@ export default function StaffTablesPage() {
                   {t('staff_tables.retry', 'Retry')}
                 </button>
               </section>
-            ) : data && directoryTableCount === 0 ? (
-              <section className="staff-tables__empty">
-                <p>{t('staff_tables.empty_directory', 'AliPOS returned no tables.')}</p>
-                <button type="button" onClick={() => void refresh()}>
-                  {t('staff_tables.retry', 'Retry')}
-                </button>
-              </section>
             ) : data ? (
               <>
-                <div
-                  role="group"
-                  aria-label={t('staff_tables.filters', 'Table filters')}
-                  className="staff-tables__filters"
-                >
-                  {(['all', 'active', 'attention'] as const).map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      aria-pressed={filter === value}
-                      onClick={() => setFilter(value)}
-                    >
-                      {value === 'all'
-                        ? t('staff_tables.all', 'All')
-                        : value === 'active'
-                          ? t('staff_tables.with_orders', 'With orders')
-                          : t('staff_tables.attention', 'Attention')}
+                {directoryTableCount === 0 ? (
+                  <section className="staff-tables__empty">
+                    <p>{t('staff_tables.empty_directory', 'AliPOS returned no tables.')}</p>
+                    <button type="button" onClick={() => void refresh()}>
+                      {t('staff_tables.retry', 'Retry')}
                     </button>
-                  ))}
-                </div>
-                {filteredHalls.length === 0 ? (
+                  </section>
+                ) : null}
+                {filteredHalls.length > 0 ? (
+                  <div
+                    role="group"
+                    aria-label={t('staff_tables.filters', 'Table filters')}
+                    className="staff-tables__filters"
+                  >
+                    {(['all', 'active', 'attention'] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={filter === value}
+                        onClick={() => setFilter(value)}
+                      >
+                        {value === 'all'
+                          ? t('staff_tables.all', 'All')
+                          : value === 'active'
+                            ? t('staff_tables.with_orders', 'With orders')
+                            : t('staff_tables.attention', 'Attention')}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {filteredHalls.length === 0 && directoryTableCount > 0 ? (
                   <p>{t('staff_tables.no_filter_results', 'No tables match this filter.')}</p>
                 ) : filteredHalls.map((hall) => (
                   <TableHallSection
