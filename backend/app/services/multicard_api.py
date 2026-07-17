@@ -26,6 +26,10 @@ class RefundRejected(RuntimeError):
         self.status_code = status_code
 
 
+class RefundNotAttempted(RuntimeError):
+    """A refund request definitely did not reach the provider DELETE."""
+
+
 class RefundOutcomeUnknown(RuntimeError):
     """A refund may have completed, so the payment must be reconciled."""
 
@@ -219,9 +223,11 @@ async def cancel_invoice_strict(invoice_uuid: str) -> None:
 
 async def refund_payment(payment_uuid: str) -> dict[str, Any]:
     """Request one full refund for a completed Multicard payment."""
+    delete_invocation_started = False
     try:
         token = await _get_token()
         async with httpx.AsyncClient() as client:
+            delete_invocation_started = True
             response = await client.delete(
                 f"{settings.multicard_api_base_url}/payment/{payment_uuid}",
                 headers={
@@ -231,6 +237,8 @@ async def refund_payment(payment_uuid: str) -> dict[str, Any]:
                 timeout=30,
             )
     except Exception:
+        if not delete_invocation_started:
+            raise RefundNotAttempted("Multicard refund was not attempted") from None
         raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from None
 
     try:

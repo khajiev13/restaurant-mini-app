@@ -400,14 +400,22 @@ async def recover_queued_alipos_orders() -> None:
         asyncio.create_task(dispatch_queued_alipos_order(order_id))
 
 
-async def list_recoverable_refund_order_ids(db: AsyncSession) -> list[uuid.UUID]:
+async def list_recoverable_refund_order_ids(
+    db: AsyncSession,
+    *,
+    limit: int | None = None,
+) -> list[uuid.UUID]:
     """Return refunds that were durably queued but never attempted."""
-    result = await db.execute(
-        select(Order.id).where(
-            Order.payment_status == "refund_pending",
-            Order.refund_sync_status == "queued",
-        )
+    statement = select(Order.id).where(
+        Order.payment_status == "refund_pending",
+        Order.refund_sync_status == "queued",
     )
+    if limit is not None:
+        bounded_limit = min(max(limit, 0), REFUND_RECONCILE_LIMIT)
+        if bounded_limit == 0:
+            return []
+        statement = statement.order_by(Order.updated_at, Order.id).limit(bounded_limit)
+    result = await db.execute(statement)
     return list(result.scalars())
 
 
@@ -448,8 +456,8 @@ async def _finalize_refund_attempt(
 async def _dispatch_queued_refund(db: AsyncSession, order_id: uuid.UUID) -> Order | None:
     """Claim and attempt one never-attempted refund.
 
-    Transport failures are deliberately recorded as unknown: retrying DELETE after
-    a timeout could refund twice if the provider processed the first request.
+    Failures before DELETE invocation begins are safe to requeue. Failures during
+    or after DELETE are unknown because repeating them could refund twice.
     """
     result = await db.execute(
         select(Order)
@@ -476,6 +484,25 @@ async def _dispatch_queued_refund(db: AsyncSession, order_id: uuid.UUID) -> Orde
     await db.commit()
     try:
         await multicard_api.refund_payment(order.multicard_payment_uuid)
+    except multicard_api.RefundNotAttempted:
+        logger.warning(
+            "multicard_refund_result",
+            extra={
+                "local_order_id": str(order.id),
+                "refund_outcome": "not_attempted",
+            },
+        )
+        # Reconciliation may have observed this claimed attempt as ``sending`` and
+        # changed it to ``unknown`` while provider setup was blocked. This exception
+        # proves DELETE never began, so either nonterminal state is safe to requeue.
+        order, _ = await _finalize_refund_attempt(
+            db,
+            order.id,
+            payment_status="refund_pending",
+            refund_sync_status="queued",
+            refund_sync_error="Provider refund request was not attempted",
+            payment_error="The refund will be retried",
+        )
     except multicard_api.RefundRejected:
         logger.warning(
             "multicard_refund_result",
@@ -927,7 +954,16 @@ async def reconcile_unknown_alipos_cancellations(
 
 
 async def reconcile_provider_operations() -> tuple[int, int]:
-    """Run one bounded GET-only pass for ambiguous refund and cancellation outcomes."""
+    """Retry safe refunds and GET-reconcile ambiguous provider outcomes once."""
+    async with async_session() as db:
+        retryable_refund_ids = await list_recoverable_refund_order_ids(
+            db,
+            limit=REFUND_RECONCILE_LIMIT,
+        )
+        await db.commit()
+    for order_id in retryable_refund_ids:
+        await dispatch_queued_refund(order_id)
+
     async with async_session() as db:
         reconciled_refunds = await reconcile_unknown_refunds(db)
         reconciled_cancellations = await reconcile_unknown_alipos_cancellations(db)

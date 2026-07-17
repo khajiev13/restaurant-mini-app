@@ -629,10 +629,11 @@ async def test_unknown_refund_is_reconciled_without_repeating_delete(db_session)
 @pytest.mark.parametrize(
     "provider_error",
     [
+        multicard_api.RefundNotAttempted("Multicard refund was not attempted"),
         multicard_api.RefundRejected(400),
         multicard_api.RefundOutcomeUnknown("Multicard refund outcome is unknown"),
     ],
-    ids=["rejected", "unknown"],
+    ids=["not-attempted", "rejected", "unknown"],
 )
 async def test_refund_terminal_state_cannot_be_downgraded_by_stale_dispatch_writer(
     refund_sessions,
@@ -781,6 +782,285 @@ async def test_runtime_unknown_refund_is_reconciled_without_restart(refund_sessi
         assert persisted is not None
         assert persisted.payment_status == "refunded"
         assert persisted.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_stage",
+    ["token", "client-construction", "client-entry"],
+)
+async def test_pre_delete_refund_failure_is_retried_once_at_runtime(
+    refund_sessions,
+    caplog,
+    failure_stage,
+):
+    sessions, _ = refund_sessions
+    order_id, payment_uuid = await _committed_refund_order(
+        refund_sessions,
+        refund_sync_status="queued",
+    )
+    provider_url_canary = "https://provider-secret.example"
+    credential_canary = "credential-canary-4721"
+    response_body_canary = "response-body-canary-8036"
+    unsafe_chain_canary = "unsafe-chain-canary-1954"
+    try:
+        try:
+            raise RuntimeError(unsafe_chain_canary)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"auth failed at {provider_url_canary} for {payment_uuid} "
+                f"with {credential_canary}: {response_body_canary}"
+            ) from exc
+    except RuntimeError as exc:
+        unsafe_setup_error = exc
+
+    marker_states: list[tuple[str | None, str | None]] = []
+
+    async def observe_committed_marker(*_args, **_kwargs) -> httpx.Response:
+        async with sessions() as inspect_db:
+            persisted = await inspect_db.get(Order, order_id)
+            assert persisted is not None
+            marker_states.append(
+                (persisted.payment_status, persisted.refund_sync_status)
+            )
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"status": "revert"}},
+            request=httpx.Request(
+                "DELETE",
+                f"{provider_url_canary}/payment/{payment_uuid}",
+            ),
+        )
+
+    client = Mock()
+    client.delete = AsyncMock(side_effect=observe_committed_marker)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    get_token = AsyncMock(return_value="safe-token")
+    client_factory = Mock(return_value=client)
+    failed_client = None
+    if failure_stage == "token":
+        get_token.side_effect = [unsafe_setup_error, "safe-token"]
+    elif failure_stage == "client-construction":
+        client_factory.side_effect = [unsafe_setup_error, client]
+    else:
+        failed_client = Mock()
+        failed_client.delete = AsyncMock()
+        failed_client.__aenter__ = AsyncMock(side_effect=unsafe_setup_error)
+        failed_client.__aexit__ = AsyncMock(return_value=None)
+        client_factory.side_effect = [failed_client, client]
+    provider_lookup = AsyncMock(return_value={"status": "success"})
+    original_refund = multicard_api.refund_payment
+    captured_errors: list[Exception] = []
+
+    async def capture_sanitized_error(refund_uuid: str) -> dict:
+        try:
+            return await original_refund(refund_uuid)
+        except Exception as exc:
+            captured_errors.append(exc)
+            raise
+
+    with (
+        patch.object(order_service, "async_session", sessions),
+        patch("app.services.multicard_api._get_token", new=get_token),
+        patch("app.services.multicard_api.httpx.AsyncClient", new=client_factory),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=capture_sanitized_error,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.get_payment",
+            new=provider_lookup,
+        ),
+        caplog.at_level("WARNING", logger="app.services.order_service"),
+    ):
+        async with sessions() as dispatch_db:
+            await _dispatch_queued_refund(dispatch_db, order_id)
+
+        client.delete.assert_not_awaited()
+        if failed_client is not None:
+            failed_client.delete.assert_not_awaited()
+        async with sessions() as inspect_db:
+            retryable = await inspect_db.get(Order, order_id)
+            assert retryable is not None
+            assert retryable.payment_status == "refund_pending"
+            assert retryable.refund_sync_status == "queued"
+
+        await order_service.reconcile_provider_operations()
+
+    assert get_token.await_count == 2
+    client.delete.assert_awaited_once()
+    provider_lookup.assert_not_awaited()
+    assert marker_states == [("refund_pending", "sending")]
+    assert len(captured_errors) == 1
+    safe_error = captured_errors[0]
+    assert isinstance(safe_error, multicard_api.RefundNotAttempted)
+    assert safe_error.__cause__ is None
+    assert safe_error.__suppress_context__ is True
+
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "refunded"
+        assert persisted.refund_sync_status == "refunded"
+
+    for secret in (
+        provider_url_canary,
+        credential_canary,
+        payment_uuid,
+        response_body_canary,
+        unsafe_chain_canary,
+    ):
+        assert secret not in str(safe_error)
+        assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reconciler_race_does_not_strand_pre_delete_refund(refund_sessions):
+    sessions, _ = refund_sessions
+    order_id, payment_uuid = await _committed_refund_order(
+        refund_sessions,
+        refund_sync_status="queued",
+    )
+    token_started = asyncio.Event()
+    release_token_failure = asyncio.Event()
+    token_calls = 0
+
+    async def fail_first_token_attempt() -> str:
+        nonlocal token_calls
+        token_calls += 1
+        if token_calls == 1:
+            token_started.set()
+            await release_token_failure.wait()
+            raise RuntimeError("unsafe blocked token failure")
+        return "safe-token"
+
+    marker_states: list[tuple[str | None, str | None]] = []
+
+    async def observe_committed_marker(*_args, **_kwargs) -> httpx.Response:
+        async with sessions() as inspect_db:
+            persisted = await inspect_db.get(Order, order_id)
+            assert persisted is not None
+            marker_states.append(
+                (persisted.payment_status, persisted.refund_sync_status)
+            )
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"status": "revert"}},
+            request=httpx.Request(
+                "DELETE",
+                f"https://provider.example/payment/{payment_uuid}",
+            ),
+        )
+
+    client = Mock()
+    client.delete = AsyncMock(side_effect=observe_committed_marker)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    provider_lookup = AsyncMock(return_value={"status": "success"})
+
+    async def run_first_dispatch() -> None:
+        async with sessions() as dispatch_db:
+            await _dispatch_queued_refund(dispatch_db, order_id)
+
+    with (
+        patch.object(order_service, "async_session", sessions),
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(side_effect=fail_first_token_attempt),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+        patch(
+            "app.services.order_service.multicard_api.get_payment",
+            new=provider_lookup,
+        ),
+    ):
+        dispatch_task = asyncio.create_task(run_first_dispatch())
+        await asyncio.wait_for(token_started.wait(), timeout=1)
+        try:
+            async with sessions() as inspect_db:
+                sending = await inspect_db.get(Order, order_id)
+                assert sending is not None
+                assert sending.refund_sync_status == "sending"
+
+            async with sessions() as reconcile_db:
+                reconciled = await reconcile_unknown_refunds(reconcile_db)
+            assert reconciled == 0
+            async with sessions() as inspect_db:
+                raced = await inspect_db.get(Order, order_id)
+                assert raced is not None
+                assert raced.refund_sync_status == "unknown"
+        finally:
+            release_token_failure.set()
+            await dispatch_task
+
+        async with sessions() as inspect_db:
+            retryable = await inspect_db.get(Order, order_id)
+            assert retryable is not None
+            assert retryable.payment_status == "refund_pending"
+            assert retryable.refund_sync_status == "queued"
+
+        await order_service.reconcile_provider_operations()
+
+    assert token_calls == 2
+    provider_lookup.assert_awaited_once_with(payment_uuid)
+    client.delete.assert_awaited_once()
+    assert marker_states == [("refund_pending", "sending")]
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "refunded"
+        assert persisted.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_refund_context_exit_failure_stays_unknown_and_get_only(
+    refund_sessions,
+):
+    sessions, _ = refund_sessions
+    order_id, payment_uuid = await _committed_refund_order(
+        refund_sessions,
+        refund_sync_status="queued",
+    )
+    response = httpx.Response(
+        200,
+        json={"success": True, "data": {"status": "revert"}},
+        request=httpx.Request(
+            "DELETE",
+            "https://provider.example/payment/context-exit",
+        ),
+    )
+    client = Mock()
+    client.delete = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(
+        side_effect=RuntimeError("unsafe context exit failure")
+    )
+    provider_lookup = AsyncMock(return_value={"status": "success"})
+
+    with (
+        patch.object(order_service, "async_session", sessions),
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="safe-token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+        patch(
+            "app.services.order_service.multicard_api.get_payment",
+            new=provider_lookup,
+        ),
+    ):
+        async with sessions() as dispatch_db:
+            await _dispatch_queued_refund(dispatch_db, order_id)
+        await order_service.reconcile_provider_operations()
+
+    client.delete.assert_awaited_once()
+    provider_lookup.assert_awaited_once_with(payment_uuid)
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "refund_pending"
+        assert persisted.refund_sync_status == "unknown"
 
 
 @pytest.mark.asyncio
