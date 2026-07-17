@@ -176,9 +176,14 @@ export default function ArtisanCheckoutPage() {
             }),
       };
       const res = await createOrder(payload);
-      haptic?.notificationOccurred('success');
-
       const orderData = res.data.data;
+      if (
+        orderData.status === 'SUBMISSION_FAILED'
+        || orderData.alipos_sync_status === 'failed'
+      ) {
+        throw new Error('Order submission failed');
+      }
+      haptic?.notificationOccurred('success');
 
       if (s.paymentMethod === 'rahmat' && orderData.multicard_checkout_url) {
         // Open payment URL first — before navigation so the openLink call is not lost on re-render

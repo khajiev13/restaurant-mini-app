@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCartStore } from '../../stores/cartStore';
 import { useTableOrderStore } from '../../stores/tableOrderStore';
@@ -40,6 +40,10 @@ const item = {
   availableCount: null,
   quantity: 2,
 };
+
+function LocationProbe() {
+  return <div data-testid="location">{useLocation().pathname}</div>;
+}
 
 describe('ArtisanCheckoutPage table mode', () => {
   beforeEach(() => {
@@ -214,6 +218,82 @@ describe('ArtisanCheckoutPage table mode', () => {
     const secondId = secondPayload.client_request_id;
     expect(firstId).toMatch(/^[0-9a-f-]{36}$/i);
     expect(secondId).toBe(firstId);
+  });
+
+  it('keeps checkout state and request ID after a 502 response', async () => {
+    const user = userEvent.setup();
+    apiMocks.createOrder.mockRejectedValue({
+      response: {
+        status: 502,
+        data: { detail: 'Could not submit the order to the restaurant' },
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <LocationProbe />
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    const placeOrder = await screen.findByRole('button', { name: /place order|buyurtmani qabul qilish/i });
+    await user.click(placeOrder);
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(1));
+
+    expect(screen.getByTestId('location')).toHaveTextContent('/checkout');
+    expect(useCartStore.getState().items).toEqual([item]);
+    expect(screen.getByText(/something went wrong|nimadir noto'g'ri|что-то пошло не так/i)).toBeVisible();
+
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+    await user.click(placeOrder);
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+    const retryPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(retryPayload.client_request_id).toBe(firstPayload.client_request_id);
+    expect(screen.getByTestId('location')).toHaveTextContent('/checkout');
+    expect(useCartStore.getState().items).toEqual([item]);
+  });
+
+  it('rejects_a_nominal_success_body_for_submission_failed_order', async () => {
+    const user = userEvent.setup();
+    apiMocks.createOrder.mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          id: 'order-failed',
+          status: 'SUBMISSION_FAILED',
+          discriminator: 'inplace',
+          items_cost: 36000,
+          total_amount: 39600,
+          created_at: '2026-07-17T00:00:00Z',
+          order_number: null,
+          items: [],
+          comment: null,
+          payment_method: 'cash',
+          payment_provider: null,
+          payment_status: null,
+          payment_expires_at: null,
+          multicard_checkout_url: null,
+          multicard_receipt_url: null,
+          alipos_sync_status: 'failed',
+          table_title: 'Stol 12',
+          hall_title: 'Asosiy zal',
+          service_percent: 10,
+        },
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <LocationProbe />
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(1));
+
+    expect(screen.getByTestId('location')).toHaveTextContent('/checkout');
+    expect(useCartStore.getState().items).toEqual([item]);
+    expect(screen.getByText(/something went wrong|nimadir noto'g'ri|что-то пошло не так/i)).toBeVisible();
+    expect(apiMocks.createOrder).toHaveBeenCalledTimes(1);
   });
 
   it('lets a first-time table customer enter a phone number inline', async () => {

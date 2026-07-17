@@ -14,6 +14,7 @@ from app.services.order_service import (
     CancellationError,
     CustomerOrderError,
     CustomerOrderNotFound,
+    OrderSubmissionInProgress,
     OrderSubmissionRejected,
     PaymentCheckoutError,
     PaymentRetryConflict,
@@ -49,6 +50,14 @@ async def create_order(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
+        ) from exc
+    except OrderSubmissionInProgress as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "order_id": str(exc.order_id),
+                "status": exc.sync_status,
+            },
         ) from exc
     except OrderSubmissionRejected as exc:
         raise HTTPException(

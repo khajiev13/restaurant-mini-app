@@ -53,6 +53,13 @@ class OrderSubmissionRejected(RuntimeError):
     pass
 
 
+class OrderSubmissionInProgress(RuntimeError):
+    def __init__(self, order_id: uuid.UUID, sync_status: str) -> None:
+        self.order_id = order_id
+        self.sync_status = sync_status
+        super().__init__("Order submission is in progress")
+
+
 class PaymentCheckoutError(RuntimeError):
     pass
 
@@ -1575,28 +1582,42 @@ async def _resolve_delivery(
     }
 
 
+async def _classify_customer_order_replay(
+    db: AsyncSession,
+    order: Order,
+) -> Order:
+    if order.payment_status == "invoice_queued":
+        return await _create_order_invoice(db, order)
+    if order.alipos_sync_status == "queued":
+        submitted = await _submit_queued_alipos_order(db, order.id)
+        if submitted is not None:
+            return submitted
+        await db.refresh(order)
+    if order.alipos_sync_status == "failed":
+        raise OrderSubmissionRejected(
+            order.alipos_sync_error or ALIPOS_PAYLOAD_BUILD_ERROR
+        )
+    if order.alipos_sync_status == "sending":
+        raise OrderSubmissionInProgress(order.id, order.alipos_sync_status)
+    return order
+
+
 async def create_customer_order(
     db: AsyncSession,
     current_user: User,
     body: OrderCreate,
 ) -> Order:
+    user_id = current_user.telegram_id
     if body.client_request_id:
         result = await db.execute(
             select(Order).where(
-                Order.user_id == current_user.telegram_id,
+                Order.user_id == user_id,
                 Order.client_request_id == body.client_request_id,
             )
         )
         existing = result.scalar_one_or_none()
         if existing is not None:
-            if existing.payment_status == "invoice_queued":
-                return await _create_order_invoice(db, existing)
-            if existing.alipos_sync_status == "queued":
-                submitted = await _submit_queued_alipos_order(db, existing.id)
-                if submitted is not None:
-                    return submitted
-                await db.refresh(existing)
-            return existing
+            return await _classify_customer_order_replay(db, existing)
 
     if (
         body.discriminator == "inplace"
@@ -1635,7 +1656,7 @@ async def create_customer_order(
     online = body.payment_method == "rahmat"
     order = Order(
         id=order_id,
-        user_id=current_user.telegram_id,
+        user_id=user_id,
         client_request_id=body.client_request_id,
         address_id=selected_address.id if selected_address else body.address_id,
         items=priced.items,
@@ -1671,21 +1692,14 @@ async def create_customer_order(
             raise
         result = await db.execute(
             select(Order).where(
-                Order.user_id == current_user.telegram_id,
+                Order.user_id == user_id,
                 Order.client_request_id == body.client_request_id,
             )
         )
         existing = result.scalar_one_or_none()
         if existing is None:
             raise
-        if existing.payment_status == "invoice_queued":
-            return await _create_order_invoice(db, existing)
-        if existing.alipos_sync_status == "queued":
-            submitted = await _submit_queued_alipos_order(db, existing.id)
-            if submitted is not None:
-                return submitted
-            await db.refresh(existing)
-        return existing
+        return await _classify_customer_order_replay(db, existing)
     await db.refresh(order)
 
     if not online:
