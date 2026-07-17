@@ -134,13 +134,14 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 test "$(git rev-parse "$PRE_PROD_SHA^{commit}")" = "$PRE_PROD_SHA"
 ```
 
-Confirm all three migrations exist in the exact candidate:
+Confirm all four migrations exist in the exact candidate:
 
 ```bash
 for migration in \
   database/migrations/2026-07-07-staff-delivery-phase-1.sql \
   database/migrations/2026-07-13-qr-table-ordering.sql \
-  database/migrations/2026-07-15-staff-table-inspection.sql
+  database/migrations/2026-07-15-staff-table-inspection.sql \
+  database/migrations/2026-07-18-release-safety.sql
 do
   git cat-file -e "$CANDIDATE_SHA:$migration"
 done
@@ -275,7 +276,8 @@ This is an idempotency check, not a request to start another Docker stack:
 for migration in \
   database/migrations/2026-07-07-staff-delivery-phase-1.sql \
   database/migrations/2026-07-13-qr-table-ordering.sql \
-  database/migrations/2026-07-15-staff-table-inspection.sql
+  database/migrations/2026-07-15-staff-table-inspection.sql \
+  database/migrations/2026-07-18-release-safety.sql
 do
   for pass in 1 2; do
     docker exec -i restaurant_postgres sh -lc \
@@ -1143,7 +1145,8 @@ reviewed SQL and print no environment values. The old backend remains stopped:
 for migration in \
   database/migrations/2026-07-07-staff-delivery-phase-1.sql \
   database/migrations/2026-07-13-qr-table-ordering.sql \
-  database/migrations/2026-07-15-staff-table-inspection.sql
+  database/migrations/2026-07-15-staff-table-inspection.sql \
+  database/migrations/2026-07-18-release-safety.sql
 do
   ssh restaurant \
     'wsl docker exec -i restaurant_postgres sh -lc '\''psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'\''' \
@@ -1212,7 +1215,8 @@ WHERE (table_name = 'users' AND column_name = 'role')
      'hall_id', 'hall_title', 'service_percent',
      'table_access_expires_at', 'alipos_sync_status', 'alipos_sync_error',
      'cancel_requested_at', 'client_request_id',
-     'refund_sync_status', 'refund_sync_error',
+     'invoice_cancel_status', 'refund_sync_status', 'refund_sync_error',
+     'alipos_status_updated_at',
      'alipos_status_check_attempted_at', 'alipos_status_checked_at'
    ))
 ORDER BY table_name, column_name;
@@ -1269,8 +1273,10 @@ BEGIN
     ('orders', 'alipos_sync_error', 'text', 'YES', NULL, NULL, NULL, NULL, 'none'),
     ('orders', 'cancel_requested_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
     ('orders', 'client_request_id', 'uuid', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'invoice_cancel_status', 'character varying', 'YES', 32, NULL, NULL, NULL, 'none'),
     ('orders', 'refund_sync_status', 'character varying', 'YES', 32, NULL, NULL, NULL, 'none'),
     ('orders', 'refund_sync_error', 'text', 'YES', NULL, NULL, NULL, NULL, 'none'),
+    ('orders', 'alipos_status_updated_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
     ('orders', 'alipos_status_check_attempted_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none'),
     ('orders', 'alipos_status_checked_at', 'timestamp without time zone', 'YES', NULL, NULL, NULL, 6, 'none')
   ), actual AS (
@@ -1403,7 +1409,7 @@ SQL
 ```
 
 Compare the emitted defaults, lengths, precision/scale, nullability,
-both `pg_get_constraintdef` results, and complete `indexdef` text with all three reviewed
+both `pg_get_constraintdef` results, and complete `indexdef` text with all four reviewed
 migration files. The catalog assertions are a second executable check, not a
 replacement for that comparison. On any mismatch, stop with the watcher
 paused. Do not push `prod` or dump data/environments.
@@ -2431,7 +2437,7 @@ separately reviewed rollback mode exists.
 - [ ] Secret shape, controlled admin path, and default-false online gate verified without values
 - [ ] Production Telegram token and webhook secret stayed frozen; no rotation was attempted and `getWebhookInfo` was not treated as secret verification
 - [ ] Maintenance Caddy blocked exactly `POST /api/orders`; old backend drained 600 seconds and stopped cleanly within the 180-second timeout
-- [ ] Both exact legacy-pending gates returned zero; three production migrations and the narrow sync-status backfill ran before `prod` push
+- [ ] Both exact legacy-pending gates returned zero; four production migrations and the narrow sync-status backfill ran before `prod` push
 - [ ] Exact candidate's three CI jobs were green; one selective app build ran with Caddy excluded; candidate health and SHA were verified before normal Caddy restoration
 - [ ] Incident path, if used, performed one four-service no-build restore, manual rollback fast-forward, zero-marker watcher no-op, and no rollback rebuild
 - [ ] Customer 403 and controlled staff/admin 200/privacy/read-only smokes passed
