@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     alipos_restaurant_id: str
     alipos_cash_payment_id: str = ""
     alipos_online_order_payment_id: str = "34badec8-4161-47b0-be80-e11843bc496a"
+    staff_take_order_provider_timeout_seconds: float = 8.0
+    staff_take_order_operation_timeout_seconds: float = 10.0
 
     # Multicard / Rahmat
     multicard_api_base_url: str = "https://dev-mesh.multicard.uz"

@@ -9,7 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResponse } from '../types/api';
 import type { StaffOrder } from '../types/staff';
 import api from './api';
-import { reconcileStaffOrderTake, takeStaffOrder } from './staffApi';
+import {
+  isStaffOrderTakeTransportAmbiguity,
+  reconcileStaffOrderTake,
+  takeStaffOrder,
+} from './staffApi';
 
 const STARTED_AT = Date.parse('2026-07-18T00:00:00.000Z');
 
@@ -74,6 +78,29 @@ describe('staffApi take-order safety', () => {
       undefined,
       { timeout: 15000 },
     );
+  });
+
+  it('classifies Axios timeouts and no-response failures as transport ambiguity', () => {
+    expect(
+      isStaffOrderTakeTransportAmbiguity(new AxiosError('timed out', 'ECONNABORTED')),
+    ).toBe(true);
+    expect(
+      isStaffOrderTakeTransportAmbiguity(new AxiosError('timed out', 'ETIMEDOUT')),
+    ).toBe(true);
+    expect(
+      isStaffOrderTakeTransportAmbiguity(new AxiosError('network failed', 'ERR_NETWORK')),
+    ).toBe(true);
+  });
+
+  it('does not classify explicit HTTP responses or non-Axios errors as transport ambiguity', () => {
+    const response = success<StaffOrder | null>(null);
+
+    expect(
+      isStaffOrderTakeTransportAmbiguity(
+        new AxiosError('conflict', 'ERR_BAD_RESPONSE', undefined, undefined, response),
+      ),
+    ).toBe(false);
+    expect(isStaffOrderTakeTransportAmbiguity(new Error('render failed'))).toBe(false);
   });
 
   it('returns same immediately and passes the exact bounded read config', async () => {

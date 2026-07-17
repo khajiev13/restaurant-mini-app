@@ -1,4 +1,4 @@
-import type { AxiosRequestConfig, AxiosResponse } from 'axios';
+import { isAxiosError, type AxiosRequestConfig, type AxiosResponse } from 'axios';
 import api from './api';
 import type { ApiResponse } from '../types/api';
 import type { StaffOrder } from '../types/staff';
@@ -15,6 +15,9 @@ export type StaffOrderTakeReconciliationResult =
   | { outcome: 'same'; order: StaffOrder }
   | { outcome: 'different'; order: StaffOrder }
   | { outcome: 'none' };
+
+export const isStaffOrderTakeTransportAmbiguity = (error: unknown): boolean =>
+  isAxiosError(error) && !error.response;
 
 const abortReason = (signal: AbortSignal): Error =>
   signal.reason instanceof Error

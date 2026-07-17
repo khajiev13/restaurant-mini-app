@@ -66,6 +66,7 @@ The release record may contain only:
 - migration/schema metadata, never table rows;
 - UTC watch boundaries, eligible count, and one-way eligible-set fingerprint;
 - request/status aggregates and the exact safe reconcile substrings above;
+- the four staff-take timeout values and a non-secret proxy-evidence reference;
 - manually recorded browser counts for failures and mutations.
 
 ## 1. Pin and review the candidate
@@ -232,6 +233,13 @@ git diff --check "$PRE_PROD_SHA..$CANDIDATE_SHA"
 rg -n '^INPLACE_ONLINE_PAYMENT_ENABLED=false$' .env.example
 rg -n 'inplace_online_payment_enabled: bool = False' backend/app/config.py
 
+rg -n '^    staff_take_order_provider_timeout_seconds: float = 8\.0$' \
+  backend/app/config.py
+rg -n '^    staff_take_order_operation_timeout_seconds: float = 10\.0$' \
+  backend/app/config.py
+rg -n '^const TAKE_ORDER_TIMEOUT_MS = 15000;$' \
+  frontend/src/services/staffApi.ts
+
 test -z "$(git status --porcelain)"
 test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 ```
@@ -281,6 +289,73 @@ If any property is ambiguous, if `WorkingDirectory` is empty, or if the audit
 cannot be completed without displaying a secret, or equal-SHA no-op behavior
 cannot be proven from the deployed source, stop and repair/review the watcher
 separately. Rollback in this runbook depends on that no-op guarantee.
+
+### LIVE / MANUAL staff take-order timeout ordering; no application request
+
+The release requires this strict ordering on the deployed public request path:
+
+```text
+AliPOS provider read 8s < backend take operation 10s < browser mutation 15s < deployed proxy timeout
+```
+
+First verify the effective backend values without printing the production
+environment. From **Terminal A — LOCAL**, this command emits only the two
+approved numeric deadlines:
+
+```bash
+ssh restaurant 'wsl bash -lc '\''
+set -euo pipefail
+set +x
+WATCHER_UNIT=deploy-watcher.service
+PROD_DIR="$(sudo -n systemctl show "$WATCHER_UNIT" \
+  --property=WorkingDirectory --value)"
+test -n "$PROD_DIR"
+cd "$PROD_DIR"
+set -a
+source .env
+set +a
+export STAFF_TAKE_PROVIDER_EFFECTIVE="${STAFF_TAKE_ORDER_PROVIDER_TIMEOUT_SECONDS:-8.0}"
+export STAFF_TAKE_OPERATION_EFFECTIVE="${STAFF_TAKE_ORDER_OPERATION_TIMEOUT_SECONDS:-10.0}"
+python3 - <<'PY'
+from decimal import Decimal
+import os
+
+provider = Decimal(os.environ["STAFF_TAKE_PROVIDER_EFFECTIVE"])
+operation = Decimal(os.environ["STAFF_TAKE_OPERATION_EFFECTIVE"])
+if provider != Decimal("8.0") or operation != Decimal("10.0"):
+    raise SystemExit("staff take backend timeout gate failed")
+print("staff_take_backend_timeouts=8s<10s")
+PY
+unset STAFF_TAKE_PROVIDER_EFFECTIVE STAFF_TAKE_OPERATION_EFFECTIVE
+'\'''
+```
+
+Next privately inspect every deployed proxy layer on the public path, including
+the Cloudflare edge/tunnel policy and Caddy's active configuration. Obtain a
+reviewed, non-secret evidence reference and the lowest proven request-timeout
+lower bound across those layers. If a layer is documented as unbounded, the
+evidence must explicitly establish that; record a conservative proven lower
+bound for the numeric gate. Run locally:
+
+```bash
+DEPLOYED_PROXY_TIMEOUT_LOWER_BOUND_SECONDS='<whole seconds from reviewed deployed-path proof>'
+DEPLOYED_PROXY_TIMEOUT_EVIDENCE='<non-secret release-record reference>'
+case "$DEPLOYED_PROXY_TIMEOUT_LOWER_BOUND_SECONDS" in
+  ''|'<whole seconds from reviewed deployed-path proof>'|*[!0-9]*) exit 1 ;;
+esac
+case "$DEPLOYED_PROXY_TIMEOUT_EVIDENCE" in
+  ''|'<non-secret release-record reference>') exit 1 ;;
+esac
+test "$DEPLOYED_PROXY_TIMEOUT_LOWER_BOUND_SECONDS" -gt 15
+printf 'staff_take_timeout_ordering=8s<10s<15s<proxy\n'
+```
+
+The repository's current plain Caddy `reverse_proxy` block, a healthy proxy,
+and a 15-second health-check `curl` do **not** prove a public request timeout
+greater than 15 seconds. If the effective backend values are not exactly 8 and
+10 seconds, any proxy layer is unreviewed, the lowest proven proxy bound is not
+strictly greater than 15 seconds, or the evidence reference is missing, stop
+the release before production mutation.
 
 Prove pause and resume from **Terminal A — LOCAL** without touching containers:
 
@@ -1868,6 +1943,7 @@ exists.
 - [ ] Exact-SHA watcher gate and explicit direct-release authorization recorded
 - [ ] Exclusive release freeze recorded before candidate resume and held through acceptance or rollback
 - [ ] Watcher working directory, pause/resume, one-build behavior, marker, and equal-SHA no-op verified
+- [ ] Staff take ordering proved as `8s < 10s < 15s < deployed proxy timeout`; every proxy layer has a non-secret evidence reference
 - [ ] Pre-created rollback SHA tree/parent and both non-force dry-run paths verified
 - [ ] External mode-700 rollback state, PRE source, exact Compose project, four image mappings/tags, and four-service no-build dry run verified
 - [ ] Secret shape, controlled admin path, and default-false online gate verified without values
