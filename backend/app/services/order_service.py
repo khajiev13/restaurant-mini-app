@@ -662,6 +662,7 @@ async def _finalize_alipos_not_cancelled(
         .where(
             Order.id == order_id,
             _alipos_cancel_status_clause(expected_statuses),
+            Order.status.not_in(("CANCELLED", "CANCELED")),
         )
         .values(
             status=case(
@@ -730,12 +731,24 @@ async def _reconcile_alipos_cancellation(
             await _dispatch_queued_refund(db, order_id)
         return finalized
 
-    _, finalized = await _finalize_alipos_not_cancelled(
+    order, finalized = await _finalize_alipos_not_cancelled(
         db,
         order_id,
         provider_status,
         expected_statuses=("sending", "unknown"),
     )
+    if (
+        not finalized
+        and order is not None
+        and normalize_order_status(order.status) == "CANCELLED"
+    ):
+        _, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
+            db,
+            order_id,
+            expected_statuses=("sending", "unknown"),
+        )
+        if should_dispatch_refund:
+            await _dispatch_queued_refund(db, order_id)
     return finalized
 
 
@@ -847,6 +860,22 @@ async def cancel_customer_order(
 
     local_status = normalize_order_status(order.status)
     if local_status == "CANCELLED":
+        order, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
+            db,
+            order_id,
+            expected_statuses=ALIPOS_CANCEL_PENDING_STATUSES,
+        )
+        if order is None:
+            raise CustomerOrderNotFound("Order not found")
+        if order.alipos_cancel_status == "not_cancelled":
+            raise CancellationConflict(
+                "The restaurant has already accepted this order, so it cannot be cancelled"
+            )
+        if not finalized and order.alipos_cancel_status != "cancelled":
+            raise CancellationError("The cancellation result could not be confirmed")
+        if should_dispatch_refund:
+            dispatched = await _dispatch_queued_refund(db, order_id)
+            return dispatched or order
         return order
     if local_status in TERMINAL_LOCAL_STATUSES:
         raise CancellationConflict("This order can no longer be cancelled")
@@ -892,6 +921,24 @@ async def cancel_customer_order(
         if order is None:
             raise CustomerOrderNotFound("Order not found")
         if not finalized and order.alipos_cancel_status == "cancelled":
+            return order
+        if not finalized and normalize_order_status(order.status) == "CANCELLED":
+            order, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
+                db,
+                order_id,
+                expected_statuses=ALIPOS_CANCEL_PENDING_STATUSES,
+            )
+            if order is None:
+                raise CustomerOrderNotFound("Order not found")
+            if order.alipos_cancel_status == "not_cancelled":
+                raise CancellationConflict(
+                    "The restaurant has already accepted this order, so it cannot be cancelled"
+                )
+            if not finalized and order.alipos_cancel_status != "cancelled":
+                raise CancellationError("The cancellation result could not be confirmed")
+            if should_dispatch_refund:
+                dispatched = await _dispatch_queued_refund(db, order_id)
+                return dispatched or order
             return order
         if not finalized and order.alipos_cancel_status != "not_cancelled":
             raise CancellationError("The cancellation result could not be confirmed")
