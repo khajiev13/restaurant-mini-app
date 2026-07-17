@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -193,6 +193,42 @@ async def _build_alipos_payload(order: Order) -> dict:
     return payload
 
 
+async def _finalize_alipos_attempt(
+    db: AsyncSession,
+    order: Order,
+    *,
+    sync_status: str,
+    sync_error: str | None,
+    local_status: str,
+    alipos_order_id: uuid.UUID | None = None,
+) -> bool:
+    values: dict[str, object] = {
+        "alipos_sync_status": sync_status,
+        "alipos_sync_error": sync_error,
+        "status": case(
+            (
+                Order.status.in_(("NEW", "PAID_AWAITING_RESTAURANT")),
+                local_status,
+            ),
+            else_=Order.status,
+        ),
+    }
+    if alipos_order_id is not None:
+        values["alipos_order_id"] = alipos_order_id
+    result = await db.execute(
+        update(Order)
+        .where(
+            Order.id == order.id,
+            Order.alipos_sync_status == "sending",
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    await db.refresh(order)
+    return result.rowcount > 0
+
+
 async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
     try:
         payload = await _build_alipos_payload(order)
@@ -223,11 +259,16 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
     try:
         response = await alipos_api.create_order(payload)
     except (alipos_api.AliPOSRejected, alipos_api.AliPOSPreSubmitError) as exc:
-        order.alipos_sync_status = "failed"
-        order.alipos_sync_error = str(exc)
-        order.status = "SUBMISSION_FAILED"
-        should_refund = _queue_paid_submission_refund(order)
-        await db.commit()
+        finalized = await _finalize_alipos_attempt(
+            db,
+            order,
+            sync_status="failed",
+            sync_error=str(exc),
+            local_status="SUBMISSION_FAILED",
+        )
+        should_refund = finalized and _queue_paid_submission_refund(order)
+        if should_refund:
+            await db.commit()
         log_fields = _alipos_log_fields(order)
         if exc.status_code is not None:
             log_fields["http_status"] = exc.status_code
@@ -236,27 +277,37 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
             await _dispatch_queued_refund(db, order.id)
         raise OrderSubmissionRejected(str(exc)) from exc
     except Exception:
-        order.alipos_sync_status = "unknown"
-        order.alipos_sync_error = "AliPOS order create outcome is unknown"
-        order.status = "SYNC_UNKNOWN"
-        await db.commit()
+        await _finalize_alipos_attempt(
+            db,
+            order,
+            sync_status="unknown",
+            sync_error="AliPOS order create outcome is unknown",
+            local_status="SYNC_UNKNOWN",
+        )
         logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
         return
 
     try:
         alipos_order_id = response.get("orderId") if isinstance(response, dict) else None
-        order.alipos_order_id = uuid.UUID(str(alipos_order_id))
+        parsed_alipos_order_id = uuid.UUID(str(alipos_order_id))
     except (TypeError, ValueError):
-        order.alipos_sync_status = "unknown"
-        order.alipos_sync_error = "AliPOS order create outcome is unknown"
-        order.status = "SYNC_UNKNOWN"
-        await db.commit()
+        await _finalize_alipos_attempt(
+            db,
+            order,
+            sync_status="unknown",
+            sync_error="AliPOS order create outcome is unknown",
+            local_status="SYNC_UNKNOWN",
+        )
         logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
         return
-    order.alipos_sync_status = "synced"
-    order.alipos_sync_error = None
-    order.status = "NEW"
-    await db.commit()
+    await _finalize_alipos_attempt(
+        db,
+        order,
+        sync_status="synced",
+        sync_error=None,
+        local_status="NEW",
+        alipos_order_id=parsed_alipos_order_id,
+    )
     logger.info("alipos_submit_synced", extra=_alipos_log_fields(order))
 
 

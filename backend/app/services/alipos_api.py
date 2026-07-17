@@ -30,6 +30,7 @@ _AVAILABILITY_TTL = 30
 _tables_cache: dict | None = None
 _tables_cache_expires_at: float = 0
 _tables_cache_last_success_at: datetime.datetime | None = None
+_ORDER_CREATE_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 405, 422})
 
 
 @dataclass(frozen=True)
@@ -345,10 +346,23 @@ async def create_order(order_payload: dict) -> dict:
             )
             resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise AliPOSRejected(exc.response.status_code) from exc
+        if exc.response.status_code in _ORDER_CREATE_REJECTION_STATUSES:
+            raise AliPOSRejected(exc.response.status_code) from exc
+        raise AliPOSUnknownOutcome(
+            "AliPOS order create outcome is unknown"
+        ) from exc
     except httpx.RequestError as exc:
         raise AliPOSUnknownOutcome("AliPOS order create outcome is unknown") from exc
-    return resp.json()
+    try:
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise TypeError
+        uuid.UUID(str(payload["orderId"]))
+    except (KeyError, TypeError, ValueError):
+        raise AliPOSUnknownOutcome(
+            "AliPOS order create outcome is unknown"
+        ) from None
+    return payload
 
 
 async def get_order_status(alipos_order_id: str) -> dict:

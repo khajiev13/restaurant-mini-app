@@ -813,9 +813,10 @@ async def test_alipos_create_order_makes_one_attempt_on_unknown_outcome():
 
 
 @pytest.mark.asyncio
-async def test_alipos_create_order_rejected_response_is_status_only():
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 405, 422])
+async def test_alipos_create_order_rejected_response_is_status_only(status_code):
     response = httpx.Response(
-        400,
+        status_code,
         json={"detail": "customer-secret"},
         request=httpx.Request("POST", "https://alipos.example/order"),
     )
@@ -833,8 +834,65 @@ async def test_alipos_create_order_rejected_response_is_status_only():
         with pytest.raises(alipos_api.AliPOSRejected) as exc:
             await alipos_api.create_order({"eatsId": "stable-id"})
 
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == status_code
     assert "customer-secret" not in str(exc.value)
+    client.request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status_code",
+    [408, 409, 418, 425, 429, 500, 502, 503, 504],
+)
+async def test_alipos_create_order_ambiguous_http_status_is_unknown(status_code):
+    response = httpx.Response(
+        status_code,
+        json={"detail": "customer-secret"},
+        request=httpx.Request("POST", "https://alipos.example/order"),
+    )
+    client = Mock()
+    client.request = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.alipos_api._get_token", new=AsyncMock(return_value="token")
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(alipos_api.AliPOSUnknownOutcome):
+            await alipos_api.create_order({"eatsId": "stable-id"})
+
+    client.request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [None, [], {}, {"orderId": None}, {"orderId": "not-a-uuid"}],
+)
+async def test_alipos_create_order_invalid_success_identifier_is_unknown(payload):
+    response = httpx.Response(
+        200,
+        json=payload,
+        request=httpx.Request("POST", "https://alipos.example/order"),
+    )
+    client = Mock()
+    client.request = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.alipos_api._get_token", new=AsyncMock(return_value="token")
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(alipos_api.AliPOSUnknownOutcome):
+            await alipos_api.create_order({"eatsId": "stable-id"})
+
+    client.request.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -919,6 +977,63 @@ async def test_paid_definite_submission_rejection_dispatches_one_refund(db_sessi
     refund.assert_awaited_once_with("payment-uuid")
     assert order.payment_status == "refunded"
     assert order.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_paid_alipos_ambiguous_http_response_does_not_refund(
+    db_session,
+    caplog,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="paid",
+    )
+    order.multicard_payment_uuid = "payment-uuid"
+    await db_session.commit()
+    response = httpx.Response(
+        502,
+        json={"detail": "provider-secret"},
+        request=httpx.Request("POST", "https://alipos.example/order"),
+    )
+    request = AsyncMock(return_value=response)
+    client = Mock()
+    client.request = request
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    refund = AsyncMock()
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": ONLINE_PAYMENT_ID, "title": "online-order"}]
+            ),
+        ),
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+        caplog.at_level("INFO"),
+    ):
+        await _submit_queued_alipos_order(db_session, order.id)
+        assert await _submit_queued_alipos_order(db_session, order.id) is None
+
+    await db_session.refresh(order)
+    request.assert_awaited_once()
+    refund.assert_not_awaited()
+    assert order.status == "SYNC_UNKNOWN"
+    assert order.alipos_sync_status == "unknown"
+    assert order.payment_status == "paid"
+    assert order.refund_sync_status is None
+    assert "provider-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
