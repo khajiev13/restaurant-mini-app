@@ -29,7 +29,9 @@ ALIPOS_CANCEL_COMMENT = "Mijoz yangi buyurtmani bekor qildi"
 ALIPOS_CANCEL_UNKNOWN_ERROR = "AliPOS cancellation outcome is unknown"
 ALIPOS_CANCEL_RECONCILE_LIMIT = 5
 ALIPOS_CANCEL_PENDING_STATUSES = (None, "not_started", "sending", "unknown")
+ALIPOS_CANCEL_REPAIRABLE_STATUSES = (*ALIPOS_CANCEL_PENDING_STATUSES, "not_cancelled")
 ALIPOS_CANCELLABLE_LOCAL_STATUSES = ("NEW", "PAID_AWAITING_RESTAURANT")
+ALIPOS_LOCAL_CANCELLED_STATUSES = ("CANCELLED", "CANCELED")
 
 table_access = TableAccessService(
     secret=settings.effective_table_access_secret,
@@ -557,6 +559,13 @@ def _alipos_cancel_status_clause(statuses: tuple[str | None, ...]):
     )
 
 
+def _repairable_local_alipos_cancel_clause():
+    return and_(
+        Order.status.in_(ALIPOS_LOCAL_CANCELLED_STATUSES),
+        _alipos_cancel_status_clause(ALIPOS_CANCEL_REPAIRABLE_STATUSES),
+    )
+
+
 async def _reload_order(db: AsyncSession, order_id: uuid.UUID) -> Order | None:
     return await db.get(Order, order_id, populate_existing=True)
 
@@ -572,6 +581,7 @@ async def _mark_alipos_cancel_unknown(
         .where(
             Order.id == order_id,
             _alipos_cancel_status_clause(expected_statuses),
+            Order.status.not_in(ALIPOS_LOCAL_CANCELLED_STATUSES),
         )
         .values(
             alipos_cancel_status="unknown",
@@ -593,7 +603,7 @@ async def _finalize_alipos_cancelled(
     now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     is_cancellable = Order.status.in_(ALIPOS_CANCELLABLE_LOCAL_STATUSES)
     is_terminal = Order.status.in_(TERMINAL_LOCAL_STATUSES)
-    is_locally_cancelled = Order.status.in_(("CANCELLED", "CANCELED"))
+    is_locally_cancelled = Order.status.in_(ALIPOS_LOCAL_CANCELLED_STATUSES)
     should_queue_refund = and_(
         Order.payment_status == "paid",
         Order.refund_sync_status.is_(None),
@@ -648,6 +658,39 @@ async def _finalize_alipos_cancelled(
     )
 
 
+async def _finalize_current_local_alipos_cancel(
+    db: AsyncSession,
+    order_id: uuid.UUID,
+) -> tuple[Order | None, bool]:
+    order, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
+        db,
+        order_id,
+        expected_statuses=ALIPOS_CANCEL_REPAIRABLE_STATUSES,
+    )
+    if should_dispatch_refund:
+        order = await _dispatch_queued_refund(db, order_id) or order
+    return order, finalized
+
+
+async def _mark_cancel_unknown_or_finalize_local_cancel(
+    db: AsyncSession,
+    order_id: uuid.UUID,
+) -> bool:
+    order, changed = await _mark_alipos_cancel_unknown(
+        db,
+        order_id,
+        expected_statuses=("sending", "unknown"),
+    )
+    if (
+        not changed
+        and order is not None
+        and normalize_order_status(order.status) == "CANCELLED"
+    ):
+        _, finalized = await _finalize_current_local_alipos_cancel(db, order_id)
+        return finalized
+    return False
+
+
 async def _finalize_alipos_not_cancelled(
     db: AsyncSession,
     order_id: uuid.UUID,
@@ -662,7 +705,7 @@ async def _finalize_alipos_not_cancelled(
         .where(
             Order.id == order_id,
             _alipos_cancel_status_clause(expected_statuses),
-            Order.status.not_in(("CANCELLED", "CANCELED")),
+            Order.status.not_in(ALIPOS_LOCAL_CANCELLED_STATUSES),
         )
         .values(
             status=case(
@@ -691,8 +734,11 @@ async def _reconcile_alipos_cancellation(
         select(Order)
         .where(
             Order.id == order_id,
-            Order.alipos_cancel_status.in_(("sending", "unknown")),
             Order.alipos_order_id.is_not(None),
+            or_(
+                Order.alipos_cancel_status.in_(("sending", "unknown")),
+                _repairable_local_alipos_cancel_clause(),
+            ),
         )
         .execution_options(populate_existing=True)
     )
@@ -700,27 +746,20 @@ async def _reconcile_alipos_cancellation(
     if order is None:
         await db.commit()
         return False
+    if normalize_order_status(order.status) == "CANCELLED":
+        _, finalized = await _finalize_current_local_alipos_cancel(db, order_id)
+        return finalized
     provider_order_id = str(order.alipos_order_id)
     await db.commit()
 
     try:
         current = await alipos_api.get_order_status(provider_order_id)
     except Exception:
-        await _mark_alipos_cancel_unknown(
-            db,
-            order_id,
-            expected_statuses=("sending", "unknown"),
-        )
-        return False
+        return await _mark_cancel_unknown_or_finalize_local_cancel(db, order_id)
 
     provider_status = normalize_order_status(str(current.get("status") or ""))
     if not provider_status or provider_status == "NEW":
-        await _mark_alipos_cancel_unknown(
-            db,
-            order_id,
-            expected_statuses=("sending", "unknown"),
-        )
-        return False
+        return await _mark_cancel_unknown_or_finalize_local_cancel(db, order_id)
     if provider_status == "CANCELLED":
         _, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
             db,
@@ -742,13 +781,7 @@ async def _reconcile_alipos_cancellation(
         and order is not None
         and normalize_order_status(order.status) == "CANCELLED"
     ):
-        _, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
-            db,
-            order_id,
-            expected_statuses=("sending", "unknown"),
-        )
-        if should_dispatch_refund:
-            await _dispatch_queued_refund(db, order_id)
+        _, finalized = await _finalize_current_local_alipos_cancel(db, order_id)
     return finalized
 
 
@@ -764,8 +797,11 @@ async def reconcile_unknown_alipos_cancellations(
     result = await db.execute(
         select(Order.id)
         .where(
-            Order.alipos_cancel_status.in_(("sending", "unknown")),
             Order.alipos_order_id.is_not(None),
+            or_(
+                Order.alipos_cancel_status.in_(("sending", "unknown")),
+                _repairable_local_alipos_cancel_clause(),
+            ),
         )
         .order_by(Order.cancel_requested_at, Order.id)
         .limit(bounded_limit)
@@ -840,6 +876,18 @@ async def cancel_customer_order(
 
     if order.alipos_cancel_status == "cancelled":
         return order
+    local_status = normalize_order_status(order.status)
+    if local_status == "CANCELLED":
+        order, finalized = await _finalize_current_local_alipos_cancel(db, order_id)
+        if order is None:
+            raise CustomerOrderNotFound("Order not found")
+        if order.alipos_cancel_status == "not_cancelled":
+            raise CancellationConflict(
+                "The restaurant has already accepted this order, so it cannot be cancelled"
+            )
+        if not finalized and order.alipos_cancel_status != "cancelled":
+            raise CancellationError("The cancellation result could not be confirmed")
+        return order
     if order.alipos_cancel_status == "not_cancelled":
         raise CancellationConflict(
             "The restaurant has already accepted this order, so it cannot be cancelled"
@@ -858,25 +906,6 @@ async def cancel_customer_order(
             )
         raise CancellationError("The cancellation result could not be confirmed")
 
-    local_status = normalize_order_status(order.status)
-    if local_status == "CANCELLED":
-        order, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
-            db,
-            order_id,
-            expected_statuses=ALIPOS_CANCEL_PENDING_STATUSES,
-        )
-        if order is None:
-            raise CustomerOrderNotFound("Order not found")
-        if order.alipos_cancel_status == "not_cancelled":
-            raise CancellationConflict(
-                "The restaurant has already accepted this order, so it cannot be cancelled"
-            )
-        if not finalized and order.alipos_cancel_status != "cancelled":
-            raise CancellationError("The cancellation result could not be confirmed")
-        if should_dispatch_refund:
-            dispatched = await _dispatch_queued_refund(db, order_id)
-            return dispatched or order
-        return order
     if local_status in TERMINAL_LOCAL_STATUSES:
         raise CancellationConflict("This order can no longer be cancelled")
     if order.alipos_order_id is None or order.alipos_sync_status != "synced":
@@ -923,11 +952,7 @@ async def cancel_customer_order(
         if not finalized and order.alipos_cancel_status == "cancelled":
             return order
         if not finalized and normalize_order_status(order.status) == "CANCELLED":
-            order, finalized, should_dispatch_refund = await _finalize_alipos_cancelled(
-                db,
-                order_id,
-                expected_statuses=ALIPOS_CANCEL_PENDING_STATUSES,
-            )
+            order, finalized = await _finalize_current_local_alipos_cancel(db, order_id)
             if order is None:
                 raise CustomerOrderNotFound("Order not found")
             if order.alipos_cancel_status == "not_cancelled":
@@ -936,9 +961,6 @@ async def cancel_customer_order(
                 )
             if not finalized and order.alipos_cancel_status != "cancelled":
                 raise CancellationError("The cancellation result could not be confirmed")
-            if should_dispatch_refund:
-                dispatched = await _dispatch_queued_refund(db, order_id)
-                return dispatched or order
             return order
         if not finalized and order.alipos_cancel_status != "not_cancelled":
             raise CancellationError("The cancellation result could not be confirmed")

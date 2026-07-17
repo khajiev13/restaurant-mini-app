@@ -991,6 +991,308 @@ async def test_unknown_reconciliation_finalizes_concurrent_local_cancel_and_refu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cancel_marker", "local_status", "get_outcome"),
+    [
+        ("unknown", "CANCELLED", "error"),
+        ("sending", "CANCELED", "new"),
+    ],
+)
+async def test_reconciliation_fallback_finalizes_concurrent_local_cancel(
+    cancellation_sessions,
+    cancel_marker,
+    local_status,
+    get_outcome,
+):
+    _, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _table_order(seed_db, paid=True)
+        created_user_ids.append(user.telegram_id)
+        order_id = order.id
+        provider_order_id = str(order.alipos_order_id)
+        order.alipos_cancel_status = cancel_marker
+        order.cancel_requested_at = datetime.datetime.now(datetime.UTC).replace(
+            tzinfo=None
+        )
+        await seed_db.commit()
+
+    async def local_cancel_wins(_provider_order_id: str) -> dict[str, str]:
+        async with sessions() as race_db:
+            await race_db.execute(
+                update(Order).where(Order.id == order_id).values(status=local_status)
+            )
+            await race_db.commit()
+        if get_outcome == "error":
+            raise httpx.ReadTimeout("status outcome unknown")
+        return {"status": "NEW"}
+
+    refund_observed: dict[str, object] = {}
+
+    async def observe_queued_refund(payment_uuid: str) -> dict[str, bool]:
+        refund_observed["payment_uuid"] = payment_uuid
+        async with sessions() as observer_db:
+            persisted = await observer_db.get(Order, order_id)
+            assert persisted is not None
+            refund_observed["order_status"] = persisted.status
+            refund_observed["cancel_status"] = persisted.alipos_cancel_status
+            refund_observed["payment_status"] = persisted.payment_status
+            refund_observed["refund_status"] = persisted.refund_sync_status
+        return {"success": True}
+
+    get_status = AsyncMock(side_effect=local_cancel_wins)
+    cancel = AsyncMock()
+    refund = AsyncMock(side_effect=observe_queued_refund)
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=get_status,
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        async with sessions() as reconcile_db:
+            reconciled = await order_service.reconcile_unknown_alipos_cancellations(
+                reconcile_db,
+                limit=5,
+            )
+        async with sessions() as second_reconcile_db:
+            reconciled_again = (
+                await order_service.reconcile_unknown_alipos_cancellations(
+                    second_reconcile_db,
+                    limit=5,
+                )
+            )
+
+    assert reconciled == 1
+    assert reconciled_again == 0
+    get_status.assert_awaited_once_with(provider_order_id)
+    cancel.assert_not_awaited()
+    refund.assert_awaited_once_with("payment-uuid")
+    assert refund_observed == {
+        "payment_uuid": "payment-uuid",
+        "order_status": local_status,
+        "cancel_status": "cancelled",
+        "payment_status": "refund_pending",
+        "refund_status": "sending",
+    }
+    async with sessions() as observer_db:
+        persisted = await observer_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.status == local_status
+        assert persisted.alipos_cancel_status == "cancelled"
+        assert persisted.payment_status == "refunded"
+        assert persisted.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("webhook_status", ["CANCELLED", "CANCELED"])
+@pytest.mark.parametrize("repair_path", ["customer", "reconciler"])
+async def test_authenticated_local_cancel_supersedes_not_cancelled_marker(
+    cancellation_sessions,
+    monkeypatch,
+    webhook_status,
+    repair_path,
+):
+    committing_client, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _table_order(seed_db, paid=True)
+        created_user_ids.append(user.telegram_id)
+        user_id = user.telegram_id
+        order_id = order.id
+        eats_id = order.alipos_eats_id
+        order.alipos_cancel_status = "not_cancelled"
+        await seed_db.commit()
+
+    monkeypatch.setattr(settings, "alipos_api_client_id", "test-client")
+    monkeypatch.setattr(settings, "alipos_api_client_secret", "test-secret")
+    with patch("app.routers.webhooks.async_session", new=sessions):
+        webhook_response = await committing_client.post(
+            "/api/webhooks/order-status",
+            json={"eatsId": eats_id, "status": webhook_status},
+            headers={"clientId": "test-client", "clientSecret": "test-secret"},
+        )
+    assert webhook_response.status_code == 200
+
+    refund_observed: dict[str, object] = {}
+
+    async def observe_queued_refund(payment_uuid: str) -> dict[str, bool]:
+        refund_observed["payment_uuid"] = payment_uuid
+        async with sessions() as observer_db:
+            persisted = await observer_db.get(Order, order_id)
+            assert persisted is not None
+            refund_observed["order_status"] = persisted.status
+            refund_observed["cancel_status"] = persisted.alipos_cancel_status
+            refund_observed["payment_status"] = persisted.payment_status
+            refund_observed["refund_status"] = persisted.refund_sync_status
+        return {"success": True}
+
+    get_status = AsyncMock()
+    cancel = AsyncMock()
+    refund = AsyncMock(side_effect=observe_queued_refund)
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=get_status,
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        if repair_path == "customer":
+            response = await committing_client.delete(
+                f"/api/orders/{order_id}",
+                headers={"Authorization": f"Bearer {create_jwt(user_id)}"},
+            )
+            assert response.status_code == 200
+        else:
+            async with sessions() as reconcile_db:
+                reconciled = (
+                    await order_service.reconcile_unknown_alipos_cancellations(
+                        reconcile_db,
+                        limit=5,
+                    )
+                )
+            assert reconciled == 1
+        async with sessions() as second_reconcile_db:
+            reconciled_again = (
+                await order_service.reconcile_unknown_alipos_cancellations(
+                    second_reconcile_db,
+                    limit=5,
+                )
+            )
+
+    assert reconciled_again == 0
+    get_status.assert_not_awaited()
+    cancel.assert_not_awaited()
+    refund.assert_awaited_once_with("payment-uuid")
+    assert refund_observed == {
+        "payment_uuid": "payment-uuid",
+        "order_status": "CANCELLED",
+        "cancel_status": "cancelled",
+        "payment_status": "refund_pending",
+        "refund_status": "sending",
+    }
+    async with sessions() as observer_db:
+        persisted = await observer_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.status == "CANCELLED"
+        assert persisted.alipos_cancel_status == "cancelled"
+        assert persisted.payment_status == "refunded"
+        assert persisted.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_bounded_reconciliation_repairs_local_cancel_markers_only(
+    cancellation_sessions,
+):
+    _, sessions, created_user_ids = cancellation_sessions
+    repair_markers = [None, "not_started", "not_cancelled", "sending", "unknown"]
+    repair_orders: dict[str, tuple[uuid.UUID, str]] = {}
+    ancient = datetime.datetime(2000, 1, 1)
+
+    async with sessions() as seed_db:
+        for index, marker in enumerate(repair_markers):
+            user, order = await _table_order(seed_db, paid=True)
+            created_user_ids.append(user.telegram_id)
+            local_status = "CANCELLED" if index % 2 == 0 else "CANCELED"
+            payment_uuid = f"repair-payment-{index}"
+            order.status = local_status
+            order.alipos_cancel_status = marker
+            order.cancel_requested_at = ancient + datetime.timedelta(seconds=index)
+            order.multicard_payment_uuid = payment_uuid
+            repair_orders[payment_uuid] = (order.id, local_status)
+
+        finalized_user, finalized_order = await _table_order(seed_db, paid=True)
+        created_user_ids.append(finalized_user.telegram_id)
+        finalized_order.status = "CANCELLED"
+        finalized_order.alipos_cancel_status = "cancelled"
+        finalized_order.payment_status = "refunded"
+        finalized_order.refund_sync_status = "refunded"
+        finalized_order.multicard_payment_uuid = "already-finalized-payment"
+        finalized_order_id = finalized_order.id
+        await seed_db.commit()
+
+    refund_observed: set[str] = set()
+
+    async def observe_queued_refund(payment_uuid: str) -> dict[str, bool]:
+        order_id, local_status = repair_orders[payment_uuid]
+        async with sessions() as observer_db:
+            persisted = await observer_db.get(Order, order_id)
+            assert persisted is not None
+            assert persisted.status == local_status
+            assert persisted.alipos_cancel_status == "cancelled"
+            assert persisted.payment_status == "refund_pending"
+            assert persisted.refund_sync_status == "sending"
+        refund_observed.add(payment_uuid)
+        return {"success": True}
+
+    get_status = AsyncMock(return_value={"status": "NEW"})
+    cancel = AsyncMock()
+    refund = AsyncMock(side_effect=observe_queued_refund)
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_order_status",
+            new=get_status,
+        ),
+        patch(
+            "app.services.order_service.alipos_api.cancel_order",
+            new=cancel,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        async with sessions() as reconcile_db:
+            reconciled = await order_service.reconcile_unknown_alipos_cancellations(
+                reconcile_db,
+                limit=5,
+            )
+        async with sessions() as second_reconcile_db:
+            reconciled_again = (
+                await order_service.reconcile_unknown_alipos_cancellations(
+                    second_reconcile_db,
+                    limit=5,
+                )
+            )
+
+    assert reconciled == 5
+    assert reconciled_again == 0
+    get_status.assert_not_awaited()
+    cancel.assert_not_awaited()
+    assert refund.await_count == 5
+    assert refund_observed == set(repair_orders)
+    async with sessions() as observer_db:
+        for payment_uuid, (order_id, local_status) in repair_orders.items():
+            persisted = await observer_db.get(Order, order_id)
+            assert persisted is not None
+            assert persisted.status == local_status
+            assert persisted.alipos_cancel_status == "cancelled"
+            assert persisted.payment_status == "refunded"
+            assert persisted.refund_sync_status == "refunded"
+            assert persisted.multicard_payment_uuid == payment_uuid
+
+        finalized = await observer_db.get(Order, finalized_order_id)
+        assert finalized is not None
+        assert finalized.status == "CANCELLED"
+        assert finalized.alipos_cancel_status == "cancelled"
+        assert finalized.payment_status == "refunded"
+        assert finalized.refund_sync_status == "refunded"
+        assert finalized.multicard_payment_uuid == "already-finalized-payment"
+
+
+@pytest.mark.asyncio
 async def test_cancelled_reconciliation_preserves_concurrent_ready_without_refund(
     cancellation_sessions,
 ):
