@@ -1652,6 +1652,95 @@ async def test_incomplete_invoice_success_is_unknown_and_preserves_uuid(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("allow_uuidless", [False, True])
+@pytest.mark.parametrize(
+    "uuid_value",
+    [42, True, {"value": "invoice-uuid"}, ["invoice-uuid"]],
+    ids=["integer", "boolean", "object", "array"],
+)
+async def test_wrong_typed_invoice_uuid_is_unknown_even_with_uuidless_opt_in(
+    uuid_value,
+    allow_uuidless,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        settings,
+        "multicard_allow_uuidless_sandbox_checkout",
+        allow_uuidless,
+    )
+    response = httpx.Response(
+        200,
+        json={
+            "success": True,
+            "data": {
+                "uuid": uuid_value,
+                "checkout_url": "https://pay.example/checkout",
+            },
+        },
+        request=httpx.Request("POST", "https://multicard.example/payment/invoice"),
+    )
+    client = _multicard_invoice_client(response)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoiceOutcomeUnknown) as exc_info:
+            await multicard_api.create_invoice(
+                amount_tiyin=100_000,
+                invoice_id="order-123",
+                return_url="https://app.example/order-123",
+            )
+
+    assert exc_info.value.invoice_uuid is None
+    client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uuid_value", ["", "   "], ids=["empty", "whitespace"])
+async def test_empty_string_invoice_uuid_is_not_uuidless_sandbox_checkout(
+    uuid_value,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        settings,
+        "multicard_allow_uuidless_sandbox_checkout",
+        True,
+    )
+    response = httpx.Response(
+        200,
+        json={
+            "success": True,
+            "data": {
+                "uuid": uuid_value,
+                "checkout_url": "https://pay.example/checkout",
+            },
+        },
+        request=httpx.Request("POST", "https://multicard.example/payment/invoice"),
+    )
+    client = _multicard_invoice_client(response)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoiceOutcomeUnknown):
+            await multicard_api.create_invoice(
+                amount_tiyin=100_000,
+                invoice_id="order-123",
+                return_url="https://app.example/order-123",
+            )
+
+    client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status_code", "error_code"),
     [(400, "ERROR_FIELDS"), (404, "ERROR_NOT_FOUND")],

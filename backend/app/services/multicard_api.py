@@ -83,9 +83,9 @@ def _invoice_uuid(payload: Any) -> str | None:
     if not isinstance(invoice, dict):
         return None
     value = invoice.get("uuid")
-    if value is None:
+    if not isinstance(value, str):
         return None
-    normalized = str(value).strip()
+    normalized = value.strip()
     return normalized or None
 
 
@@ -104,6 +104,8 @@ def _validated_invoice(
 
     invoice = dict(raw_invoice)
     if invoice_uuid is None:
+        if raw_invoice.get("uuid") is not None:
+            raise InvoiceOutcomeUnknown()
         if not allow_uuidless:
             raise InvoiceOutcomeUnknown()
         invoice["uuid"] = None
