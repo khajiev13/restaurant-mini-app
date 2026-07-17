@@ -10,17 +10,22 @@
 import argparse
 import csv
 import json
+import math
 import re
 import urllib.request
 import zipfile
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import qrcode
 import zxingcpp
 from PIL import Image, ImageDraw, ImageFont
 
 CODE_RE = re.compile(r"^(?:0|[1-9][0-9]{0,5})$")
+START_PARAM_RE = re.compile(r"^t2_((?:0|[1-9][0-9]{0,5}))_([A-Za-z0-9_-]{12})$")
+DEEP_LINK_RE = re.compile(
+    r"https://t\.me/[A-Za-z0-9_]+\?startapp="
+    r"(t2_(?:0|[1-9][0-9]{0,5})_[A-Za-z0-9_-]{12})"
+)
 SAFE_FIELDS = (
     "table_title",
     "hall_title",
@@ -31,10 +36,28 @@ SAFE_FIELDS = (
 )
 
 
+def _valid_service_percent(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= 100
+        and math.isfinite(value)
+    )
+
+
 def load_manifest(path: Path) -> list[dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    rows = payload.get("data") if isinstance(payload, dict) else payload
-    if not isinstance(rows, list) or not rows:
+    if isinstance(payload, dict):
+        if payload.get("success") is not True or not isinstance(
+            payload.get("data"), list
+        ):
+            raise ValueError("Manifest envelope must have success=true and array data")
+        rows = payload["data"]
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        raise ValueError("Manifest must be an API envelope or raw array")
+    if not rows:
         raise ValueError("Manifest must contain at least one table")
 
     validated: list[dict] = []
@@ -44,25 +67,25 @@ def load_manifest(path: Path) -> list[dict]:
             raise ValueError("Manifest row is not an object")
         row = {field: raw.get(field) for field in SAFE_FIELDS}
         if not all(
-            isinstance(row[field], str)
+            isinstance(row[field], str) and bool(row[field])
             for field in SAFE_FIELDS
             if field != "service_percent"
         ):
             raise ValueError("Manifest row has missing text fields")
+        if not _valid_service_percent(row["service_percent"]):
+            raise ValueError("Manifest row has invalid service_percent")
         code = row["manual_code"]
         if CODE_RE.fullmatch(code) is None:
             raise ValueError(f"Invalid manual code: {code!r}")
         if code in seen_codes:
             raise ValueError(f"Duplicate manual code: {code}")
 
-        parsed = urlparse(row["deep_link"])
-        start_param = parse_qs(parsed.query).get("startapp", [None])[0]
-        if parsed.scheme != "https" or parsed.netloc != "t.me":
-            raise ValueError("Deep link must use https://t.me")
-        if start_param != row["start_param"]:
-            raise ValueError(f"Deep link/start parameter mismatch for table {code}")
-        if not row["start_param"].startswith(f"t2_{code}_"):
-            raise ValueError(f"Start parameter/code mismatch for table {code}")
+        start_match = START_PARAM_RE.fullmatch(row["start_param"])
+        if start_match is None or start_match.group(1) != code:
+            raise ValueError(f"Invalid start parameter for table {code}")
+        deep_link_match = DEEP_LINK_RE.fullmatch(row["deep_link"])
+        if deep_link_match is None or deep_link_match.group(1) != row["start_param"]:
+            raise ValueError(f"Deep link is invalid or mismatched for table {code}")
 
         seen_codes.add(code)
         validated.append(row)
@@ -77,32 +100,59 @@ def load_manifest(path: Path) -> list[dict]:
     )
 
 
+def _validate_resolver_response(payload, row: dict) -> None:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("success") is not True
+        or not isinstance(payload.get("data"), dict)
+    ):
+        raise ValueError(
+            f"Malformed deployed resolver response for table {row['manual_code']}"
+        )
+    data = payload["data"]
+    if not all(
+        isinstance(data.get(field), str) and bool(data[field])
+        for field in ("table_title", "hall_title", "manual_code", "access_token")
+    ) or not _valid_service_percent(data.get("service_percent")):
+        raise ValueError(
+            f"Malformed deployed resolver response for table {row['manual_code']}"
+        )
+    if CODE_RE.fullmatch(data["manual_code"]) is None:
+        raise ValueError(
+            f"Malformed deployed resolver response for table {row['manual_code']}"
+        )
+    safe_actual = (
+        data["table_title"],
+        data["hall_title"],
+        data["service_percent"],
+        data["manual_code"],
+    )
+    safe_expected = (
+        row["table_title"],
+        row["hall_title"],
+        row["service_percent"],
+        row["manual_code"],
+    )
+    if safe_actual != safe_expected:
+        raise ValueError(f"Deployed resolver mismatch for table {row['manual_code']}")
+
+
 def verify_api(rows: list[dict], api_base: str) -> None:
     endpoint = api_base.rstrip("/") + "/tables/resolve"
     for row in rows:
-        request = urllib.request.Request(
-            endpoint,
-            data=json.dumps({"code": row["manual_code"]}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=20) as response:
-            payload = json.load(response)
-        data = payload.get("data", {})
-        safe_actual = (
-            data.get("table_title"),
-            data.get("hall_title"),
-            data.get("manual_code"),
-        )
-        safe_expected = (
-            row["table_title"],
-            row["hall_title"],
-            row["manual_code"],
-        )
-        if safe_actual != safe_expected:
-            raise ValueError(
-                f"Deployed resolver mismatch for table {row['manual_code']}"
+        for body in (
+            {"entry": row["start_param"]},
+            {"code": row["manual_code"]},
+        ):
+            request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
             )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                payload = json.load(response)
+            _validate_resolver_response(payload, row)
 
 
 FONT_REGULAR_CANDIDATES = (
@@ -122,11 +172,102 @@ def _font_path(candidates: tuple[Path, ...]) -> Path:
     return path
 
 
-def _center(
-    draw, text: str, font, y: int, width: int, fill: str = "#161616"
-) -> None:
+def _center(draw, text: str, font, y: int, width: int, fill: str = "#161616") -> None:
     left, _, right, _ = draw.textbbox((0, 0), text, font=font)
     draw.text(((width - (right - left)) / 2, y), text, font=font, fill=fill)
+
+
+def _text_width(draw, text: str, font) -> int:
+    left, _, right, _ = draw.textbbox((0, 0), text, font=font)
+    return right - left
+
+
+def _wrap_text(draw, text: str, font, max_width: int) -> list[str]:
+    remaining = " ".join(text.split())
+    lines: list[str] = []
+    while remaining:
+        if _text_width(draw, remaining, font) <= max_width:
+            lines.append(remaining)
+            break
+        end = 1
+        while (
+            end <= len(remaining)
+            and _text_width(draw, remaining[:end], font) <= max_width
+        ):
+            end += 1
+        prefix = remaining[: end - 1]
+        word_break = prefix.rfind(" ")
+        if word_break > 0:
+            lines.append(prefix[:word_break])
+            remaining = remaining[word_break + 1 :].lstrip()
+        else:
+            lines.append(prefix)
+            remaining = remaining[len(prefix) :].lstrip()
+    return lines
+
+
+def _truncate_line(draw, text: str, font, max_width: int) -> str:
+    suffix = "..."
+    value = text.rstrip()
+    while value and _text_width(draw, value + suffix, font) > max_width:
+        value = value[:-1].rstrip()
+    return value + suffix
+
+
+def _draw_fitted_text(
+    draw,
+    text: str,
+    font_path: Path,
+    box: tuple[int, int, int, int],
+    max_font_size: int,
+    min_font_size: int,
+    max_lines: int,
+    fill: str = "#161616",
+) -> None:
+    left, top, right, bottom = box
+    max_width = right - left
+    max_height = bottom - top
+    for size in range(max_font_size, min_font_size - 1, -1):
+        font = ImageFont.truetype(str(font_path), size)
+        lines = _wrap_text(draw, text, font, max_width)
+        spacing = max(4, size // 8)
+        block = "\n".join(lines)
+        bounds = draw.multiline_textbbox(
+            (0, 0), block, font=font, spacing=spacing, align="center"
+        )
+        if len(lines) <= max_lines and bounds[3] - bounds[1] <= max_height:
+            break
+    else:
+        font = ImageFont.truetype(str(font_path), min_font_size)
+        spacing = max(4, min_font_size // 8)
+        lines = _wrap_text(draw, text, font, max_width)
+        if len(lines) > max_lines:
+            lines = [
+                *lines[: max_lines - 1],
+                _truncate_line(
+                    draw,
+                    " ".join(lines[max_lines - 1 :]),
+                    font,
+                    max_width,
+                ),
+            ]
+        block = "\n".join(lines)
+        bounds = draw.multiline_textbbox(
+            (0, 0), block, font=font, spacing=spacing, align="center"
+        )
+
+    block_width = bounds[2] - bounds[0]
+    block_height = bounds[3] - bounds[1]
+    x = left + (max_width - block_width) / 2 - bounds[0]
+    y = top + (max_height - block_height) / 2 - bounds[1]
+    draw.multiline_text(
+        (x, y),
+        block,
+        font=font,
+        fill=fill,
+        spacing=spacing,
+        align="center",
+    )
 
 
 def _slug(value: str) -> str:
@@ -149,8 +290,24 @@ def render_card(row: dict, destination: Path) -> None:
         width,
         "#8F2D20",
     )
-    _center(draw, row["hall_title"], ImageFont.truetype(str(regular), 42), 150, width)
-    _center(draw, row["table_title"], ImageFont.truetype(str(bold), 76), 215, width)
+    _draw_fitted_text(
+        draw,
+        row["hall_title"],
+        regular,
+        (80, 140, 1120, 205),
+        42,
+        22,
+        2,
+    )
+    _draw_fitted_text(
+        draw,
+        row["table_title"],
+        bold,
+        (80, 205, 1120, 320),
+        76,
+        32,
+        2,
+    )
 
     qr = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -225,9 +382,7 @@ def generate_package(rows: list[dict], output: Path) -> Path:
         json.dumps(rows, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    with (output / "manifest.csv").open(
-        "w", encoding="utf-8", newline=""
-    ) as handle:
+    with (output / "manifest.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=SAFE_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
@@ -237,7 +392,7 @@ def generate_package(rows: list[dict], output: Path) -> Path:
     )
     build_pdf(cards, output / "all-table-qr-codes.pdf")
 
-    zip_path = output.with_suffix(".zip")
+    zip_path = Path(f"{output}.zip")
     if zip_path.exists():
         raise FileExistsError(zip_path)
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:

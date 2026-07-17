@@ -265,14 +265,20 @@ Manual entry uses the trailing table number from the AliPOS title: `Stol 12`
 uses code `12`. Codes must be unique across all halls. New QR links use signed
 `t2_` parameters; already printed signed `t_` links remain compatible.
 
-After deploying and verifying the public app, download the admin manifest without
-printing the JWT:
+After deploying and verifying the public app, download the admin manifest with
+private file permissions. The shell builtin sends a one-line curl config through
+stdin, so the JWT is not placed in curl's arguments or persisted in a config
+file:
 
 ```bash
-test -n "$ADMIN_JWT"
-curl -fsS -H "Authorization: Bearer $ADMIN_JWT" \
-  https://restaurant.labtutor.app/api/tables/manifest \
-  -o /private/tmp/olot-table-manifest.json
+umask 077
+test -n "${ADMIN_JWT:-}"
+builtin printf 'header = "Authorization: Bearer %s"\n' "$ADMIN_JWT" |
+  curl --config - \
+    --fail --silent --show-error \
+    --url https://restaurant.labtutor.app/api/tables/manifest \
+    --output /private/tmp/olot-table-manifest.json
+unset ADMIN_JWT
 ```
 
 Generate and verify the assets outside the repository:
@@ -282,6 +288,16 @@ uv run --script scripts/generate_table_qr_assets.py \
   --manifest /private/tmp/olot-table-manifest.json \
   --verify-api https://restaurant.labtutor.app/api \
   --output /private/tmp/olot-table-qr-codes
+```
+
+The generator keeps only allowlisted table fields and never writes resolver
+access tokens. After copying or printing the assets, remove the temporary
+manifest, directory, and sibling ZIP:
+
+```bash
+rm -f /private/tmp/olot-table-manifest.json \
+  /private/tmp/olot-table-qr-codes.zip
+rm -rf /private/tmp/olot-table-qr-codes
 ```
 
 A scan opens the existing menu with a session-scoped table context. Customers at the same table keep separate carts and orders; they never see a shared table bill.
