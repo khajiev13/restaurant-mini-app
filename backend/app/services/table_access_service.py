@@ -6,7 +6,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from app.services import alipos_api
 
@@ -82,7 +82,15 @@ async def get_table_directory() -> list[TableDirectoryEntry]:
             hall_id = uuid.UUID(str(hall["id"]))
             hall_title = str(hall.get("title") or "")
             service_percent = Decimal(str(hall.get("servicePercent") or 0))
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            if not service_percent.is_finite():
+                raise InvalidTableDirectory("Hall directory entry is invalid")
+        except (
+            AttributeError,
+            InvalidOperation,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise InvalidTableDirectory("Hall directory entry is invalid") from exc
         if hall_id in halls:
             raise InvalidTableDirectory("Duplicate hall identifier")

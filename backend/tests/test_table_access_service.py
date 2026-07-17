@@ -85,6 +85,32 @@ async def test_directory_rejects_duplicate_numeric_codes_across_halls():
             await get_table_directory()
 
 
+@pytest.mark.parametrize("service_percent", ["invalid", "NaN", "Infinity"])
+@pytest.mark.asyncio
+async def test_directory_rejects_invalid_service_percent(service_percent):
+    payload = {
+        "halls": [
+            {
+                "id": str(HALL_ID),
+                "title": "Asosiy zal",
+                "servicePercent": service_percent,
+            }
+        ],
+        "tables": [
+            {"id": str(TABLE_ID), "title": "Stol 12", "hallId": str(HALL_ID)}
+        ],
+    }
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=payload),
+    ):
+        with pytest.raises(
+            InvalidTableDirectory, match="Hall directory entry is invalid"
+        ):
+            await get_table_directory()
+
+
 def test_table_codes_are_stable_six_character_crockford_values():
     service = _service()
 
