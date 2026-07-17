@@ -809,30 +809,85 @@ async def test_multicard_callback_without_payment_uuid_is_rejected(
     assert order.payment_status == "pending"
 
 
-@pytest.mark.asyncio
-async def test_register_telegram_webhook_skips_when_url_matches(monkeypatch):
-    monkeypatch.setattr(
-        settings, "public_backend_url", "https://restaurant.labtutor.app"
-    )
-    monkeypatch.setattr(settings, "public_app_url", "")
-    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
-
-    webhook_info_response = Mock()
-    webhook_info_response.raise_for_status = Mock()
-    webhook_info_response.json.return_value = {
-        "ok": True,
-        "result": {
-            "url": "https://restaurant.labtutor.app/api/webhooks/bot",
-            "allowed_updates": ["message"],
-        },
+@pytest.fixture
+def telegram_startup_config(monkeypatch):
+    values = {
+        "public_url": "https://restaurant.labtutor.app",
+        "bot_token": "fixture-bot-token",
+        "current_secret": "fixture-current-webhook-secret",
+        "next_secret": "fixture-next-webhook-secret",
+        "provider_body": "fixture-provider-response-body",
     }
+    monkeypatch.setattr(settings, "public_backend_url", values["public_url"])
+    monkeypatch.setattr(settings, "public_app_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", values["bot_token"])
+    monkeypatch.setattr(
+        settings,
+        "telegram_webhook_secret",
+        values["current_secret"],
+    )
+    return values
 
+
+def _telegram_response(payload):
+    response = Mock()
+    response.raise_for_status = Mock()
+    response.json.return_value = payload
+    return response
+
+
+def _telegram_startup_client(*, webhook_info, set_webhook_payload=None):
     client = AsyncMock()
-    client.get = AsyncMock(return_value=webhook_info_response)
-    client.post = AsyncMock()
+    client.get = AsyncMock(
+        return_value=_telegram_response({"ok": True, "result": webhook_info})
+    )
+    client.post = AsyncMock(
+        return_value=_telegram_response(set_webhook_payload or {"ok": True})
+    )
     client.__aenter__.return_value = client
     client.__aexit__.return_value = None
+    return client
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_sets_when_url_matches_and_secret_is_configured(
+    telegram_startup_config,
+    caplog,
+):
+    webhook_url = f"{telegram_startup_config['public_url']}/api/webhooks/bot"
+    client = _telegram_startup_client(
+        webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
+    )
+
+    with (
+        caplog.at_level("INFO", logger="app.main"),
+        patch("app.main.httpx.AsyncClient", return_value=client),
+    ):
+        await register_telegram_webhook()
+
+    client.post.assert_awaited_once_with(
+        f"https://api.telegram.org/bot{telegram_startup_config['bot_token']}/setWebhook",
+        json={
+            "url": webhook_url,
+            "allowed_updates": ["message"],
+            "secret_token": telegram_startup_config["current_secret"],
+        },
+        timeout=10,
+    )
+    assert telegram_startup_config["bot_token"] not in caplog.text
+    assert telegram_startup_config["current_secret"] not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_skips_matching_url_only_when_secret_is_empty(
+    telegram_startup_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+    webhook_url = f"{telegram_startup_config['public_url']}/api/webhooks/bot"
+    client = _telegram_startup_client(
+        webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
+    )
 
     with patch("app.main.httpx.AsyncClient", return_value=client):
         await register_telegram_webhook()
@@ -842,74 +897,130 @@ async def test_register_telegram_webhook_skips_when_url_matches(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_register_telegram_webhook_sets_when_url_differs(monkeypatch):
-    monkeypatch.setattr(
-        settings, "public_backend_url", "https://restaurant.labtutor.app"
+async def test_register_telegram_webhook_reapplies_changed_secret(
+    telegram_startup_config,
+    monkeypatch,
+):
+    webhook_url = f"{telegram_startup_config['public_url']}/api/webhooks/bot"
+    client = _telegram_startup_client(
+        webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
     )
-    monkeypatch.setattr(settings, "public_app_url", "")
-    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
 
-    webhook_info_response = Mock()
-    webhook_info_response.raise_for_status = Mock()
-    webhook_info_response.json.return_value = {
-        "ok": True,
-        "result": {
+    with patch("app.main.httpx.AsyncClient", return_value=client):
+        await register_telegram_webhook()
+        monkeypatch.setattr(
+            settings,
+            "telegram_webhook_secret",
+            telegram_startup_config["next_secret"],
+        )
+        await register_telegram_webhook()
+
+    assert [
+        awaited.kwargs["json"]["secret_token"]
+        for awaited in client.post.await_args_list
+    ] == [
+        telegram_startup_config["current_secret"],
+        telegram_startup_config["next_secret"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_rejects_bot_api_ok_false(
+    telegram_startup_config,
+    caplog,
+):
+    client = _telegram_startup_client(
+        webhook_info={"url": "https://old.example/api/webhooks/bot"},
+        set_webhook_payload={
+            "ok": False,
+            "description": telegram_startup_config["provider_body"],
+        },
+    )
+
+    with (
+        caplog.at_level("WARNING", logger="app.main"),
+        patch("app.main.httpx.AsyncClient", return_value=client),
+        pytest.raises(
+            RuntimeError,
+            match="telegram_webhook_registration_failed",
+        ) as error,
+    ):
+        await register_telegram_webhook()
+
+    assert telegram_startup_config["provider_body"] not in str(error.value)
+    assert telegram_startup_config["bot_token"] not in caplog.text
+    assert telegram_startup_config["current_secret"] not in caplog.text
+    assert telegram_startup_config["provider_body"] not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_configured_secret_failure_aborts_startup(
+    telegram_startup_config,
+    caplog,
+):
+    client = _telegram_startup_client(
+        webhook_info={"url": "https://old.example/api/webhooks/bot"}
+    )
+    client.post.side_effect = RuntimeError(telegram_startup_config["provider_body"])
+
+    with (
+        caplog.at_level("WARNING", logger="app.main"),
+        patch("app.main.httpx.AsyncClient", return_value=client),
+        pytest.raises(
+            RuntimeError,
+            match="telegram_webhook_registration_failed",
+        ) as error,
+    ):
+        await register_telegram_webhook()
+
+    assert (
+        "telegram_webhook_registration_failed category=configured_secret"
+        in caplog.text
+    )
+    assert telegram_startup_config["bot_token"] not in caplog.text
+    assert telegram_startup_config["current_secret"] not in caplog.text
+    assert telegram_startup_config["provider_body"] not in caplog.text
+    assert telegram_startup_config["provider_body"] not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_sets_when_url_differs(
+    telegram_startup_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+    client = _telegram_startup_client(
+        webhook_info={
             "url": "https://old.example.com/api/webhooks/bot",
             "allowed_updates": ["message"],
-        },
-    }
-
-    set_webhook_response = Mock()
-    set_webhook_response.raise_for_status = Mock()
-
-    client = AsyncMock()
-    client.get = AsyncMock(return_value=webhook_info_response)
-    client.post = AsyncMock(return_value=set_webhook_response)
-    client.__aenter__.return_value = client
-    client.__aexit__.return_value = None
+        }
+    )
 
     with patch("app.main.httpx.AsyncClient", return_value=client):
         await register_telegram_webhook()
 
     client.post.assert_awaited_once_with(
-        "https://api.telegram.org/botbot-token/setWebhook",
+        f"https://api.telegram.org/bot{telegram_startup_config['bot_token']}/setWebhook",
         json={
-            "url": "https://restaurant.labtutor.app/api/webhooks/bot",
+            "url": f"{telegram_startup_config['public_url']}/api/webhooks/bot",
             "allowed_updates": ["message"],
-            "secret_token": "secret",
         },
         timeout=10,
     )
 
 
 @pytest.mark.asyncio
-async def test_register_telegram_webhook_sets_when_allowed_updates_differ(monkeypatch):
-    monkeypatch.setattr(
-        settings, "public_backend_url", "https://restaurant.labtutor.app"
-    )
-    monkeypatch.setattr(settings, "public_app_url", "")
-    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
-
-    webhook_info_response = Mock()
-    webhook_info_response.raise_for_status = Mock()
-    webhook_info_response.json.return_value = {
-        "ok": True,
-        "result": {
-            "url": "https://restaurant.labtutor.app/api/webhooks/bot",
+async def test_register_telegram_webhook_sets_when_allowed_updates_differ(
+    telegram_startup_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+    client = _telegram_startup_client(
+        webhook_info={
+            "url": f"{telegram_startup_config['public_url']}/api/webhooks/bot",
             "allowed_updates": ["message", "callback_query"],
-        },
-    }
-
-    set_webhook_response = Mock()
-    set_webhook_response.raise_for_status = Mock()
-
-    client = AsyncMock()
-    client.get = AsyncMock(return_value=webhook_info_response)
-    client.post = AsyncMock(return_value=set_webhook_response)
-    client.__aenter__.return_value = client
-    client.__aexit__.return_value = None
+        }
+    )
 
     with patch("app.main.httpx.AsyncClient", return_value=client):
         await register_telegram_webhook()

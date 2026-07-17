@@ -39,9 +39,12 @@ async def _get_telegram_webhook_info(client: httpx.AsyncClient) -> dict[str, Any
     )
     response.raise_for_status()
     payload = response.json()
-    if not payload.get("ok"):
-        raise RuntimeError(f"getWebhookInfo failed: {payload}")
-    return payload["result"]
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise RuntimeError("telegram_get_webhook_info_api_rejected")
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("telegram_get_webhook_info_invalid_result")
+    return result
 
 
 def _normalized_allowed_updates(values: list[str] | None) -> list[str]:
@@ -63,32 +66,33 @@ async def register_telegram_webhook() -> None:
     if settings.telegram_webhook_secret:
         payload["secret_token"] = settings.telegram_webhook_secret
 
-    async with httpx.AsyncClient() as client:
-        try:
-            try:
-                current_info = await _get_telegram_webhook_info(client)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Telegram webhook inspection failed; will attempt setWebhook: %s",
-                    exc,
-                )
-            else:
-                current_url = current_info.get("url", "")
-                current_allowed_updates = _normalized_allowed_updates(
-                    current_info.get("allowed_updates")
-                )
-                expected_allowed_updates = _normalized_allowed_updates(
-                    TELEGRAM_ALLOWED_UPDATES
-                )
-                if (
-                    current_url == webhook_url
-                    and current_allowed_updates == expected_allowed_updates
-                ):
-                    logger.info(
-                        "Telegram webhook already configured for %s; skipping setWebhook",
-                        webhook_url,
+    has_configured_secret = bool(settings.telegram_webhook_secret)
+    try:
+        async with httpx.AsyncClient() as client:
+            if not has_configured_secret:
+                try:
+                    current_info = await _get_telegram_webhook_info(client)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "telegram_webhook_inspection_failed category=request_or_response"
                     )
-                    return
+                else:
+                    current_url = current_info.get("url", "")
+                    current_allowed_updates = _normalized_allowed_updates(
+                        current_info.get("allowed_updates")
+                    )
+                    expected_allowed_updates = _normalized_allowed_updates(
+                        TELEGRAM_ALLOWED_UPDATES
+                    )
+                    if (
+                        current_url == webhook_url
+                        and current_allowed_updates == expected_allowed_updates
+                    ):
+                        logger.info(
+                            "Telegram webhook already configured for %s; skipping setWebhook",
+                            webhook_url,
+                        )
+                        return
 
             response = await client.post(
                 f"https://api.telegram.org/bot{settings.telegram_bot_token}/setWebhook",
@@ -96,9 +100,23 @@ async def register_telegram_webhook() -> None:
                 timeout=10,
             )
             response.raise_for_status()
-            logger.info("Telegram webhook registered for %s", webhook_url)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Telegram webhook auto-registration failed: %s", exc)
+            response_payload = response.json()
+            if (
+                not isinstance(response_payload, dict)
+                or response_payload.get("ok") is not True
+            ):
+                raise RuntimeError("telegram_set_webhook_api_rejected")
+    except Exception:  # noqa: BLE001
+        category = "configured_secret" if has_configured_secret else "empty_secret"
+        logger.warning(
+            "telegram_webhook_registration_failed category=%s",
+            category,
+        )
+        if has_configured_secret:
+            raise RuntimeError("telegram_webhook_registration_failed") from None
+        return
+
+    logger.info("Telegram webhook registered for %s", webhook_url)
 
 
 @app.on_event("startup")

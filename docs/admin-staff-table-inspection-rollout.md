@@ -716,6 +716,28 @@ case "$ROLLBACK_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 
 ### LIVE / MANUAL
 
+#### Telegram webhook secret freeze
+
+The current production `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`
+values are frozen for this release. Do not generate, replace, rotate, or
+otherwise change either value before, during, or after this rollout's
+acceptance or rollback path. Rotation is prohibited because the application
+accepts only one webhook secret; dual-secret overlap is not implemented.
+
+Telegram `getWebhookInfo` exposes observable webhook fields such as the URL
+and allowed updates, but it does not expose or verify the configured secret.
+Never treat a matching `getWebhookInfo` result as secret verification. With a
+configured secret, backend startup always reapplies it with `setWebhook`,
+requires both HTTP success and a root JSON `ok` value of `true`, and fails
+startup if registration fails. The `start.sh` Telegram helpers enforce the
+same root-`ok` rule, although the normal watcher rollout does not run that
+script.
+
+Any future rotation procedure must first implement and review old-plus-next
+secret acceptance so Telegram can move between values without an interval in
+which valid deliveries are rejected. That overlap is a future design
+requirement only; it is not an executable procedure for this release.
+
 Run in **Terminal B — WSL**. First run the complete remote-context preamble at
 the end of Section 3, then run this block. It prints only a success marker:
 
@@ -1947,6 +1969,7 @@ exists.
 - [ ] Pre-created rollback SHA tree/parent and both non-force dry-run paths verified
 - [ ] External mode-700 rollback state, PRE source, exact Compose project, four image mappings/tags, and four-service no-build dry run verified
 - [ ] Secret shape, controlled admin path, and default-false online gate verified without values
+- [ ] Production Telegram token and webhook secret stayed frozen; no rotation was attempted and `getWebhookInfo` was not treated as secret verification
 - [ ] Three production migrations applied once in order before `prod` push; metadata verified
 - [ ] Exact candidate CI green; watcher performed the release's one normal build; health and SHA verified
 - [ ] Incident path, if used, performed one four-service no-build restore, manual rollback fast-forward, zero-marker watcher no-op, and no rollback rebuild
