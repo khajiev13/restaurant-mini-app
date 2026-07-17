@@ -360,7 +360,7 @@ describe('App', () => {
 
   it('resolves a Telegram table start parameter and keeps the customer on the menu', () => {
     const tg = {
-      initDataUnsafe: { start_param: 't_A7K2P9_q1w2e3r4t5y6' },
+      initDataUnsafe: { start_param: 't2_12_q1w2e3r4t5y6' },
       ready: vi.fn(),
       expand: vi.fn(),
       setHeaderColor: vi.fn(),
@@ -377,8 +377,31 @@ describe('App', () => {
       </MemoryRouter>,
     );
 
-    expect(tableOrderState.resolveEntry).toHaveBeenCalledWith('t_A7K2P9_q1w2e3r4t5y6');
+    expect(tableOrderState.resolveEntry).toHaveBeenCalledWith('t2_12_q1w2e3r4t5y6');
     expect(view.getByText('Artisan menu page')).toBeInTheDocument();
+  });
+
+  it('continues to resolve a legacy Telegram table start parameter once', () => {
+    const tg = {
+      initDataUnsafe: { start_param: 't_A7K2P9_q1w2e3r4t5y6' },
+      ready: vi.fn(),
+      expand: vi.fn(),
+      setHeaderColor: vi.fn(),
+      setBackgroundColor: vi.fn(),
+      setBottomBarColor: vi.fn(),
+      disableVerticalSwipes: vi.fn(),
+      isVersionAtLeast: vi.fn(() => false),
+    };
+    (window as unknown as { Telegram?: { WebApp: unknown } }).Telegram = { WebApp: tg };
+
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(tableOrderState.resolveEntry).toHaveBeenCalledWith('t_A7K2P9_q1w2e3r4t5y6');
+    expect(tableOrderState.resolveEntry).toHaveBeenCalledTimes(1);
   });
 
   it('consumes a table start parameter only once so checkout navigation remains usable', async () => {

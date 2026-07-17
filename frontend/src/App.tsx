@@ -135,10 +135,11 @@ export default function App() {
       }
       return;
     }
-    if (startParam?.startsWith('t_')) {
+    const isTableStartParam = startParam.startsWith('t2_') || startParam.startsWith('t_');
+    if (isTableStartParam) {
       navigate('/', { replace: true });
       void resolveTableEntry(startParam).catch(() => {
-        // The menu exposes a retryable manual-code fallback.
+        // The menu exposes a retryable manual-number fallback.
       });
     }
   }, [navigate, resolveTableEntry]);
