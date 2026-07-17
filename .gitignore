@@ -8,3 +8,4 @@ dist/
 *.egg-info/
 
 .superpowers/
+.worktrees/
