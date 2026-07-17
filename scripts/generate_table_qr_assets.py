@@ -270,11 +270,6 @@ def _draw_fitted_text(
     )
 
 
-def _slug(value: str) -> str:
-    slug = re.sub(r"[^0-9A-Za-z]+", "-", value).strip("-").lower()
-    return slug or "table"
-
-
 def render_card(row: dict, destination: Path) -> None:
     width, height = 1200, 1500
     regular = _font_path(FONT_REGULAR_CANDIDATES)
@@ -367,10 +362,7 @@ def generate_package(rows: list[dict], output: Path) -> Path:
     png_dir.mkdir()
     cards: list[Path] = []
     for row in rows:
-        filename = (
-            f"{int(row['manual_code']):06d}-"
-            f"{_slug(row['hall_title'])}-{_slug(row['table_title'])}.png"
-        )
+        filename = f"{int(row['manual_code']):06d}.png"
         destination = png_dir / filename
         render_card(row, destination)
         decoded = zxingcpp.read_barcode(Image.open(destination))

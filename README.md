@@ -291,8 +291,9 @@ uv run --script scripts/generate_table_qr_assets.py \
 ```
 
 The generator keeps only allowlisted table fields and never writes resolver
-access tokens. After copying or printing the assets, remove the temporary
-manifest, directory, and sibling ZIP:
+access tokens. Individual PNG files use the unique zero-padded six-digit table
+code, such as `000012.png`. After copying or printing the assets, remove the
+temporary manifest, directory, and sibling ZIP:
 
 ```bash
 rm -f /private/tmp/olot-table-manifest.json \

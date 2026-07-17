@@ -94,16 +94,16 @@ def test_generate_package_renders_decodable_sorted_assets(generated_package):
     rows, output, _ = generated_package
     pngs = sorted((output / "png").glob("*.png"))
 
-    assert [path.name[:6] for path in pngs] == [
-        "000002",
-        "000003",
-        "000004",
-        "000005",
-        "000012",
+    assert [path.name for path in pngs] == [
+        "000002.png",
+        "000003.png",
+        "000004.png",
+        "000005.png",
+        "000012.png",
     ]
     expected_by_code = {int(row["manual_code"]): row["deep_link"] for row in rows}
     for path in pngs:
-        code = int(path.name.split("-", 1)[0])
+        code = int(path.stem)
         assert zxingcpp.read_barcode(Image.open(path)).text == expected_by_code[code]
     assert json.loads((output / "verification.json").read_text()) == {
         "verified_count": 5
@@ -124,7 +124,7 @@ def test_generate_package_fits_long_latin_cyrillic_and_uzbek_titles(
     generated_package,
 ):
     _, output, _ = generated_package
-    card_path = next((output / "png").glob("000003-*.png"))
+    card_path = output / "png" / "000003.png"
     card = Image.open(card_path).convert("RGB")
     white = Image.new("RGB", (40, 200), "white")
 
@@ -143,13 +143,7 @@ def test_generate_package_uses_appended_zip_suffix_and_exact_safe_membership(
     generated_package,
 ):
     rows, output, zip_path = generated_package
-    png_names = {
-        "png/"
-        f"{int(row['manual_code']):06d}-"
-        f"{qr_assets._slug(row['hall_title'])}-"
-        f"{qr_assets._slug(row['table_title'])}.png"
-        for row in rows
-    }
+    png_names = {f"png/{int(row['manual_code']):06d}.png" for row in rows}
     expected_names = {
         "manifest.json",
         "manifest.csv",
@@ -166,6 +160,31 @@ def test_generate_package_uses_appended_zip_suffix_and_exact_safe_membership(
             for name in archive.namelist()
         )
     assert all("access_token" not in row for row in rows)
+
+
+def test_generate_package_uses_bounded_numeric_filename_for_oversized_titles(
+    tmp_path,
+):
+    row = _row(
+        "123",
+        "000000000123",
+        hall_title="H" * 200,
+        table_title="T" * 200,
+    )
+    source = _write_manifest(tmp_path, {"success": True, "data": [row]})
+    output = tmp_path / "table-qr-codes"
+
+    rows = qr_assets.load_manifest(source)
+    zip_path = qr_assets.generate_package(rows, output)
+
+    png_path = output / "png" / "000123.png"
+    assert [path.name for path in (output / "png").glob("*.png")] == ["000123.png"]
+    assert len(png_path.name.encode()) == 10
+    assert zxingcpp.read_barcode(Image.open(png_path)).text == row["deep_link"]
+    assert (output / "all-table-qr-codes.pdf").stat().st_size > 0
+    assert zip_path.stat().st_size > 0
+    with zipfile.ZipFile(zip_path) as archive:
+        assert "png/000123.png" in archive.namelist()
 
 
 def test_manifest_accepts_raw_array_and_mixed_case_urlsafe_signature(tmp_path):
