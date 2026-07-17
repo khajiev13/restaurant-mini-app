@@ -8,17 +8,25 @@ the current `origin/main` and `origin/codex/alipos-inplace-total-fix`, and the
 release owner must review the complete delta before production changes begin.
 If either branch is not an ancestor of the pinned candidate, stop.
 
-The production deployment is performed by the external `deploy-watcher`. It
-polls `prod`, waits for the exact pushed SHA to pass the `CI` workflow, and then
-runs one `docker compose up -d --build`. The database migrations must finish
-before `prod` is pushed. Complete every production migration, configuration
-check, watcher check, and rollback preparation step before that single
-production push. Do not run `start.sh`, do not run a second manual build, and
-do not manually recreate the application containers during normal rollout.
-Across the complete release there is exactly one normal watcher build. An
-incident adds one four-service no-build restore; rollback checkout convergence
-is manual and the resumed watcher must be an audited zero-marker no-op, never a
-second build.
+The external `deploy-watcher` normally deploys `prod`, but this release's
+exclusive legacy-pending cutover requires stricter ordering. Keep the watcher
+stopped from the start of the freeze through the maintenance route, old-backend
+drain and stop, database gates, migrations, exact-SHA CI, selective candidate
+startup, and normal-route restoration. After exact-SHA CI succeeds, manually
+fast-forward the clean production checkout to that SHA, build the candidate
+backend and frontend exactly once, and start only the explicitly listed
+candidate services with Caddy excluded. The archived maintenance Caddy must
+remain active until the candidate backend and frontend are healthy. Restore
+the archived normal Caddy source with `--no-build --no-deps`, verify routing,
+and only then resume the watcher as an audited equal-SHA zero-marker no-op.
+
+Complete every production migration, configuration check, watcher check, and
+rollback preparation step before the single production push. Do not run
+`start.sh`, do not let the watcher build during the cutover, and do not run a
+second application build. If the watcher cannot be held or its equal-SHA no-op
+cannot be proved, stop the release. An incident adds one four-service no-build
+restore; rollback checkout convergence is manual and the resumed watcher must
+again be an audited zero-marker no-op, never a rebuild.
 
 Use two explicit, persistent terminals for the whole release:
 
@@ -164,16 +172,88 @@ between suites or migration passes:
 test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_postgres)" = healthy
 ```
 
-Run the backend suite and Ruff with the release test database:
+Use the installed Python 3.12 environment rather than the worktree's unusable
+Python 3.9 environment. Run the full backend suite and Ruff with the release
+test database. The full suite may skip the opt-in destructive proof; the
+separate proof immediately below must pass with zero skips:
 
 ```bash
 set -a
 source .env
 set +a
+BACKEND_PYTHON=/Users/khajievroma/Projects/restaurant-mini-app/backend/.venv312/bin/python
+test -x "$BACKEND_PYTHON"
 
 cd backend
-POSTGRES_HOST=localhost POSTGRES_PORT=55432 .venv/bin/python -m pytest -q --tb=no
-.venv/bin/python -m ruff check .
+POSTGRES_HOST=localhost POSTGRES_PORT=55432 \
+  "$BACKEND_PYTHON" -m pytest -q --tb=no
+"$BACKEND_PYTHON" -m ruff check .
+cd ..
+```
+
+Prove the final-admin concurrency behavior once for this exact candidate in a
+fresh, volume-free PostgreSQL container. This command uses a random
+loopback-only port and an exact `admin_concurrency_gate_` database name. It
+does not build an application image and must never target `restaurant_db`, the
+existing local PostgreSQL volume, or production. Do not repeat it for an
+unchanged candidate. Run the block from the release checkout root; it enters
+and leaves `backend/` explicitly:
+
+```bash
+set -euo pipefail
+cd backend
+GATE_NONCE="$(date -u +%Y%m%d%H%M%S)-$$"
+GATE_CONTAINER="admin-concurrency-gate-$GATE_NONCE"
+GATE_DB="admin_concurrency_gate_${GATE_NONCE//-/_}"
+GATE_USER=gate_user
+GATE_PASSWORD=gate_password_only
+BACKEND_PYTHON=/Users/khajievroma/Projects/restaurant-mini-app/backend/.venv312/bin/python
+test -x "$BACKEND_PYTHON"
+cleanup_admin_gate() { docker rm -f "$GATE_CONTAINER" >/dev/null 2>&1 || true; }
+trap cleanup_admin_gate EXIT INT TERM
+
+docker run -d --rm \
+  --name "$GATE_CONTAINER" \
+  -e POSTGRES_USER="$GATE_USER" \
+  -e POSTGRES_PASSWORD="$GATE_PASSWORD" \
+  -e POSTGRES_DB="$GATE_DB" \
+  -p 127.0.0.1::5432 \
+  postgres:16-alpine >/dev/null
+
+for _ in $(seq 1 60); do
+  docker exec "$GATE_CONTAINER" pg_isready -U "$GATE_USER" -d "$GATE_DB" >/dev/null 2>&1 && break
+  sleep 1
+done
+docker exec "$GATE_CONTAINER" pg_isready -U "$GATE_USER" -d "$GATE_DB" >/dev/null
+GATE_PORT="$(docker port "$GATE_CONTAINER" 5432/tcp | awk -F: '{print $NF}')"
+case "$GATE_PORT" in ''|*[!0-9]*) exit 1 ;; esac
+
+POSTGRES_HOST=127.0.0.1 \
+POSTGRES_PORT="$GATE_PORT" \
+POSTGRES_USER="$GATE_USER" \
+POSTGRES_PASSWORD="$GATE_PASSWORD" \
+POSTGRES_DB="$GATE_DB" \
+TELEGRAM_BOT_TOKEN=test_token \
+JWT_SECRET=test_secret \
+ALIPOS_API_CLIENT_ID=test_client_id \
+ALIPOS_API_CLIENT_SECRET=test_client_secret \
+ALIPOS_RESTAURANT_ID=test-restaurant-id \
+RUN_DESTRUCTIVE_POSTGRES_TESTS=1 \
+  "$BACKEND_PYTHON" -m pytest \
+    tests/test_admin_user_service.py::test_concurrent_admin_demotions_do_not_remove_all_admins \
+    -q --junitxml=/tmp/admin-concurrency-gate.xml
+
+"$BACKEND_PYTHON" -c '
+import sys
+import xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+totals = tuple(sum(int(s.attrib.get(key, 0)) for s in suites) for key in ("tests", "failures", "errors", "skipped"))
+assert totals == (1, 0, 0, 0), totals
+' /tmp/admin-concurrency-gate.xml
+
+docker stop --time 30 "$GATE_CONTAINER" >/dev/null
+trap - EXIT INT TERM
 cd ..
 ```
 
@@ -374,9 +454,10 @@ sudo -n systemctl is-active --quiet "$WATCHER_UNIT"
 ### LOCAL branch rules and pre-created rollback commit
 
 In **Terminal A — LOCAL**, source and verify `LOCAL_RELEASE_STATE` as described
-in Section 1. The repository workflow jobs are named `Backend Tests` and
-`Frontend Tests`. This direct-release procedure is valid only when both
-classic branch protection and all applicable repository rules are absent.
+in Section 1. The candidate workflow jobs are named `Backend Tests`,
+`Admin concurrency gate`, and `Frontend Tests`. This direct-release procedure
+is valid only when both classic branch protection and all applicable repository
+rules are absent.
 
 ```bash
 REPO=khajiev13/restaurant-mini-app
@@ -790,7 +871,7 @@ confirm the intended controlled identity and enter a non-placeholder,
 non-secret release-record reference in `BOOTSTRAP_IDENTITY_CONFIRMATION`.
 Neither the confirmation step nor the release record may contain the ID.
 
-## 5. Pause the watcher and migrate before pushing `prod`
+## 5. Freeze creates, drain the old backend, and migrate
 
 ### LIVE / MANUAL
 
@@ -800,10 +881,17 @@ database lock. Do not apply it during a delivery surge, and do not interrupt or
 blindly retry it while DDL is in progress.
 
 In **Terminal A — LOCAL**, source and verify `LOCAL_RELEASE_STATE` as described
-in Section 1. Pause the watcher through explicit SSH/WSL context and prove that
-`prod` has not moved:
+in Section 1. Acquire the exclusive release freeze before any production
+mutation. The freeze prohibits every other `prod` push, checkout mutation, or
+deployment until this release is accepted or rolled back. Pause the watcher
+through explicit SSH/WSL context and prove that `prod` has not moved:
 
 ```bash
+EXCLUSIVE_RELEASE_FREEZE_CONFIRMATION='<exclusive release-freeze record reference>'
+case "$EXCLUSIVE_RELEASE_FREEZE_CONFIRMATION" in
+  ''|'<exclusive release-freeze record reference>') exit 1 ;;
+esac
+
 ssh restaurant 'wsl bash -lc '\''
 set -euo pipefail
 set +x
@@ -817,9 +905,239 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 test -z "$(git status --porcelain)"
 ```
 
+In **Terminal B — WSL**, run the Section 3 remote-context preamble. Create a
+temporary Caddyfile and Compose override only in the protected archived state
+directory; never edit the production Git checkout's `Caddyfile`. The first
+route matches exactly `POST /api/orders` and returns maintenance status 503.
+All GETs, Telegram/AliPOS/payment webhook POSTs, and other API routes continue
+to the still-running old backend:
+
+```bash
+MAINTENANCE_CADDYFILE="$ROLLBACK_DIR/order-create-maintenance.Caddyfile"
+MAINTENANCE_OVERRIDE="$ROLLBACK_DIR/order-create-maintenance.yml"
+
+cat > "$MAINTENANCE_CADDYFILE" <<'CADDY'
+{
+	admin off
+	auto_https off
+}
+
+http:// {
+	encode zstd gzip
+
+	header {
+		-Server
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Content-Type-Options nosniff
+	}
+
+	route {
+		@order_create {
+			method POST
+			path /api/orders
+		}
+		respond @order_create "order creation temporarily unavailable" 503
+
+		respond /healthz "ok" 200
+		respond /readyz "ok" 200
+
+		handle /api/* {
+			reverse_proxy backend:8000
+		}
+
+		handle {
+			reverse_proxy frontend:80
+		}
+	}
+}
+CADDY
+
+cat > "$MAINTENANCE_OVERRIDE" <<EOF
+services:
+  caddy:
+    volumes:
+      - type: bind
+        source: $MAINTENANCE_CADDYFILE
+        target: /etc/caddy/Caddyfile
+        read_only: true
+EOF
+chmod 600 "$MAINTENANCE_CADDYFILE" "$MAINTENANCE_OVERRIDE"
+printf 'MAINTENANCE_CADDYFILE=%q\n' "$MAINTENANCE_CADDYFILE" >> \
+  "$ROLLBACK_DIR/release.env"
+printf 'MAINTENANCE_OVERRIDE=%q\n' "$MAINTENANCE_OVERRIDE" >> \
+  "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
+
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PRE_PROD_SOURCE" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PRE_PROD_SOURCE/docker-compose.yml" \
+  -f "$ROLLBACK_OVERRIDE" \
+  -f "$MAINTENANCE_OVERRIDE" \
+  config --quiet
+
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PRE_PROD_SOURCE" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PRE_PROD_SOURCE/docker-compose.yml" \
+  -f "$ROLLBACK_OVERRIDE" \
+  -f "$MAINTENANCE_OVERRIDE" \
+  up -d --no-build --force-recreate --no-deps caddy
+
+test "$(docker inspect --format '{{.Id}}' restaurant_backend)" = \
+  "$BACKEND_CONTAINER_ID"
+test "$(docker inspect --format '{{.Id}}' restaurant_frontend)" = \
+  "$FRONTEND_CONTAINER_ID"
+test "$(docker inspect --format '{{.Id}}' restaurant_cloudflared)" = \
+  "$CLOUDFLARED_CONTAINER_ID"
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = \
+  "$POSTGRES_CONTAINER_ID"
+test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy)" = healthy
+test "$(docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' \
+  restaurant_caddy)" = "$MAINTENANCE_CADDYFILE"
+```
+
+Verify the local and public create routes return exactly 503, the backend
+health route returns 200, and a non-mutating GET to an AliPOS webhook route
+returns backend method status 405. These checks retain status codes only:
+
+```bash
+set -a
+source "$PROD_DIR/.env"
+set +a
+test -n "${PUBLIC_APP_URL:-}"
+
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 -X POST \
+  http://127.0.0.1:8080/api/orders)" = 503
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 -X POST \
+  "${PUBLIC_APP_URL%/}/api/orders")" = 503
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 \
+  http://127.0.0.1:8080/api/health)" = 200
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 \
+  "${PUBLIC_APP_URL%/}/api/health")" = 200
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 \
+  http://127.0.0.1:8080/api/webhooks/order-status)" = 405
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 \
+  "${PUBLIC_APP_URL%/}/api/webhooks/order-status")" = 405
+unset PUBLIC_APP_URL
+```
+
+Keep the old backend running for a fixed 600-second drain. This exceeds the
+production-base worst-case sequential provider timeout/retry/backoff chain
+with margin. New creates remain blocked while callbacks and requests admitted
+before the maintenance route can finish:
+
+```bash
+DRAIN_STARTED_AT="$(date +%s)"
+DRAIN_DEADLINE=$(( DRAIN_STARTED_AT + 600 ))
+while [ "$(date +%s)" -lt "$DRAIN_DEADLINE" ]; do
+  test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend)" = healthy
+  test "$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 -X POST \
+    http://127.0.0.1:8080/api/orders)" = 503
+  test "$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 \
+    http://127.0.0.1:8080/api/health)" = 200
+  sleep 5
+done
+DRAIN_ELAPSED=$(( $(date +%s) - DRAIN_STARTED_AT ))
+test "$DRAIN_ELAPSED" -ge 600
+printf 'old_backend_drain_seconds=%s\n' "$DRAIN_ELAPSED"
+```
+
+Stop the old backend with the exact 180-second graceful timeout. A timeout,
+exit 137, any other signal/forced termination, `OOMKilled=true`, nonzero exit,
+nonempty runtime error, or uncertain drain aborts the release. In any such
+case keep the maintenance route and freeze active, do not trust either database
+gate, and complete provider-side reconciliation before a new attempt:
+
+```bash
+if ! docker stop --time 180 restaurant_backend >/dev/null; then
+  printf 'old backend did not stop cleanly; release aborted\n' >&2
+  exit 1
+fi
+
+OLD_BACKEND_STATUS="$(docker inspect --format '{{.State.Status}}' restaurant_backend)"
+OLD_BACKEND_OOM="$(docker inspect --format '{{.State.OOMKilled}}' restaurant_backend)"
+OLD_BACKEND_EXIT="$(docker inspect --format '{{.State.ExitCode}}' restaurant_backend)"
+OLD_BACKEND_ERROR="$(docker inspect --format '{{.State.Error}}' restaurant_backend)"
+test "$OLD_BACKEND_STATUS" = exited
+test "$OLD_BACKEND_OOM" = false
+test "$OLD_BACKEND_EXIT" -eq 0
+test -z "$OLD_BACKEND_ERROR"
+printf 'old_backend_stop=clean exit_code=0 oom_killed=false\n'
+```
+
+Define the compatible-old-backend recovery while Terminal B remains open.
+This always keeps the create-maintenance route active and performs no build:
+
+```bash
+recover_compatible_old_backend() {
+  docker compose \
+    --project-name "$COMPOSE_PROJECT_NAME" \
+    --project-directory "$PRE_PROD_SOURCE" \
+    --env-file "$PROD_DIR/.env" \
+    -f "$PRE_PROD_SOURCE/docker-compose.yml" \
+    -f "$ROLLBACK_OVERRIDE" \
+    up -d --no-build --force-recreate --no-deps backend
+
+  RECOVERY_DEADLINE=$(( $(date +%s) + 600 ))
+  while [ "$(date +%s)" -lt "$RECOVERY_DEADLINE" ]; do
+    [ "$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend 2>/dev/null || true)" = healthy ] && break
+    sleep 5
+  done
+  test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend)" = healthy
+  test "$(docker inspect --format '{{.Image}}' restaurant_backend)" = "$BACKEND_IMAGE_ID"
+  test "$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 -X POST \
+    http://127.0.0.1:8080/api/orders)" = 503
+  test "$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 \
+    http://127.0.0.1:8080/api/health)" = 200
+}
+```
+
+Run the first authoritative legacy-pending gate only now, after create ingress
+has been blocked for the full drain and the old backend stopped cleanly. The
+query deliberately uses production-base columns only:
+
+```bash
+LEGACY_PENDING_BEFORE="$(docker exec -i restaurant_postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT count(*)
+FROM orders
+WHERE discriminator = 'delivery'
+  AND payment_method = 'rahmat'
+  AND payment_provider = 'multicard'
+  AND payment_status = 'pending'
+  AND alipos_order_id IS NOT NULL;
+SQL
+)"
+case "$LEGACY_PENDING_BEFORE" in ''|*[!0-9]*) exit 1 ;; esac
+if [ "$LEGACY_PENDING_BEFORE" -ne 0 ]; then
+  recover_compatible_old_backend
+  printf 'release_aborted legacy_pending_before=%s\n' "$LEGACY_PENDING_BEFORE" >&2
+  exit 1
+fi
+printf 'legacy_pending_before=0\n'
+```
+
+Do not auto-cancel, charge, or resubmit any matching row. A nonzero count ends
+this freeze after the archived old backend is healthy behind the still-active
+maintenance route; record the abort and do not continue.
+
 Apply each production migration exactly once, in this order, using the
 approved SSH/WSL/PostgreSQL-stdin pattern. These commands send the candidate's
-reviewed SQL and print no environment values:
+reviewed SQL and print no environment values. The old backend remains stopped:
 
 ```bash
 for migration in \
@@ -832,6 +1150,47 @@ do
     < "$migration"
 done
 ```
+
+Backfill only the already-created AliPOS rows whose new sync status is null.
+Do not broaden this predicate:
+
+```bash
+ssh restaurant \
+  'wsl docker exec -i restaurant_postgres sh -lc '\''psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"'\''' \
+  <<'SQL'
+UPDATE orders
+SET alipos_sync_status = 'synced'
+WHERE alipos_order_id IS NOT NULL
+  AND alipos_sync_status IS NULL;
+SQL
+```
+
+Run the same exact legacy-pending gate a second time and require zero:
+
+```bash
+LEGACY_PENDING_AFTER="$(ssh restaurant \
+  'wsl docker exec -i restaurant_postgres sh -lc '\''psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB"'\''' \
+  <<'SQL'
+SELECT count(*)
+FROM orders
+WHERE discriminator = 'delivery'
+  AND payment_method = 'rahmat'
+  AND payment_provider = 'multicard'
+  AND payment_status = 'pending'
+  AND alipos_order_id IS NOT NULL;
+SQL
+)"
+case "$LEGACY_PENDING_AFTER" in ''|*[!0-9]*) exit 1 ;; esac
+test "$LEGACY_PENDING_AFTER" -eq 0
+printf 'legacy_pending_after=0\n'
+```
+
+If any migration, backfill, or second-gate command fails or the second count is
+nonzero, run `recover_compatible_old_backend` in Terminal B, verify its health,
+record the aborted freeze, and stop. The migrations are additive, so the
+archived old backend is the compatible recovery path. Keep the maintenance
+route active; restore normal routing only after either the exact candidate is
+healthy or the Section 10 four-service no-build rollback is complete.
 
 Do not run any of these production migrations a second time in this release.
 Verify and compare full schema definitions, not names only. The first four
@@ -1093,9 +1452,10 @@ unset BOOTSTRAP_IDENTITY_CONFIRMATION
 printf 'controlled_admin_path=ok durable_admin_count=%s\n' "$DURABLE_ADMIN_COUNT"
 ```
 
-The old application containers remain running while the watcher is paused.
+The old backend remains stopped, the maintenance Caddy remains active, and the
+exclusive freeze remains held through the exact-candidate sequence below.
 
-## 6. Push one pinned SHA, wait for exact CI, then deploy once
+## 6. Push one pinned SHA, wait for exact CI, then start the candidate once
 
 ### LOCAL, then LIVE / MANUAL
 
@@ -1115,7 +1475,8 @@ git push origin "$CANDIDATE_SHA:refs/heads/prod"
 ```
 
 Discover the exact candidate run with a ten-minute bound, watch it, and assert
-each named job separately:
+each named job separately. `Admin concurrency gate` is mandatory; a broad
+backend run that skipped the destructive test is not a substitute:
 
 ```bash
 REPO=khajiev13/restaurant-mini-app
@@ -1153,106 +1514,175 @@ while :; do
 done
 test "$RUN_CONCLUSION" = success
 
-for job in 'Backend Tests' 'Frontend Tests'; do
+for job in 'Backend Tests' 'Admin concurrency gate' 'Frontend Tests'; do
   test "$(gh run view "$RUN_ID" --repo "$REPO" --json jobs \
     --jq "[.jobs[] | select(.name == \"$job\" and .conclusion == \"success\")] | length")" -eq 1
 done
 ```
 
-If CI fails, keep the watcher paused and execute the non-force rollback-commit
-portion of Section 10 before resuming it. Never deploy a different SHA because
-its CI happened to be green.
+If CI fails, keep the watcher paused, run `recover_compatible_old_backend` in
+Terminal B, and execute the non-force rollback-commit portion of Section 10
+before restoring normal routing. Never deploy a different SHA because its CI
+happened to be green.
 
-In **Terminal B — WSL**, run the Section 3 remote-context preamble. Record the
-UTC deployment wait start in the protected remote state file; do not rely on a
-variable from another terminal:
-
-```bash
-DEPLOY_WAIT_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf 'DEPLOY_WAIT_START=%q\n' "$DEPLOY_WAIT_START" >> "$ROLLBACK_DIR/release.env"
-chmod 600 "$ROLLBACK_DIR/release.env"
-```
-
-From **Terminal A — LOCAL**, acquire the exclusive production release freeze
-and enter its non-secret record reference. The freeze prohibits any other
-`prod` push or production checkout mutation until acceptance or rollback is
-complete. In the same SSH/WSL handoff that resumes the watcher, fetch `prod`
-and require its exact candidate SHA immediately before `systemctl start`. Do
-not invoke Docker Compose or `start.sh` yourself:
+In **Terminal B — WSL**, run the Section 3 remote-context preamble. The watcher
+must still be inactive and the maintenance Caddy must still be mounted. Fetch
+and cleanly fast-forward the production checkout to the exact CI-approved
+candidate without invoking Docker:
 
 ```bash
-EXCLUSIVE_RELEASE_FREEZE_CONFIRMATION='<exclusive release-freeze record reference>'
-case "$EXCLUSIVE_RELEASE_FREEZE_CONFIRMATION" in
-  ''|'<exclusive release-freeze record reference>') exit 1 ;;
-esac
-
-ssh restaurant wsl bash -s -- "$CANDIDATE_SHA" <<'WSL'
-set -euo pipefail
-set +x
-CANDIDATE_SHA="$1"
-test "${#CANDIDATE_SHA}" -eq 40
-case "$CANDIDATE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-WATCHER_UNIT=deploy-watcher.service
-PROD_DIR="$(sudo -n systemctl show "$WATCHER_UNIT" \
-  --property=WorkingDirectory --value)"
-test -d "$PROD_DIR/.git"
+! sudo -n systemctl is-active --quiet deploy-watcher.service
+test "$(docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' \
+  restaurant_caddy)" = "$MAINTENANCE_CADDYFILE"
 git -C "$PROD_DIR" fetch origin prod
 test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$CANDIDATE_SHA"
-sudo -n systemctl start "$WATCHER_UNIT"
-sudo -n systemctl is-active --quiet "$WATCHER_UNIT"
-WSL
+test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$PRE_PROD_SHA"
+test "$(git -C "$PROD_DIR" branch --show-current)" = prod
+test -z "$(git -C "$PROD_DIR" status --porcelain)"
+git -C "$PROD_DIR" merge --ff-only origin/prod
+test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA"
 ```
 
-In **Terminal B — WSL**, rerun the Section 3 remote-context preamble, which now
-also re-establishes `DEPLOY_WAIT_START`. Poll for at most 20 minutes until the
-checkout, remote branch, and every expected service state converge together:
+Validate the exact candidate Compose graph. Require runtime changes, then
+build backend and frontend exactly once. A failed or interrupted build aborts
+the release; do not retry it in this freeze. Caddy is not part of this build:
 
 ```bash
 cd "$PROD_DIR"
-test -n "$DEPLOY_WAIT_START"
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PROD_DIR" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PROD_DIR/docker-compose.yml" \
+  config --quiet
+
+! git diff --quiet "$PRE_PROD_SHA..$CANDIDATE_SHA" -- \
+  backend frontend docker-compose.yml Caddyfile
+test -z "${CANDIDATE_BUILD_COMPLETED:-}"
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PROD_DIR" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PROD_DIR/docker-compose.yml" \
+  build backend frontend
+CANDIDATE_BUILD_COMPLETED=1
+printf 'CANDIDATE_BUILD_COMPLETED=1\n' >> "$ROLLBACK_DIR/release.env"
+chmod 600 "$ROLLBACK_DIR/release.env"
+```
+
+Start only the explicitly listed candidate services with `--no-deps` and no
+second build. Caddy is deliberately excluded, so `POST /api/orders` remains
+503 throughout candidate startup. PostgreSQL must not be recreated:
+
+```bash
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PROD_DIR" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PROD_DIR/docker-compose.yml" \
+  up -d --no-build --no-deps backend frontend cloudflared
+
+! sudo -n systemctl is-active --quiet deploy-watcher.service
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = \
+  "$POSTGRES_CONTAINER_ID"
+test "$(docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' \
+  restaurant_caddy)" = "$MAINTENANCE_CADDYFILE"
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 -X POST \
+  http://127.0.0.1:8080/api/orders)" = 503
+```
+
+Wait up to 20 minutes for the exact candidate backend and frontend to become
+healthy while the maintenance route remains active. Do not restore normal
+routing based on checkout state alone:
+
+```bash
 DEPLOY_DEADLINE=$(( $(date +%s) + 1200 ))
 DEPLOY_READY=0
 while [ "$(date +%s)" -lt "$DEPLOY_DEADLINE" ]; do
-  git fetch origin prod
-  CHECKOUT_SHA="$(git rev-parse HEAD)"
-  REMOTE_SHA="$(git rev-parse origin/prod)"
-  POSTGRES_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_postgres 2>/dev/null || true)"
   BACKEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_backend 2>/dev/null || true)"
   FRONTEND_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_frontend 2>/dev/null || true)"
-  CADDY_HEALTH="$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy 2>/dev/null || true)"
   CLOUDFLARED_RUNNING="$(docker inspect --format '{{.State.Running}}' restaurant_cloudflared 2>/dev/null || true)"
+  MAINTENANCE_MOUNT="$(docker inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' \
+    restaurant_caddy 2>/dev/null || true)"
 
-  if [ "$CHECKOUT_SHA" = "$CANDIDATE_SHA" ] \
-    && [ "$REMOTE_SHA" = "$CANDIDATE_SHA" ] \
-    && [ "$POSTGRES_HEALTH" = healthy ] \
-    && [ "$BACKEND_HEALTH" = healthy ] \
+  if [ "$BACKEND_HEALTH" = healthy ] \
     && [ "$FRONTEND_HEALTH" = healthy ] \
-    && [ "$CADDY_HEALTH" = healthy ] \
-    && [ "$CLOUDFLARED_RUNNING" = true ]; then
+    && [ "$CLOUDFLARED_RUNNING" = true ] \
+    && [ "$MAINTENANCE_MOUNT" = "$MAINTENANCE_CADDYFILE" ]; then
     DEPLOY_READY=1
     break
   fi
   sleep 10
 done
 test "$DEPLOY_READY" -eq 1
-test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = "$POSTGRES_CONTAINER_ID"
+test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA"
+test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$CANDIDATE_SHA"
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = \
+  "$POSTGRES_CONTAINER_ID"
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 -X POST \
+  http://127.0.0.1:8080/api/orders)" = 503
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  --connect-timeout 5 --max-time 15 \
+  http://127.0.0.1:8080/api/health)" = 200
+```
 
-curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/healthz >/dev/null
-curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:8080/api/health >/dev/null
+Only after those candidate health assertions pass, restore the archived normal
+Caddy source without a build and without touching dependencies:
 
+```bash
+docker compose \
+  --project-name "$COMPOSE_PROJECT_NAME" \
+  --project-directory "$PRE_PROD_SOURCE" \
+  --env-file "$PROD_DIR/.env" \
+  -f "$PRE_PROD_SOURCE/docker-compose.yml" \
+  -f "$ROLLBACK_OVERRIDE" \
+  up -d --no-build --force-recreate --no-deps caddy
+
+test "$(docker inspect --format '{{.State.Health.Status}}' restaurant_caddy)" = healthy
+test "$(docker inspect --format '{{.Image}}' restaurant_caddy)" = "$CADDY_IMAGE_ID"
+test "$(docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' \
+  restaurant_caddy)" = "$PRE_PROD_SOURCE/Caddyfile"
+test "$(docker inspect --format '{{.Id}}' restaurant_postgres)" = \
+  "$POSTGRES_CONTAINER_ID"
+```
+
+Verify local and public health and webhook forwarding before admitting creates.
+Then send only an unauthenticated empty JSON request: status 401, 403, or 422
+proves the normal route is restored without creating an order; 503 means the
+maintenance route is still active and blocks release:
+
+```bash
 set -a
 source "$PROD_DIR/.env"
 set +a
 test -n "${PUBLIC_APP_URL:-}"
-curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/healthz" >/dev/null
-curl -fsS --connect-timeout 5 --max-time 15 "${PUBLIC_APP_URL%/}/api/health" >/dev/null
-unset PUBLIC_APP_URL
+
+for base in http://127.0.0.1:8080 "${PUBLIC_APP_URL%/}"; do
+  test "$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 "$base/healthz")" = 200
+  test "$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 "$base/api/health")" = 200
+  test "$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 \
+    "$base/api/webhooks/order-status")" = 405
+  NORMAL_POST_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 15 \
+    -H 'Content-Type: application/json' -d '{}' "$base/api/orders")"
+  case "$NORMAL_POST_STATUS" in 401|403|422) ;; *) exit 1 ;; esac
+done
+unset PUBLIC_APP_URL NORMAL_POST_STATUS
 ```
 
-Capture each post-deploy Compose image name and immutable running image ID.
-Verify the four names against the candidate Compose mapping, verify each name
-resolves to the running ID, require backend/frontend to differ from their
-rollback IDs, and safely assert `http2` without reading the token argument:
+Capture and verify the running candidate application images. Caddy is expected
+to remain the archived normal image/source; backend, frontend, and cloudflared
+must match the candidate Compose mapping. Assert `http2` without reading the
+token-bearing argument:
 
 ```bash
 NEW_BACKEND_COMPOSE_IMAGE="$(docker inspect --format '{{.Config.Image}}' restaurant_backend)"
@@ -1272,7 +1702,6 @@ CANDIDATE_COMPOSE_IMAGES="$(docker compose \
 for pair in \
   "$NEW_BACKEND_COMPOSE_IMAGE|$NEW_BACKEND_IMAGE_ID" \
   "$NEW_FRONTEND_COMPOSE_IMAGE|$NEW_FRONTEND_IMAGE_ID" \
-  "$NEW_CADDY_COMPOSE_IMAGE|$NEW_CADDY_IMAGE_ID" \
   "$NEW_CLOUDFLARED_COMPOSE_IMAGE|$NEW_CLOUDFLARED_IMAGE_ID"
 do
   IMAGE_NAME="${pair%%|*}"
@@ -1283,6 +1712,7 @@ done
 unset CANDIDATE_COMPOSE_IMAGES
 test "$NEW_BACKEND_IMAGE_ID" != "$BACKEND_IMAGE_ID"
 test "$NEW_FRONTEND_IMAGE_ID" != "$FRONTEND_IMAGE_ID"
+test "$NEW_CADDY_IMAGE_ID" = "$CADDY_IMAGE_ID"
 
 test "$(docker inspect --format '{{len .Config.Cmd}}' restaurant_cloudflared)" -eq 7
 test "$(docker inspect --format '{{index .Config.Cmd 2}}' restaurant_cloudflared)" = --protocol
@@ -1300,31 +1730,57 @@ done >> "$ROLLBACK_DIR/release.env"
 chmod 600 "$ROLLBACK_DIR/release.env"
 ```
 
-Count the audited privacy-safe watcher marker between the persisted start and
-end. The aggregate must be exactly one; the raw journal never reaches the
-terminal or a file:
+Resume the watcher only now, after normal routing is verified. Because the
+checkout already equals `origin/prod`, the audited watcher must be a strict
+no-op. Capture container IDs, observe exactly 60 seconds, and require zero
+deployment markers and no replacements:
 
 ```bash
+test "$WATCHER_EQUAL_SHA_NOOP_AUDITED" -eq 1
+for service in backend frontend caddy cloudflared postgres; do
+  container="restaurant_$service"
+  variable="BEFORE_$(printf '%s' "$service" | tr '[:lower:]' '[:upper:]')_CONTAINER_ID"
+  printf -v "$variable" '%s' "$(docker inspect --format '{{.Id}}' "$container")"
+done
+
+DEPLOY_WAIT_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+sudo -n systemctl start deploy-watcher.service
+sudo -n systemctl is-active --quiet deploy-watcher.service
+
+DEPLOY_NOOP_DEADLINE=$(( $(date +%s) + 60 ))
+while [ "$(date +%s)" -lt "$DEPLOY_NOOP_DEADLINE" ]; do
+  sudo -n systemctl is-active --quiet deploy-watcher.service
+  git -C "$PROD_DIR" fetch origin prod
+  test "$(git -C "$PROD_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA"
+  test "$(git -C "$PROD_DIR" rev-parse origin/prod)" = "$CANDIDATE_SHA"
+  sleep 5
+done
 DEPLOY_WAIT_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf 'DEPLOY_WAIT_END=%q\n' "$DEPLOY_WAIT_END" >> "$ROLLBACK_DIR/release.env"
-chmod 600 "$ROLLBACK_DIR/release.env"
-test -n "${WATCHER_DEPLOY_MARKER:-}"
+
 DEPLOY_CYCLES="$(sudo -n journalctl \
   -u deploy-watcher.service \
   --since "$DEPLOY_WAIT_START" \
   --until "$DEPLOY_WAIT_END" \
   --no-pager \
-  | rg -F -c -- "$WATCHER_DEPLOY_MARKER")"
-test "$DEPLOY_CYCLES" -eq 1
+  | awk -v marker="$WATCHER_DEPLOY_MARKER" '
+      index($0, marker) { count += 1 }
+      END { print count + 0 }
+    ')"
+test "$DEPLOY_CYCLES" -eq 0
+
+for service in backend frontend caddy cloudflared postgres; do
+  container="restaurant_$service"
+  variable="BEFORE_$(printf '%s' "$service" | tr '[:lower:]' '[:upper:]')_CONTAINER_ID"
+  test "$(docker inspect --format '{{.Id}}' "$container")" = "${!variable}"
+done
 printf 'watcher_deploy_cycles=%s\n' "$DEPLOY_CYCLES"
 ```
 
-The variable must contain the exact marker verified in Section 3. An unset or
-unsafe marker, two cycles, wrong checkout SHA, unhealthy container, or failed
-local/public health check blocks acceptance and triggers rollback. The
-post-deploy capture proves the running four-service mapping, the two rebuilt
-application images, and the protocol change without printing the token-bearing
-cloudflared command.
+Any selective build/start failure, candidate health failure, premature Caddy
+restoration, nonzero watcher marker, container replacement, wrong checkout
+SHA, or failed local/public route check blocks acceptance. Keep the freeze and
+maintenance route where possible, then use the compatible-old-backend recovery
+or Section 10 four-service no-build rollback before restoring traffic.
 
 ## 7. Read-only smoke tests before the watch
 
@@ -1567,8 +2023,11 @@ proof; this production value is only a runaway-rate guard.
 
 Accept the candidate only when every item below is true:
 
-- `PRE_PROD_SHA`, `CANDIDATE_SHA`, the reviewed delta, exact green CI run, and
-  one watcher deployment cycle are recorded.
+- `PRE_PROD_SHA`, `CANDIDATE_SHA`, the reviewed delta, all three exact green CI
+  jobs, the single selective candidate build, and zero watcher deployment
+  cycles during equal-SHA resume are recorded.
+- Both exact legacy-pending gates returned zero after the clean old-backend
+  stop, and the targeted admin-concurrency JUnit totals were `(1,0,0,0)`.
 - Checkout SHA equals `CANDIDATE_SHA`; backend, frontend, and Caddy are healthy;
   local and public health checks pass.
 - The customer backend authorization smoke returned exactly 403 before
@@ -1595,8 +2054,9 @@ outage or empty directory to test failure behavior in production.
 
 Immediate rollback triggers are:
 
-- wrong checkout/image, unhealthy service, failed local/public health, more
-  than one watcher deployment cycle, or watcher behavior outside its audit;
+- wrong checkout/image, unhealthy service, failed local/public health, any
+  watcher deployment cycle during equal-SHA resume, or watcher behavior outside
+  its audit;
 - any authorized staff/admin 401/403, any repeated 5xx with a healthy provider,
   or any failed candidate asset/API request;
 - any forbidden response field, customer-bearing evidence, browse mutation
@@ -1949,12 +2409,12 @@ unset PUBLIC_APP_URL
 printf 'rollback_watcher_deploy_cycles=%s\n' "$ROLLBACK_DEPLOY_CYCLES"
 ```
 
-This release permits exactly one normal watcher build for the candidate and,
-only during an incident, one manual four-service `--no-build` restore. It never
-permits a rollback rebuild. If equal-SHA no-op behavior, the manual
-fast-forward, exact image preservation, or zero marker count cannot be proven,
-stop and leave the watcher paused until a separately reviewed rollback mode
-exists.
+This release permits exactly one selective backend/frontend build while the
+watcher is stopped and, only during an incident, one manual four-service
+`--no-build` restore. It never permits a watcher or rollback rebuild. If
+equal-SHA no-op behavior, the manual fast-forward, exact image preservation, or
+zero marker count cannot be proven, stop and leave the watcher paused until a
+separately reviewed rollback mode exists.
 
 ## Release record checklist
 
@@ -1963,15 +2423,16 @@ exists.
 - [ ] Complete local backend, Ruff, frontend, build, Pandoc, static, and migration-twice gates
 - [ ] Classic `repo` scope plus ADMIN viewer authority proved privately before accepting protection 404; zero applicable rules verified
 - [ ] Exact-SHA watcher gate and explicit direct-release authorization recorded
-- [ ] Exclusive release freeze recorded before candidate resume and held through acceptance or rollback
-- [ ] Watcher working directory, pause/resume, one-build behavior, marker, and equal-SHA no-op verified
+- [ ] Exclusive release freeze recorded before create maintenance and held through acceptance or rollback
+- [ ] Watcher working directory, pause/resume, marker, and equal-SHA zero-marker no-op verified
 - [ ] Staff take ordering proved as `8s < 10s < 15s < deployed proxy timeout`; every proxy layer has a non-secret evidence reference
 - [ ] Pre-created rollback SHA tree/parent and both non-force dry-run paths verified
 - [ ] External mode-700 rollback state, PRE source, exact Compose project, four image mappings/tags, and four-service no-build dry run verified
 - [ ] Secret shape, controlled admin path, and default-false online gate verified without values
 - [ ] Production Telegram token and webhook secret stayed frozen; no rotation was attempted and `getWebhookInfo` was not treated as secret verification
-- [ ] Three production migrations applied once in order before `prod` push; metadata verified
-- [ ] Exact candidate CI green; watcher performed the release's one normal build; health and SHA verified
+- [ ] Maintenance Caddy blocked exactly `POST /api/orders`; old backend drained 600 seconds and stopped cleanly within the 180-second timeout
+- [ ] Both exact legacy-pending gates returned zero; three production migrations and the narrow sync-status backfill ran before `prod` push
+- [ ] Exact candidate's three CI jobs were green; one selective app build ran with Caddy excluded; candidate health and SHA were verified before normal Caddy restoration
 - [ ] Incident path, if used, performed one four-service no-build restore, manual rollback fast-forward, zero-marker watcher no-op, and no rollback rebuild
 - [ ] Customer 403 and controlled staff/admin 200/privacy/read-only smokes passed
 - [ ] Responsive Tables/detail/Menu matrix passed at 320/375/430 px in en/ru/uz
