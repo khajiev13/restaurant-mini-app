@@ -3,6 +3,7 @@ import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import update
 
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import Order, User
@@ -593,6 +594,59 @@ async def test_partial_status_failure_keeps_cached_order_and_removes_new_termina
     assert response.json()["data"]["freshness"]["order_status_stale"] is True
     await db_session.refresh(terminal)
     assert terminal.status == "DELIVERED"
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_status_claim_rejects_slow_older_worker_result(
+    client,
+    db_session,
+):
+    staff = await create_user(db_session, 8162, "staff")
+    customer = await create_user(db_session, 8163, "customer")
+    order = await create_table_order(
+        db_session,
+        customer,
+        sync="synced",
+        total=19800,
+        status="ACCEPTED_BY_RESTAURANT",
+    )
+    order.order_number = "initial-number"
+    await db_session.commit()
+    newer_claim = datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + datetime.timedelta(
+        minutes=1
+    )
+
+    async def newer_worker_wins(_alipos_id: str) -> dict[str, str]:
+        await db_session.execute(
+            update(Order)
+            .where(Order.id == order.id)
+            .values(
+                status="READY",
+                order_number="newer-number",
+                alipos_status_check_attempted_at=newer_claim,
+            )
+        )
+        await db_session.commit()
+        return {"status": "READY", "orderNumber": "stale-number"}
+
+    with (
+        patch(
+            "app.services.staff_table_service.alipos_api.get_halls_and_tables_snapshot",
+            new=AsyncMock(return_value=directory_snapshot()),
+        ),
+        patch(
+            "app.services.staff_table_service.alipos_api.get_order_status",
+            new=AsyncMock(side_effect=newer_worker_wins),
+        ),
+    ):
+        response = await client.get("/api/staff/tables", headers=auth_headers(staff))
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.status == "READY"
+    assert order.order_number == "newer-number"
+    assert order.alipos_status_check_attempted_at == newer_claim
+    assert order.alipos_status_checked_at is None
 
 
 @pytest.mark.asyncio

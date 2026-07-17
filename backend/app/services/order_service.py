@@ -29,6 +29,7 @@ ALIPOS_CANCEL_UNKNOWN_ERROR = "AliPOS cancellation outcome is unknown"
 ALIPOS_CANCEL_RECONCILE_LIMIT = 5
 REFUND_RECONCILE_LIMIT = 5
 INVOICE_RECONCILE_LIMIT = 5
+INVOICE_CANCEL_UNKNOWN_ERROR = "Invoice cancellation outcome needs verification"
 ALIPOS_CANCEL_PENDING_STATUSES = (None, "not_started", "sending", "unknown")
 ALIPOS_CANCEL_REPAIRABLE_STATUSES = (*ALIPOS_CANCEL_PENDING_STATUSES, "not_cancelled")
 ALIPOS_CANCELLABLE_LOCAL_STATUSES = ("NEW", "PAID_AWAITING_RESTAURANT")
@@ -219,7 +220,8 @@ async def _finalize_alipos_attempt(
     sync_error: str | None,
     local_status: str,
     alipos_order_id: uuid.UUID | None = None,
-) -> bool:
+    queue_paid_refund: bool = False,
+) -> tuple[bool, bool]:
     values: dict[str, object] = {
         "alipos_sync_status": sync_status,
         "alipos_sync_error": sync_error,
@@ -233,6 +235,25 @@ async def _finalize_alipos_attempt(
     }
     if alipos_order_id is not None:
         values["alipos_order_id"] = alipos_order_id
+    if queue_paid_refund:
+        should_queue_refund = and_(
+            Order.payment_status == "paid",
+            Order.refund_sync_status.is_(None),
+        )
+        values.update(
+            payment_status=case(
+                (should_queue_refund, "refund_pending"),
+                else_=Order.payment_status,
+            ),
+            refund_sync_status=case(
+                (should_queue_refund, "queued"),
+                else_=Order.refund_sync_status,
+            ),
+            refund_sync_error=case(
+                (should_queue_refund, None),
+                else_=Order.refund_sync_error,
+            ),
+        )
     result = await db.execute(
         update(Order)
         .where(
@@ -240,11 +261,16 @@ async def _finalize_alipos_attempt(
             Order.alipos_sync_status == "sending",
         )
         .values(**values)
+        .returning(Order.payment_status, Order.refund_sync_status)
         .execution_options(synchronize_session=False)
     )
+    updated = result.one_or_none()
     await db.commit()
     await db.refresh(order)
-    return result.rowcount > 0
+    should_dispatch_refund = bool(
+        updated and updated[0] == "refund_pending" and updated[1] == "queued"
+    )
+    return updated is not None, should_dispatch_refund
 
 
 async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
@@ -277,16 +303,15 @@ async def submit_order_to_alipos(db: AsyncSession, order: Order) -> None:
     try:
         response = await alipos_api.create_order(payload)
     except (alipos_api.AliPOSRejected, alipos_api.AliPOSPreSubmitError) as exc:
-        finalized = await _finalize_alipos_attempt(
+        finalized, should_refund = await _finalize_alipos_attempt(
             db,
             order,
             sync_status="failed",
             sync_error=str(exc),
             local_status="SUBMISSION_FAILED",
+            queue_paid_refund=True,
         )
-        should_refund = finalized and _queue_paid_submission_refund(order)
-        if should_refund:
-            await db.commit()
+        should_refund = finalized and should_refund
         log_fields = _alipos_log_fields(order)
         if exc.status_code is not None:
             log_fields["http_status"] = exc.status_code
@@ -357,7 +382,8 @@ async def recover_interrupted_alipos_orders(db: AsyncSession) -> int:
     for order in interrupted:
         order.alipos_sync_status = "unknown"
         order.alipos_sync_error = "AliPOS order create outcome is unknown"
-        order.status = "SYNC_UNKNOWN"
+        if order.status in {"NEW", "PAID_AWAITING_RESTAURANT"}:
+            order.status = "SYNC_UNKNOWN"
         logger.warning("alipos_submit_unknown", extra=_alipos_log_fields(order))
     await db.commit()
     return len(interrupted)
@@ -438,6 +464,24 @@ async def recover_interrupted_invoice_operations(db: AsyncSession) -> int:
     return result.rowcount
 
 
+async def recover_interrupted_invoice_cancellations(db: AsyncSession) -> int:
+    """Mark interrupted invoice DELETE attempts unknown without repeating them."""
+    result = await db.execute(
+        update(Order)
+        .where(
+            Order.invoice_cancel_status == "sending",
+            Order.payment_status == "pending",
+        )
+        .values(
+            invoice_cancel_status="unknown",
+            payment_error=INVOICE_CANCEL_UNKNOWN_ERROR,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    return result.rowcount
+
+
 async def dispatch_queued_invoice(order_id: uuid.UUID) -> None:
     """Claim one never-attempted invoice and make at most one provider POST."""
     async with async_session() as db:
@@ -449,6 +493,7 @@ async def dispatch_queued_invoice(order_id: uuid.UUID) -> None:
 async def recover_invoice_operations() -> None:
     """Resume only never-attempted invoices after process startup."""
     async with async_session() as db:
+        await recover_interrupted_invoice_cancellations(db)
         await recover_interrupted_invoice_operations(db)
         order_ids = await list_recoverable_invoice_order_ids(db)
         await db.commit()
@@ -755,36 +800,173 @@ async def expire_due_payment_orders(
     db: AsyncSession,
     now: datetime.datetime,
 ) -> int:
-    """Expire only invoices whose cancellation Multicard confirms while row-locked."""
+    """Expire only invoices whose single cancellation attempt is confirmed."""
     result = await db.execute(
-        select(Order)
+        select(Order.id)
         .where(
-            Order.payment_status == "pending",
+            or_(
+                Order.payment_status == "pending",
+                and_(
+                    Order.payment_status == "cancelled",
+                    Order.invoice_cancel_status == "cancelled",
+                ),
+            ),
             Order.payment_expires_at.is_not(None),
             Order.payment_expires_at <= now,
             Order.alipos_order_id.is_(None),
         )
-        .with_for_update(skip_locked=True)
     )
     expired_count = 0
-    for order in result.scalars():
-        if not order.multicard_invoice_uuid:
-            logger.error("Expired order %s has no cancellable invoice UUID", order.id)
+    for order_id in result.scalars():
+        order = await _reload_order(db, order_id)
+        if order is None or not order.multicard_invoice_uuid:
+            logger.error("Expired order %s has no cancellable invoice UUID", order_id)
             continue
-        try:
-            await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
-        except Exception:
+        outcome, _ = await _cancel_pending_invoice_once(db, order_id)
+        if outcome != "cancelled":
             logger.warning(
                 "Invoice cancellation was not confirmed for expired order %s",
-                order.id,
+                order_id,
             )
             continue
-        order.payment_status = "expired"
-        order.status = "CANCELLED"
-        order.payment_error = "Payment timeout — invoice cancellation confirmed"
-        expired_count += 1
-    await db.commit()
+        finalized = await db.execute(
+            update(Order)
+            .where(
+                Order.id == order_id,
+                Order.invoice_cancel_status == "cancelled",
+                Order.payment_status == "cancelled",
+            )
+            .values(
+                payment_status="expired",
+                status="CANCELLED",
+                payment_error="Payment timeout — invoice cancellation confirmed",
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        expired_count += int(finalized.rowcount > 0)
     return expired_count
+
+
+def _invoice_cancel_outcome(order: Order | None) -> str:
+    if order is None:
+        return "missing"
+    if (
+        order.invoice_cancel_status == "cancelled"
+        and order.payment_status in {"cancelled", "expired"}
+    ):
+        return "cancelled"
+    if order.payment_status == "paid":
+        return "paid"
+    if order.invoice_cancel_status == "queued":
+        return "queued"
+    return "unknown"
+
+
+async def _cancel_pending_invoice_once(
+    db: AsyncSession,
+    order_id: uuid.UUID,
+) -> tuple[str, Order | None]:
+    """Persist and make at most one provider DELETE for an unpaid invoice."""
+    await db.execute(
+        update(Order)
+        .where(
+            Order.id == order_id,
+            Order.payment_status == "pending",
+            Order.status == "AWAITING_PAYMENT",
+            Order.alipos_order_id.is_(None),
+            Order.invoice_cancel_status.is_(None),
+        )
+        .values(
+            invoice_cancel_status="queued",
+            cancel_requested_at=datetime.datetime.now(datetime.UTC).replace(
+                tzinfo=None
+            ),
+            payment_error=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+
+    claimed = await db.execute(
+        update(Order)
+        .where(
+            Order.id == order_id,
+            Order.payment_status == "pending",
+            Order.status == "AWAITING_PAYMENT",
+            Order.alipos_order_id.is_(None),
+            Order.invoice_cancel_status == "queued",
+            Order.multicard_invoice_uuid.is_not(None),
+        )
+        .values(invoice_cancel_status="sending")
+        .returning(Order.multicard_invoice_uuid)
+        .execution_options(synchronize_session=False)
+    )
+    invoice_uuid = claimed.scalar_one_or_none()
+    await db.commit()
+    if not invoice_uuid:
+        current = await _reload_order(db, order_id)
+        return _invoice_cancel_outcome(current), current
+
+    try:
+        await multicard_api.cancel_invoice_strict(invoice_uuid)
+    except multicard_api.InvoiceCancelNotAttempted:
+        await db.execute(
+            update(Order)
+            .where(
+                Order.id == order_id,
+                Order.payment_status == "pending",
+                Order.invoice_cancel_status == "sending",
+            )
+            .values(
+                invoice_cancel_status="queued",
+                payment_error="Invoice cancellation was not attempted",
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        current = await _reload_order(db, order_id)
+        return "not_attempted", current
+    except Exception:
+        await db.execute(
+            update(Order)
+            .where(
+                Order.id == order_id,
+                Order.payment_status == "pending",
+                Order.invoice_cancel_status == "sending",
+            )
+            .values(
+                invoice_cancel_status="unknown",
+                payment_error=INVOICE_CANCEL_UNKNOWN_ERROR,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+        current = await _reload_order(db, order_id)
+        return _invoice_cancel_outcome(current), current
+
+    finalized = await db.execute(
+        update(Order)
+        .where(
+            Order.id == order_id,
+            Order.payment_status == "pending",
+            Order.status == "AWAITING_PAYMENT",
+            Order.alipos_order_id.is_(None),
+            Order.invoice_cancel_status == "sending",
+        )
+        .values(
+            invoice_cancel_status="cancelled",
+            payment_status="cancelled",
+            status="CANCELLED",
+            payment_error=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    current = await _reload_order(db, order_id)
+    if finalized.rowcount > 0:
+        return "cancelled", current
+    return _invoice_cancel_outcome(current), current
 
 
 def _alipos_cancel_status_clause(statuses: tuple[str | None, ...]):
@@ -1104,24 +1286,12 @@ async def cancel_customer_order(
         raise CustomerOrderNotFound("Order not found")
     if order.discriminator != "inplace":
         raise CancellationConflict("Only table orders can be cancelled here")
-
     if (
-        order.status == "AWAITING_PAYMENT"
-        and order.payment_status == "pending"
-        and order.alipos_order_id is None
+        order.invoice_cancel_status == "cancelled"
+        and order.payment_status == "cancelled"
     ):
-        result = await db.execute(
-            select(Order)
-            .where(
-                Order.id == order_id,
-                Order.user_id == current_user.telegram_id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        order = result.scalar_one_or_none()
-        if order is None:
-            raise CustomerOrderNotFound("Order not found")
+        return order
+
     if (
         order.status == "AWAITING_PAYMENT"
         and order.payment_status == "pending"
@@ -1131,19 +1301,12 @@ async def cancel_customer_order(
             raise CancellationConflict(
                 "The online invoice cannot be safely cancelled; please ask staff"
             )
-        try:
-            await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
-        except Exception as exc:
-            raise CancellationError(
-                "Could not confirm that the online payment was cancelled"
-            ) from exc
-        order.status = "CANCELLED"
-        order.payment_status = "cancelled"
-        order.cancel_requested_at = datetime.datetime.now(datetime.UTC).replace(
-            tzinfo=None
+        outcome, current = await _cancel_pending_invoice_once(db, order.id)
+        if outcome == "cancelled" and current is not None:
+            return current
+        raise CancellationError(
+            "Could not confirm that the online payment was cancelled"
         )
-        await db.commit()
-        return order
 
     if order.alipos_cancel_status == "cancelled":
         return order
@@ -1377,6 +1540,11 @@ async def switch_customer_order_to_cash(
     definitively_inactive = (
         (order.payment_status == "failed" and order.status == "PAYMENT_FAILED")
         or (order.payment_status == "expired" and order.status == "CANCELLED")
+        or (
+            order.payment_status == "cancelled"
+            and order.status == "CANCELLED"
+            and order.invoice_cancel_status == "cancelled"
+        )
     )
     if not pending_invoice and not definitively_inactive:
         raise PaymentSwitchConflict("This order can no longer switch to cash")
@@ -1385,23 +1553,57 @@ async def switch_customer_order_to_cash(
             raise PaymentSwitchConflict(
                 "The online invoice cannot be safely cancelled; please ask staff"
             )
-        try:
-            await multicard_api.cancel_invoice_strict(order.multicard_invoice_uuid)
-        except Exception as exc:
+        outcome, current = await _cancel_pending_invoice_once(db, order.id)
+        if outcome != "cancelled" or current is None:
             raise PaymentSwitchError(
                 "Could not confirm that the online payment was cancelled"
-            ) from exc
+            )
+        order = current
 
-    order.payment_method = "cash"
-    order.payment_provider = None
-    order.payment_status = None
-    order.payment_expires_at = None
-    order.payment_error = None
-    order.multicard_checkout_url = None
-    order.alipos_sync_status = "queued"
-    order.alipos_sync_error = None
-    order.status = "NEW"
+    switched = await db.execute(
+        update(Order)
+        .where(
+            Order.id == order.id,
+            Order.user_id == current_user.telegram_id,
+            Order.payment_method == "rahmat",
+            Order.alipos_order_id.is_(None),
+            or_(
+                and_(
+                    Order.payment_status == "failed",
+                    Order.status == "PAYMENT_FAILED",
+                ),
+                and_(
+                    Order.payment_status == "expired",
+                    Order.status == "CANCELLED",
+                ),
+                and_(
+                    Order.payment_status == "cancelled",
+                    Order.status == "CANCELLED",
+                    Order.invoice_cancel_status == "cancelled",
+                ),
+            ),
+        )
+        .values(
+            payment_method="cash",
+            payment_provider=None,
+            payment_status=None,
+            payment_expires_at=None,
+            payment_error=None,
+            multicard_checkout_url=None,
+            alipos_sync_status="queued",
+            alipos_sync_error=None,
+            status="NEW",
+        )
+        .returning(Order.id)
+        .execution_options(synchronize_session=False)
+    )
     await db.commit()
+    if switched.scalar_one_or_none() is None:
+        raise PaymentSwitchConflict("This order can no longer switch to cash")
+
+    order = await _reload_order(db, order.id)
+    if order is None:
+        raise CustomerOrderNotFound("Order not found")
 
     submitted = await _submit_queued_alipos_order(db, order.id)
     return submitted or order
@@ -1538,6 +1740,7 @@ async def retry_customer_order_payment(
             "Online payment is not available for table orders"
         )
     order.payment_status = "invoice_queued"
+    order.invoice_cancel_status = None
     order.payment_expires_at = None
     order.payment_error = None
     order.status = "PAYMENT_REVIEW"

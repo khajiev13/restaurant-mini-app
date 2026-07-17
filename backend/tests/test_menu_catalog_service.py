@@ -1,5 +1,6 @@
+import time
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -81,6 +82,35 @@ async def test_price_cart_rejects_stale_item_price(db_session, monkeypatch):
     assert exc_info.value.changes == [
         {"id": str(ITEM_ID), "reason": "price_changed"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_price_cart_bypasses_composition_cache_and_refreshes_it(
+    db_session,
+    monkeypatch,
+):
+    fresh_menu = {
+        **MENU,
+        "items": [{**MENU["items"][0], "price": 19000}],
+    }
+    request = AsyncMock(return_value=Mock(json=Mock(return_value=fresh_menu)))
+    monkeypatch.setattr(alipos_api, "_menu_cache", MENU)
+    monkeypatch.setattr(alipos_api, "_menu_cache_expires_at", time.monotonic() + 300)
+    monkeypatch.setattr(alipos_api, "_api_request", request)
+
+    with pytest.raises(CartConflict) as exc_info:
+        await price_cart(db_session, [{
+            "id": str(ITEM_ID),
+            "quantity": 1,
+            "price": 18000,
+            "modifications": [],
+        }])
+
+    assert exc_info.value.changes == [
+        {"id": str(ITEM_ID), "reason": "price_changed"}
+    ]
+    request.assert_awaited_once()
+    assert alipos_api._menu_cache == fresh_menu
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -224,6 +224,96 @@ async def test_order_status_poll_does_not_overwrite_delivery_that_wins_race(
     assert response.json()["data"]["status"] == "DELIVERED"
     assert order.status == "DELIVERED"
     assert order.order_number is None
+
+
+@pytest.mark.asyncio
+async def test_order_status_poll_rejects_older_provider_timestamp(
+    client,
+    db_session,
+):
+    user, order = await _table_order(db_session)
+    order.status = "ACCEPTED_BY_RESTAURANT"
+    order.order_number = "current-number"
+    order.alipos_status_updated_at = datetime.datetime(2026, 7, 18, 10, 0)
+    await db_session.commit()
+
+    with patch(
+        "app.routers.orders.alipos_api.get_order_status",
+        new=AsyncMock(
+            return_value={
+                "status": "READY",
+                "orderNumber": "stale-number",
+                "updatedAt": "2026-07-18T09:59:59Z",
+            }
+        ),
+    ):
+        response = await client.get(
+            f"/api/orders/{order.id}/status",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.status == "ACCEPTED_BY_RESTAURANT"
+    assert order.order_number == "current-number"
+    assert order.alipos_status_updated_at == datetime.datetime(2026, 7, 18, 10, 0)
+
+
+@pytest.mark.asyncio
+async def test_order_status_poll_rejects_backward_known_transition_without_timestamp(
+    client,
+    db_session,
+):
+    user, order = await _table_order(db_session)
+    order.status = "READY"
+    order.order_number = "ready-number"
+    await db_session.commit()
+
+    with patch(
+        "app.routers.orders.alipos_api.get_order_status",
+        new=AsyncMock(
+            return_value={
+                "status": "ACCEPTED_BY_RESTAURANT",
+                "orderNumber": "older-number",
+            }
+        ),
+    ):
+        response = await client.get(
+            f"/api/orders/{order.id}/status",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.status == "READY"
+    assert order.order_number == "ready-number"
+
+
+@pytest.mark.asyncio
+async def test_order_status_poll_persists_provider_freshness(
+    client,
+    db_session,
+):
+    user, order = await _table_order(db_session)
+
+    with patch(
+        "app.routers.orders.alipos_api.get_order_status",
+        new=AsyncMock(
+            return_value={
+                "status": "ACCEPTED_BY_RESTAURANT",
+                "updatedAt": "2026-07-18T10:00:00+05:00",
+            }
+        ),
+    ):
+        response = await client.get(
+            f"/api/orders/{order.id}/status",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+        )
+
+    await db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.status == "ACCEPTED_BY_RESTAURANT"
+    assert order.alipos_status_updated_at == datetime.datetime(2026, 7, 18, 5, 0)
 
 
 @pytest.mark.asyncio
@@ -1928,6 +2018,67 @@ async def test_pending_online_table_order_can_switch_to_cash(client, db_session)
 
 
 @pytest.mark.asyncio
+async def test_payment_callback_after_invoice_cancel_blocks_cash_switch(
+    cancellation_sessions,
+):
+    committing_client, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _pending_online_table_order(seed_db)
+        created_user_ids.append(user.telegram_id)
+        user_id = user.telegram_id
+        order_id = order.id
+
+    original_cancel = order_service._cancel_pending_invoice_once
+
+    async def cancel_then_payment_wins(db, target_order_id):
+        outcome, current = await original_cancel(db, target_order_id)
+        assert outcome == "cancelled"
+        async with sessions() as callback_db:
+            await callback_db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .values(
+                    payment_status="paid",
+                    invoice_cancel_status="paid",
+                    status="PAID_AWAITING_RESTAURANT",
+                    alipos_sync_status="queued",
+                )
+            )
+            await callback_db.commit()
+        return outcome, current
+
+    submit = AsyncMock()
+    with (
+        patch(
+            "app.services.order_service._cancel_pending_invoice_once",
+            new=AsyncMock(side_effect=cancel_then_payment_wins),
+        ),
+        patch(
+            "app.services.order_service.multicard_api.cancel_invoice_strict",
+            new=AsyncMock(),
+        ),
+        patch(
+            "app.services.order_service.submit_order_to_alipos",
+            new=submit,
+        ),
+    ):
+        response = await committing_client.post(
+            f"/api/orders/{order_id}/switch-to-cash",
+            headers={"Authorization": f"Bearer {create_jwt(user_id)}"},
+        )
+
+    assert response.status_code == 409
+    submit.assert_not_awaited()
+    async with sessions() as observer_db:
+        persisted = await observer_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_method == "rahmat"
+        assert persisted.payment_status == "paid"
+        assert persisted.invoice_cancel_status == "paid"
+        assert persisted.status == "PAID_AWAITING_RESTAURANT"
+
+
+@pytest.mark.asyncio
 async def test_pending_online_table_order_cancels_invoice_before_local_order(
     client,
     db_session,
@@ -1950,6 +2101,92 @@ async def test_pending_online_table_order_cancels_invoice_before_local_order(
     cancel_invoice.assert_awaited_once_with("invoice-uuid")
     assert order.status == "CANCELLED"
     assert order.payment_status == "cancelled"
+    assert order.invoice_cancel_status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_pending_invoice_cancel_attempt_is_durable_and_unlocked_before_delete(
+    cancellation_sessions,
+):
+    committing_client, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _pending_online_table_order(seed_db)
+        created_user_ids.append(user.telegram_id)
+        user_id = user.telegram_id
+        order_id = order.id
+
+    observed: dict[str, object] = {}
+
+    async def observe_durable_unlocked_attempt(invoice_uuid: str) -> None:
+        observed["invoice_uuid"] = invoice_uuid
+        async with sessions() as observer_db:
+            persisted = await observer_db.get(Order, order_id)
+            assert persisted is not None
+            observed["cancel_status"] = persisted.invoice_cancel_status
+            await observer_db.execute(
+                select(Order)
+                .where(Order.id == order_id)
+                .with_for_update(nowait=True)
+            )
+            await observer_db.rollback()
+
+    with patch(
+        "app.services.order_service.multicard_api.cancel_invoice_strict",
+        new=AsyncMock(side_effect=observe_durable_unlocked_attempt),
+    ):
+        response = await committing_client.delete(
+            f"/api/orders/{order_id}",
+            headers={"Authorization": f"Bearer {create_jwt(user_id)}"},
+        )
+
+    assert response.status_code == 200
+    assert observed == {
+        "invoice_uuid": "invoice-uuid",
+        "cancel_status": "sending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_payment_callback_state_wins_invoice_cancel_finalization(
+    cancellation_sessions,
+):
+    committing_client, sessions, created_user_ids = cancellation_sessions
+    async with sessions() as seed_db:
+        user, order = await _pending_online_table_order(seed_db)
+        created_user_ids.append(user.telegram_id)
+        user_id = user.telegram_id
+        order_id = order.id
+
+    async def payment_wins(_invoice_uuid: str) -> None:
+        async with sessions() as callback_db:
+            await callback_db.execute(
+                update(Order)
+                .where(Order.id == order_id)
+                .values(
+                    payment_status="paid",
+                    invoice_cancel_status="paid",
+                    status="PAID_AWAITING_RESTAURANT",
+                    alipos_sync_status="queued",
+                )
+            )
+            await callback_db.commit()
+
+    with patch(
+        "app.services.order_service.multicard_api.cancel_invoice_strict",
+        new=AsyncMock(side_effect=payment_wins),
+    ):
+        response = await committing_client.delete(
+            f"/api/orders/{order_id}",
+            headers={"Authorization": f"Bearer {create_jwt(user_id)}"},
+        )
+
+    assert response.status_code == 502
+    async with sessions() as observer_db:
+        persisted = await observer_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "paid"
+        assert persisted.invoice_cancel_status == "paid"
+        assert persisted.status == "PAID_AWAITING_RESTAURANT"
 
 
 @pytest.mark.asyncio
@@ -1960,19 +2197,27 @@ async def test_pending_online_order_stays_payable_when_invoice_cancel_is_unknown
     user, order = await _pending_online_table_order(db_session)
     token = create_jwt(user.telegram_id)
 
+    cancel_invoice = AsyncMock(side_effect=RuntimeError("Multicard unavailable"))
     with patch(
         "app.services.order_service.multicard_api.cancel_invoice_strict",
-        new=AsyncMock(side_effect=RuntimeError("Multicard unavailable")),
+        new=cancel_invoice,
     ):
         response = await client.delete(
+            f"/api/orders/{order.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        repeated = await client.delete(
             f"/api/orders/{order.id}",
             headers={"Authorization": f"Bearer {token}"},
         )
 
     await db_session.refresh(order)
     assert response.status_code == 502
+    assert repeated.status_code == 502
+    cancel_invoice.assert_awaited_once_with("invoice-uuid")
     assert order.status == "AWAITING_PAYMENT"
     assert order.payment_status == "pending"
+    assert order.invoice_cancel_status == "unknown"
 
 
 @pytest.mark.asyncio
@@ -1983,10 +2228,11 @@ async def test_switch_to_cash_keeps_online_order_when_invoice_cancel_is_unknown(
     user, order = await _pending_online_table_order(db_session)
     token = create_jwt(user.telegram_id)
 
+    cancel_invoice = AsyncMock(side_effect=RuntimeError("Multicard unavailable"))
     with (
         patch(
             "app.services.order_service.multicard_api.cancel_invoice_strict",
-            new=AsyncMock(side_effect=RuntimeError("Multicard unavailable")),
+            new=cancel_invoice,
         ),
         patch(
             "app.services.order_service.submit_order_to_alipos",
@@ -1997,13 +2243,20 @@ async def test_switch_to_cash_keeps_online_order_when_invoice_cancel_is_unknown(
             f"/api/orders/{order.id}/switch-to-cash",
             headers={"Authorization": f"Bearer {token}"},
         )
+        repeated = await client.post(
+            f"/api/orders/{order.id}/switch-to-cash",
+            headers={"Authorization": f"Bearer {token}"},
+        )
 
     await db_session.refresh(order)
     assert response.status_code == 502
+    assert repeated.status_code == 502
+    cancel_invoice.assert_awaited_once_with("invoice-uuid")
     submit.assert_not_awaited()
     assert order.payment_method == "rahmat"
     assert order.payment_status == "pending"
     assert order.status == "AWAITING_PAYMENT"
+    assert order.invoice_cancel_status == "unknown"
 
 
 @pytest.mark.asyncio

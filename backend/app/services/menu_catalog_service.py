@@ -145,7 +145,7 @@ async def get_customer_menu(db: AsyncSession) -> dict[str, Any]:
 
 async def price_cart(db: AsyncSession, requested_items: Iterable[Any]) -> PricedCart:
     requested = list(requested_items)
-    menu = await alipos_api.get_menu()
+    menu = await alipos_api.get_menu(use_cache=False)
     catalog = {str(item.get("id")): item for item in menu.get("items", [])}
     valid_ids: set[uuid.UUID] = set()
     for item in requested:

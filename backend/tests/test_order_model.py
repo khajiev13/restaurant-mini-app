@@ -64,6 +64,8 @@ def test_order_metadata_declares_customer_request_idempotency_index():
 
 def test_order_metadata_declares_staff_table_refresh_fields_and_index():
     assert {
+        "invoice_cancel_status",
+        "alipos_status_updated_at",
         "alipos_status_check_attempted_at",
         "alipos_status_checked_at",
     } <= set(Order.__table__.columns.keys())

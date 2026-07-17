@@ -35,6 +35,14 @@ class InvoiceOutcomeUnknown(RuntimeError):
         self.invoice_uuid = invoice_uuid
 
 
+class InvoiceCancelNotAttempted(RuntimeError):
+    """Invoice cancellation definitely did not reach the provider DELETE."""
+
+
+class InvoiceCancelOutcomeUnknown(RuntimeError):
+    """Invoice cancellation may have completed, so DELETE must not be repeated."""
+
+
 class RefundRejected(RuntimeError):
     """Multicard definitely rejected a refund request."""
 
@@ -301,24 +309,39 @@ async def cancel_invoice(invoice_uuid: str) -> None:
 
 async def cancel_invoice_strict(invoice_uuid: str) -> None:
     """Cancel an unpaid invoice and fail unless Multicard confirms cancellation."""
-    token = await _get_token()
-    async with httpx.AsyncClient() as client:
-        response = await client.delete(
-            f"{settings.multicard_api_base_url}/payment/invoice/{invoice_uuid}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-Access-Token": token,
-            },
-            timeout=30,
-        )
+    delete_invocation_started = False
+    try:
+        token = await _get_token()
+        async with httpx.AsyncClient() as client:
+            delete_invocation_started = True
+            response = await client.delete(
+                f"{settings.multicard_api_base_url}/payment/invoice/{invoice_uuid}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Access-Token": token,
+                },
+                timeout=30,
+            )
+    except Exception:
+        if not delete_invocation_started:
+            raise InvoiceCancelNotAttempted(
+                "Multicard invoice cancellation was not attempted"
+            ) from None
+        raise InvoiceCancelOutcomeUnknown(
+            "Multicard invoice cancellation outcome is unknown"
+        ) from None
+
+    try:
         response.raise_for_status()
         payload = response.json()
-    if not payload.get("success"):
-        error = payload.get("error") or {}
-        raise RuntimeError(
-            "Multicard invoice cancellation failed: "
-            f"{error.get('code')} — {error.get('details')}"
-        )
+    except Exception:
+        raise InvoiceCancelOutcomeUnknown(
+            "Multicard invoice cancellation outcome is unknown"
+        ) from None
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise InvoiceCancelOutcomeUnknown(
+            "Multicard invoice cancellation outcome is unknown"
+        ) from None
 
 
 async def refund_payment(payment_uuid: str) -> dict[str, Any]:

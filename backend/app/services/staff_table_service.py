@@ -31,6 +31,7 @@ from app.services import alipos_api
 from app.services.order_status_service import (
     apply_alipos_status_update_for_order,
     normalize_order_status,
+    parse_alipos_updated_at,
 )
 from app.services.permissions import require_staff
 from app.services.table_access_service import TableDirectoryEntry, parse_table_directory
@@ -417,7 +418,7 @@ def _utcnow() -> datetime.datetime:
 async def _claim_stale_status_orders(
     db: AsyncSession,
     now: datetime.datetime,
-) -> list[tuple[uuid.UUID, uuid.UUID]]:
+) -> list[tuple[uuid.UUID, uuid.UUID, datetime.datetime]]:
     cutoff = _naive_utc(now - STATUS_ATTEMPT_TTL)
     statement = (
         update(Order)
@@ -437,12 +438,20 @@ async def _claim_stale_status_orders(
             ),
         )
         .values(alipos_status_check_attempted_at=_naive_utc(now))
-        .returning(Order.id, Order.alipos_order_id)
+        .returning(
+            Order.id,
+            Order.alipos_order_id,
+            Order.alipos_status_check_attempted_at,
+        )
         .execution_options(synchronize_session=False)
     )
     rows = list((await db.execute(statement)).all())
     await db.commit()
-    return [(row.id, row.alipos_order_id) for row in rows if row.alipos_order_id]
+    return [
+        (row.id, row.alipos_order_id, row.alipos_status_check_attempted_at)
+        for row in rows
+        if row.alipos_order_id and row.alipos_status_check_attempted_at
+    ]
 
 
 async def reconcile_stale_table_orders(
@@ -453,18 +462,22 @@ async def reconcile_stale_table_orders(
     started_at = time.monotonic()
     semaphore = asyncio.Semaphore(STATUS_READ_CONCURRENCY)
 
-    async def read_status(local_id: uuid.UUID, alipos_id: uuid.UUID):
+    async def read_status(
+        local_id: uuid.UUID,
+        alipos_id: uuid.UUID,
+        claim_token: datetime.datetime,
+    ):
         async with semaphore:
             try:
                 payload = await alipos_api.get_order_status(str(alipos_id))
             except Exception:
-                return local_id, None, None, None
+                return local_id, claim_token, None, None, None, None
             if (
                 not isinstance(payload, dict)
                 or not isinstance(payload.get("status"), str)
                 or not payload["status"].strip()
             ):
-                return local_id, None, None, None
+                return local_id, claim_token, None, None, None, None
             raw_order_number = payload.get("orderNumber")
             order_number = (
                 str(raw_order_number).strip()
@@ -472,24 +485,40 @@ async def reconcile_stale_table_orders(
                 and str(raw_order_number).strip()
                 else None
             )
-            return local_id, payload["status"].strip(), order_number, _utcnow()
+            return (
+                local_id,
+                claim_token,
+                payload["status"].strip(),
+                order_number,
+                parse_alipos_updated_at(payload.get("updatedAt")),
+                _utcnow(),
+            )
 
     results = await asyncio.gather(*(read_status(*row) for row in claimed))
     succeeded = 0
-    for local_id, status_value, order_number, completed_at in results:
+    for (
+        local_id,
+        claim_token,
+        status_value,
+        order_number,
+        provider_updated_at,
+        completed_at,
+    ) in results:
         if status_value is None or completed_at is None:
             continue
         order = await db.get(Order, local_id)
         if order is None:
             continue
-        await apply_alipos_status_update_for_order(
+        applied = await apply_alipos_status_update_for_order(
             db,
             order,
             status_value,
             order_number,
+            provider_updated_at=provider_updated_at,
+            expected_claim_token=claim_token,
+            status_checked_at=_naive_utc(completed_at),
         )
-        order.alipos_status_checked_at = _naive_utc(completed_at)
-        succeeded += 1
+        succeeded += int(applied)
     await db.commit()
     if claimed:
         logger.info(

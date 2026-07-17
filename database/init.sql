@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS orders (
     multicard_checkout_url TEXT,
     multicard_receipt_url  TEXT,
     multicard_payment_uuid VARCHAR(64),
+    invoice_cancel_status  VARCHAR(32),
     refund_sync_status     VARCHAR(32),
     refund_sync_error      TEXT,
     alipos_cancel_status   VARCHAR(50),
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status                 VARCHAR(50) NOT NULL DEFAULT 'NEW',
     order_number           VARCHAR(50),
     status_updated_at      TIMESTAMP,
+    alipos_status_updated_at TIMESTAMP,
     alipos_status_check_attempted_at TIMESTAMP,
     alipos_status_checked_at TIMESTAMP,
     cancel_requested_at    TIMESTAMP,
@@ -131,6 +133,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_invoice_uuid VARCHAR(64);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_checkout_url TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_receipt_url  TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS multicard_payment_uuid VARCHAR(64);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_cancel_status  VARCHAR(32);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_sync_status     VARCHAR(32);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_sync_error      TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_cancel_status   VARCHAR(50);
@@ -149,6 +152,7 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS table_access_expires_at TIMESTAMP;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_status VARCHAR(32);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_sync_error TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMP;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS alipos_status_updated_at TIMESTAMP;
 ALTER TABLE orders
     ADD COLUMN IF NOT EXISTS alipos_status_check_attempted_at TIMESTAMP;
 ALTER TABLE orders

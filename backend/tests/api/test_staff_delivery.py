@@ -561,6 +561,58 @@ async def test_take_order_operation_deadline_cancels_contended_lock_without_late
 
 
 @pytest.mark.asyncio
+async def test_take_order_has_no_post_commit_reload_inside_operation_deadline(
+    staff_delivery_sessions,
+    monkeypatch,
+):
+    client, sessions, created_user_ids = staff_delivery_sessions
+    staff, order = await _create_committed_take_order_case(
+        sessions,
+        created_user_ids,
+    )
+    _patch_take_order_deadlines(
+        monkeypatch,
+        provider_seconds=0.05,
+        operation_seconds=0.15,
+    )
+    original_require = staff_delivery_service._require_staff_order
+    require_calls = 0
+    never_finish = asyncio.Event()
+
+    async def fail_if_reloaded_after_commit(*args, **kwargs):
+        nonlocal require_calls
+        require_calls += 1
+        if require_calls == 3:
+            await never_finish.wait()
+        return await original_require(*args, **kwargs)
+
+    with (
+        patch(
+            "app.services.staff_delivery_service._require_staff_order",
+            new=fail_if_reloaded_after_commit,
+        ),
+        patch(
+            "app.services.alipos_api.get_order_status",
+            new=AsyncMock(
+                return_value={"status": "TAKEN_BY_COURIER", "orderNumber": "A7-492"}
+            ),
+        ),
+    ):
+        response = await _post_take_with_test_bound(
+            client,
+            order.id,
+            staff.telegram_id,
+        )
+
+    assert response.status_code == 200
+    assert require_calls == 2
+    async with sessions() as verify_db:
+        stored = await verify_db.get(Order, order.id)
+        assert stored is not None
+        assert stored.assigned_staff_id == staff.telegram_id
+
+
+@pytest.mark.asyncio
 async def test_staff_cannot_take_second_active_order(client, db_session):
     customer = await _create_user(db_session, 706, "customer")
     staff = await _create_user(db_session, 707, "staff")

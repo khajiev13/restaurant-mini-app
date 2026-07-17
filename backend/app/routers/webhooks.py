@@ -13,7 +13,10 @@ from app.database import async_session
 from app.models.models import Order, Stoplist, User
 from app.services import multicard_api
 from app.services.order_service import dispatch_queued_alipos_order
-from app.services.order_status_service import apply_alipos_status_update_for_order
+from app.services.order_status_service import (
+    apply_alipos_status_update_for_order,
+    parse_alipos_updated_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +138,7 @@ async def order_status_webhook(
     eats_id = body.get("eatsId")
     new_status = body.get("status")
     order_number = body.get("orderNumber")
+    provider_updated_at = parse_alipos_updated_at(body.get("updatedAt"))
 
     if not eats_id or not new_status:
         raise HTTPException(
@@ -149,6 +153,7 @@ async def order_status_webhook(
             order,
             new_status,
             order_number,
+            provider_updated_at=provider_updated_at,
         ):
             await db.commit()
 
@@ -349,6 +354,7 @@ async def multicard_callback(
 
         order.payment_provider = "multicard"
         order.payment_status = "paid"
+        order.invoice_cancel_status = "paid"
         order.payment_paid_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         order.multicard_payment_uuid = str(payment_uuid)
         order.multicard_receipt_url = str(receipt_url) if receipt_url else None

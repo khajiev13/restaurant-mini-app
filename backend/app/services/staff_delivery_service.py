@@ -11,7 +11,10 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models.models import Order, User
 from app.services import alipos_api
-from app.services.order_status_service import apply_alipos_status_update_for_order
+from app.services.order_status_service import (
+    apply_alipos_status_update_for_order,
+    parse_alipos_updated_at,
+)
 from app.services.permissions import require_staff
 
 AVAILABLE_STATUS = "TAKEN_BY_COURIER"
@@ -230,6 +233,9 @@ async def take_order(
                     order,
                     alipos_data.get("status", order.status),
                     alipos_data.get("orderNumber"),
+                    provider_updated_at=parse_alipos_updated_at(
+                        alipos_data.get("updatedAt")
+                    ),
                 ):
                     await db.flush()
 
@@ -251,7 +257,7 @@ async def take_order(
             order.assigned_at = now
 
             await db.commit()
-            return await _require_staff_order(db, order.id)
+            return order
     except TimeoutError as exc:
         await db.rollback()
         raise HTTPException(

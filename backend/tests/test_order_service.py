@@ -616,6 +616,32 @@ async def test_interrupted_alipos_send_is_recovered_as_unknown(db_session):
 
 
 @pytest.mark.asyncio
+async def test_interrupted_alipos_send_preserves_advanced_webhook_status(db_session):
+    from app.services.order_service import recover_interrupted_alipos_orders
+
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="cash",
+        payment_status=None,
+    )
+    order.alipos_sync_status = "sending"
+    order.alipos_order_id = None
+    order.status = "ACCEPTED_BY_RESTAURANT"
+    order.order_number = "A-204"
+    await db_session.commit()
+
+    recovered = await recover_interrupted_alipos_orders(db_session)
+
+    await db_session.refresh(order)
+    assert recovered == 1
+    assert order.alipos_sync_status == "unknown"
+    assert order.status == "ACCEPTED_BY_RESTAURANT"
+    assert order.order_number == "A-204"
+
+
+@pytest.mark.asyncio
 async def test_refund_recovery_only_dispatches_never_attempted_refunds(db_session):
     user = await _customer(db_session)
     queued = await _queued_order(
@@ -2087,20 +2113,28 @@ async def _expired_online_order(db_session, user: User) -> Order:
 async def test_expiry_leaves_order_payable_when_invoice_cancel_is_unconfirmed(db_session):
     user = await _customer(db_session)
     order = await _expired_online_order(db_session, user)
+    cancel_invoice = AsyncMock(side_effect=RuntimeError("already paid or unavailable"))
 
     with patch(
         "app.services.order_service.multicard_api.cancel_invoice_strict",
-        new=AsyncMock(side_effect=RuntimeError("already paid or unavailable")),
+        new=cancel_invoice,
     ):
         expired = await expire_due_payment_orders(
+            db_session,
+            datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
+        )
+        repeated = await expire_due_payment_orders(
             db_session,
             datetime.datetime.now(datetime.UTC).replace(tzinfo=None),
         )
 
     await db_session.refresh(order)
     assert expired == 0
+    assert repeated == 0
+    cancel_invoice.assert_awaited_once_with("invoice-uuid")
     assert order.payment_status == "pending"
     assert order.status == "AWAITING_PAYMENT"
+    assert order.invoice_cancel_status == "unknown"
 
 
 @pytest.mark.asyncio
@@ -2123,6 +2157,44 @@ async def test_expiry_cancels_order_only_after_invoice_cancel_is_confirmed(db_se
     cancel_invoice.assert_awaited_once_with("invoice-uuid")
     assert order.payment_status == "expired"
     assert order.status == "CANCELLED"
+    assert order.invoice_cancel_status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_invoice_cancel_is_recovered_as_unknown(db_session):
+    user = await _customer(db_session)
+    order = await _expired_online_order(db_session, user)
+    order.invoice_cancel_status = "sending"
+    await db_session.commit()
+
+    recovered = await order_service.recover_interrupted_invoice_cancellations(
+        db_session
+    )
+
+    await db_session.refresh(order)
+    assert recovered == 1
+    assert order.invoice_cancel_status == "unknown"
+    assert order.payment_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_invoice_cancel_transport_failure_is_unknown_after_one_delete():
+    client = Mock()
+    client.delete = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoiceCancelOutcomeUnknown):
+            await multicard_api.cancel_invoice_strict("invoice-uuid")
+
+    client.delete.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2263,6 +2335,202 @@ async def test_alipos_create_order_ambiguous_http_status_is_unknown(status_code)
 
 
 @pytest.mark.asyncio
+async def test_alipos_create_order_does_not_follow_mutation_redirect():
+    real_client = httpx.AsyncClient
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, str(request.url)))
+        if request.url.host == "redirect-target.example":
+            return httpx.Response(
+                200,
+                json={"orderId": str(uuid.uuid4())},
+                request=request,
+            )
+        return httpx.Response(
+            307,
+            headers={"Location": "https://redirect-target.example/replayed-order"},
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    with (
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch(
+            "app.services.alipos_api.httpx.AsyncClient",
+            side_effect=lambda *args, **kwargs: real_client(transport=transport),
+        ),
+    ):
+        with pytest.raises(alipos_api.AliPOSUnknownOutcome):
+            await alipos_api.create_order({"eatsId": "stable-id"})
+
+    assert len(requests) == 1
+    assert requests[0][0] == "POST"
+    assert "redirect-target.example" not in requests[0][1]
+
+
+@pytest.mark.asyncio
+async def test_alipos_cancel_order_does_not_follow_mutation_redirect():
+    real_client = httpx.AsyncClient
+    requests: list[tuple[str, str]] = []
+    provider_order_id = "11111111-1111-4111-8111-111111111111"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, str(request.url)))
+        if request.url.host == "redirect-target.example":
+            return httpx.Response(200, json={"result": "OK"}, request=request)
+        return httpx.Response(
+            308,
+            headers={"Location": "https://redirect-target.example/replayed-cancel"},
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    with (
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch(
+            "app.services.alipos_api.httpx.AsyncClient",
+            side_effect=lambda *args, **kwargs: real_client(transport=transport),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="outcome is unknown"):
+            await alipos_api.cancel_order(provider_order_id, "cancel once")
+
+    assert len(requests) == 1
+    assert requests[0][0] == "DELETE"
+    assert "redirect-target.example" not in requests[0][1]
+
+
+@pytest.mark.asyncio
+async def test_alipos_cancel_runtime_failure_suppresses_unsafe_cause():
+    provider_order_id = "cancel-path-canary-55555555"
+    unsafe_detail = "https://provider-secret.example?token=credential-canary-66666666"
+    client = Mock()
+    client.__aenter__ = AsyncMock(side_effect=RuntimeError(unsafe_detail))
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(RuntimeError) as exc_info:
+            await alipos_api.cancel_order(provider_order_id, "cancel once")
+
+    assert exc_info.value.__cause__ is None
+    assert provider_order_id not in str(exc_info.value)
+    assert unsafe_detail not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_alipos_read_http_error_omits_path_body_and_exception_cause(caplog):
+    provider_order_id = "order-path-canary-11111111"
+    provider_body = "provider-body-canary-22222222"
+    response = httpx.Response(
+        500,
+        json={"detail": provider_body},
+        request=httpx.Request(
+            "GET",
+            f"https://alipos.example/api/Integration/v1/order/{provider_order_id}",
+        ),
+    )
+    client = Mock()
+    client.request = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+        caplog.at_level("WARNING", logger="app.services.alipos_api"),
+    ):
+        with pytest.raises(RuntimeError) as exc_info:
+            await alipos_api.get_order_status(provider_order_id)
+
+    assert exc_info.value.__cause__ is None
+    assert provider_order_id not in str(exc_info.value)
+    assert provider_body not in str(exc_info.value)
+    assert provider_order_id not in caplog.text
+    assert provider_body not in caplog.text
+    assert "order_read" in caplog.text
+    assert "500" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_alipos_read_transport_error_omits_url_and_exception_cause(caplog):
+    provider_order_id = "order-path-canary-33333333"
+    unsafe_url = (
+        "https://alipos.example/api/Integration/v1/order/"
+        f"{provider_order_id}?access_token=credential-canary-44444444"
+    )
+    client = Mock()
+    client.request = AsyncMock(
+        side_effect=httpx.ReadTimeout(
+            f"transport failed for {unsafe_url}",
+            request=httpx.Request("GET", unsafe_url),
+        )
+    )
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+        patch("app.services.alipos_api.asyncio.sleep", new=AsyncMock()),
+        caplog.at_level("WARNING", logger="app.services.alipos_api"),
+    ):
+        with pytest.raises(RuntimeError) as exc_info:
+            await alipos_api.get_order_status(provider_order_id)
+
+    assert exc_info.value.__cause__ is None
+    assert provider_order_id not in str(exc_info.value)
+    assert unsafe_url not in str(exc_info.value)
+    assert provider_order_id not in caplog.text
+    assert unsafe_url not in caplog.text
+    assert "credential-canary-44444444" not in caplog.text
+    assert "order_read" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_alipos_read_invalid_json_omits_response_body_and_exception_cause():
+    provider_order_id = "order-path-canary-77777777"
+    provider_body = "provider-body-canary-88888888"
+    response = httpx.Response(
+        200,
+        content=provider_body,
+        request=httpx.Request(
+            "GET",
+            f"https://alipos.example/api/Integration/v1/order/{provider_order_id}",
+        ),
+    )
+
+    with patch(
+        "app.services.alipos_api._api_request",
+        new=AsyncMock(return_value=response),
+    ):
+        with pytest.raises(RuntimeError, match="AliPOS order_read response invalid") as exc_info:
+            await alipos_api.get_order_status(provider_order_id)
+
+    assert exc_info.value.__cause__ is None
+    assert provider_order_id not in str(exc_info.value)
+    assert provider_body not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload",
     [None, [], {}, {"orderId": None}, {"orderId": "not-a-uuid"}],
@@ -2372,6 +2640,66 @@ async def test_paid_definite_submission_rejection_dispatches_one_refund(db_sessi
     refund.assert_awaited_once_with("payment-uuid")
     assert order.payment_status == "refunded"
     assert order.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_paid_rejection_queues_refund_in_failure_commit_before_dispatch(
+    db_session,
+):
+    class SimulatedProcessExit(BaseException):
+        pass
+
+    class CrashAfterFailureCommit:
+        def __init__(self, delegate: AsyncSession) -> None:
+            self.delegate = delegate
+            self.commit_count = 0
+
+        def __getattr__(self, name: str):
+            return getattr(self.delegate, name)
+
+        async def commit(self) -> None:
+            await self.delegate.commit()
+            self.commit_count += 1
+            if self.commit_count == 2:
+                raise SimulatedProcessExit
+
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="paid",
+    )
+    order.multicard_payment_uuid = "payment-uuid"
+    await db_session.commit()
+    crashing_db = CrashAfterFailureCommit(db_session)
+    refund = AsyncMock()
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": ONLINE_PAYMENT_ID, "title": "online-order"}]
+            ),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.create_order",
+            new=AsyncMock(side_effect=alipos_api.AliPOSRejected(400)),
+        ),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        with pytest.raises(SimulatedProcessExit):
+            await submit_order_to_alipos(crashing_db, order)
+
+    await db_session.refresh(order)
+    refund.assert_not_awaited()
+    assert order.alipos_sync_status == "failed"
+    assert order.status == "SUBMISSION_FAILED"
+    assert order.payment_status == "refund_pending"
+    assert order.refund_sync_status == "queued"
 
 
 @pytest.mark.asyncio
