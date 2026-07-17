@@ -522,6 +522,48 @@ async def _committed_refund_order(
     return order_id, payment_uuid
 
 
+async def _committed_invoice_order(
+    refund_sessions,
+    *,
+    payment_status: str,
+    invoice_uuid: str | None = None,
+) -> uuid.UUID:
+    sessions, created_user_ids = refund_sessions
+    user_id = 8_000_000_000 + uuid.uuid4().int % 1_000_000_000
+    async with sessions() as db:
+        user = User(
+            telegram_id=user_id,
+            first_name="Invoice customer",
+            last_name=None,
+            username=None,
+        )
+        order = Order(
+            user_id=user_id,
+            items=[],
+            delivery_info={
+                "clientName": "Invoice customer",
+                "phoneNumber": "+998900000000",
+            },
+            items_cost=10000,
+            total_amount=11000,
+            delivery_fee=0,
+            payment_method="rahmat",
+            payment_provider="multicard",
+            payment_status=payment_status,
+            multicard_invoice_uuid=invoice_uuid,
+            discriminator="inplace",
+            table_id=uuid.uuid4(),
+            alipos_eats_id=f"invoice-{uuid.uuid4().hex}",
+            alipos_sync_status="awaiting_payment",
+            status="PAYMENT_REVIEW",
+        )
+        db.add_all([user, order])
+        await db.commit()
+        order_id = order.id
+    created_user_ids.append(user_id)
+    return order_id
+
+
 @pytest.mark.asyncio
 async def test_recovery_includes_cash_and_paid_online_but_not_unpaid_online(db_session):
     user = await _customer(db_session)
@@ -597,6 +639,191 @@ async def test_refund_recovery_only_dispatches_never_attempted_refunds(db_sessio
     recoverable = await list_recoverable_refund_order_ids(db_session)
 
     assert recoverable == [queued.id]
+
+
+@pytest.mark.asyncio
+async def test_invoice_ambiguous_outcome_blocks_retry_and_cash_switch(
+    db_session,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="invoice_queued",
+    )
+    order.payment_provider = "multicard"
+    order.alipos_sync_status = "awaiting_payment"
+    order.status = "PAYMENT_REVIEW"
+    await db_session.commit()
+    create_invoice = AsyncMock(
+        side_effect=multicard_api.InvoiceOutcomeUnknown("ambiguous-invoice")
+    )
+    cancel_invoice = AsyncMock()
+
+    with (
+        patch(
+            "app.services.order_service.multicard_api.create_invoice",
+            new=create_invoice,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.cancel_invoice_strict",
+            new=cancel_invoice,
+        ),
+    ):
+        await order_service._create_order_invoice(db_session, order)
+        await order_service._create_order_invoice(db_session, order)
+        with pytest.raises(order_service.PaymentRetryConflict):
+            await order_service.retry_customer_order_payment(db_session, user, order.id)
+        with pytest.raises(order_service.PaymentSwitchConflict):
+            await order_service.switch_customer_order_to_cash(
+                db_session,
+                user,
+                order.id,
+            )
+
+    await db_session.refresh(order)
+    create_invoice.assert_awaited_once()
+    cancel_invoice.assert_not_awaited()
+    assert order.payment_status == "invoice_unknown"
+    assert order.status == "PAYMENT_REVIEW"
+    assert order.multicard_invoice_uuid == "ambiguous-invoice"
+    assert order.multicard_checkout_url is None
+
+
+@pytest.mark.asyncio
+async def test_invoice_recovery_retries_only_never_attempted_rows(
+    refund_sessions,
+):
+    sessions, _ = refund_sessions
+    queued_id = await _committed_invoice_order(
+        refund_sessions,
+        payment_status="invoice_queued",
+    )
+    sending_id = await _committed_invoice_order(
+        refund_sessions,
+        payment_status="invoice_sending",
+    )
+    unknown_id = await _committed_invoice_order(
+        refund_sessions,
+        payment_status="invoice_unknown",
+        invoice_uuid="unknown-invoice",
+    )
+    dispatch = AsyncMock()
+
+    with (
+        patch.object(order_service, "async_session", sessions),
+        patch.object(order_service, "dispatch_queued_invoice", new=dispatch),
+    ):
+        await order_service.recover_invoice_operations()
+        await asyncio.sleep(0)
+
+    dispatch.assert_awaited_once_with(queued_id)
+    async with sessions() as inspect_db:
+        queued = await inspect_db.get(Order, queued_id)
+        sending = await inspect_db.get(Order, sending_id)
+        unknown = await inspect_db.get(Order, unknown_id)
+        assert queued is not None
+        assert sending is not None
+        assert unknown is not None
+        assert queued.payment_status == "invoice_queued"
+        assert sending.payment_status == "invoice_unknown"
+        assert sending.status == "PAYMENT_REVIEW"
+        assert unknown.payment_status == "invoice_unknown"
+        assert unknown.multicard_invoice_uuid == "unknown-invoice"
+
+
+@pytest.mark.asyncio
+async def test_malformed_invoice_success_with_uuid_preserves_reference_and_reconciles_by_get(
+    db_session,
+    monkeypatch,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="rahmat",
+        payment_status="invoice_queued",
+    )
+    order.payment_provider = "multicard"
+    order.alipos_sync_status = "awaiting_payment"
+    order.status = "PAYMENT_REVIEW"
+    await db_session.commit()
+    monkeypatch.setattr(
+        settings,
+        "multicard_allow_uuidless_sandbox_checkout",
+        False,
+        raising=False,
+    )
+    invoice_uuid = "partial-invoice-uuid"
+    post_response = httpx.Response(
+        200,
+        json={"success": True, "data": {"uuid": invoice_uuid}},
+        request=httpx.Request("POST", "https://multicard.example/payment/invoice"),
+    )
+    incomplete_get = httpx.Response(
+        200,
+        json={"success": True, "data": {"uuid": invoice_uuid}},
+        request=httpx.Request(
+            "GET", f"https://multicard.example/payment/invoice/{invoice_uuid}"
+        ),
+    )
+    complete_get = httpx.Response(
+        200,
+        json={
+            "success": True,
+            "data": {
+                "uuid": invoice_uuid,
+                "checkout_url": "https://pay.example/partial-invoice",
+            },
+        },
+        request=httpx.Request(
+            "GET", f"https://multicard.example/payment/invoice/{invoice_uuid}"
+        ),
+    )
+    failed_get_request = httpx.Request(
+        "GET", f"https://multicard.example/payment/invoice/{invoice_uuid}"
+    )
+    client = _multicard_invoice_client(post_response)
+    client.get = AsyncMock(
+        side_effect=[
+            httpx.ReadTimeout("lookup timed out", request=failed_get_request),
+            incomplete_get,
+            complete_get,
+        ]
+    )
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        await order_service._create_order_invoice(db_session, order)
+        await db_session.refresh(order)
+        assert order.payment_status == "invoice_unknown"
+        assert order.multicard_invoice_uuid == invoice_uuid
+
+        assert await order_service.reconcile_unknown_invoices(db_session) == 0
+        await db_session.refresh(order)
+        assert order.payment_status == "invoice_unknown"
+        assert order.multicard_invoice_uuid == invoice_uuid
+
+        assert await order_service.reconcile_unknown_invoices(db_session) == 0
+        await db_session.refresh(order)
+        assert order.payment_status == "invoice_unknown"
+        assert order.multicard_invoice_uuid == invoice_uuid
+
+        assert await order_service.reconcile_unknown_invoices(db_session) == 1
+
+    await db_session.refresh(order)
+    client.post.assert_awaited_once()
+    assert client.get.await_count == 3
+    assert order.payment_status == "pending"
+    assert order.status == "AWAITING_PAYMENT"
+    assert order.multicard_invoice_uuid == invoice_uuid
+    assert order.multicard_checkout_url == "https://pay.example/partial-invoice"
 
 
 @pytest.mark.asyncio
@@ -782,6 +1009,50 @@ async def test_runtime_unknown_refund_is_reconciled_without_restart(refund_sessi
         assert persisted is not None
         assert persisted.payment_status == "refunded"
         assert persisted.refund_sync_status == "refunded"
+
+
+@pytest.mark.asyncio
+async def test_runtime_unknown_invoice_is_reconciled_without_repeating_post(
+    refund_sessions,
+):
+    sessions, _ = refund_sessions
+    invoice_uuid = f"invoice-{uuid.uuid4()}"
+    order_id = await _committed_invoice_order(
+        refund_sessions,
+        payment_status="invoice_unknown",
+        invoice_uuid=invoice_uuid,
+    )
+    lookup = AsyncMock(
+        return_value={
+            "uuid": invoice_uuid,
+            "checkout_url": "https://pay.example/runtime-invoice",
+        }
+    )
+    create = AsyncMock()
+
+    with (
+        patch.object(order_service, "async_session", sessions),
+        patch(
+            "app.services.order_service.multicard_api.get_invoice",
+            new=lookup,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.create_invoice",
+            new=create,
+        ),
+    ):
+        await order_service.reconcile_provider_operations()
+
+    lookup.assert_awaited_once_with(invoice_uuid)
+    create.assert_not_awaited()
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order_id)
+        assert persisted is not None
+        assert persisted.payment_status == "pending"
+        assert persisted.status == "AWAITING_PAYMENT"
+        assert persisted.multicard_checkout_url == (
+            "https://pay.example/runtime-invoice"
+        )
 
 
 @pytest.mark.asyncio
@@ -1273,6 +1544,252 @@ async def test_provider_reconciliation_loop_runs_after_startup_survives_tick_err
     cancel_lookup.assert_awaited_once_with(str(cancel_provider_id))
     refund_delete.assert_not_awaited()
     cancel_delete.assert_not_awaited()
+
+
+def _multicard_invoice_client(response: httpx.Response) -> Mock:
+    client = Mock()
+    client.post = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_invoice_http_503_is_outcome_unknown():
+    response = httpx.Response(
+        503,
+        json={"success": False, "error": {"code": "ERROR_UNKNOWN"}},
+        request=httpx.Request("POST", "https://multicard.example/payment/invoice"),
+    )
+    client = _multicard_invoice_client(response)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoiceOutcomeUnknown):
+            await multicard_api.create_invoice(
+                amount_tiyin=100_000,
+                invoice_id="order-123",
+                return_url="https://app.example/order-123",
+            )
+
+    client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected_uuid"),
+    [
+        (
+            httpx.Response(
+                200,
+                content=b"not-json",
+                request=httpx.Request(
+                    "POST", "https://multicard.example/payment/invoice"
+                ),
+            ),
+            None,
+        ),
+        (
+            httpx.Response(
+                200,
+                json={"success": True, "data": {"uuid": "invoice-uuid"}},
+                request=httpx.Request(
+                    "POST", "https://multicard.example/payment/invoice"
+                ),
+            ),
+            "invoice-uuid",
+        ),
+        (
+            httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"checkout_url": "https://pay.example/checkout"},
+                },
+                request=httpx.Request(
+                    "POST", "https://multicard.example/payment/invoice"
+                ),
+            ),
+            None,
+        ),
+    ],
+    ids=["malformed-json", "missing-checkout", "missing-uuid"],
+)
+async def test_incomplete_invoice_success_is_unknown_and_preserves_uuid(
+    response,
+    expected_uuid,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        settings,
+        "multicard_allow_uuidless_sandbox_checkout",
+        False,
+        raising=False,
+    )
+    client = _multicard_invoice_client(response)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoiceOutcomeUnknown) as exc_info:
+            await multicard_api.create_invoice(
+                amount_tiyin=100_000,
+                invoice_id="order-123",
+                return_url="https://app.example/order-123",
+            )
+
+    assert exc_info.value.invoice_uuid == expected_uuid
+    client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_code"),
+    [(400, "ERROR_FIELDS"), (404, "ERROR_NOT_FOUND")],
+)
+async def test_invoice_exact_documented_rejection_pairs_are_definite(
+    status_code,
+    error_code,
+):
+    response = httpx.Response(
+        status_code,
+        json={
+            "success": False,
+            "error": {"code": error_code, "details": "provider-secret"},
+        },
+        request=httpx.Request("POST", "https://multicard.example/payment/invoice"),
+    )
+    client = _multicard_invoice_client(response)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoiceRejected) as exc_info:
+            await multicard_api.create_invoice(
+                amount_tiyin=100_000,
+                invoice_id="order-123",
+                return_url="https://app.example/order-123",
+            )
+
+    assert exc_info.value.status_code == status_code
+    assert "provider-secret" not in str(exc_info.value)
+    client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_code"),
+    [
+        (400, "ERROR_NOT_FOUND"),
+        (404, "ERROR_FIELDS"),
+        (409, "ERROR_FIELDS"),
+        (400, "ERROR_UNKNOWN"),
+        (408, "ERROR_CALLBACK_TIMEOUT"),
+        (425, "ERROR_DEBIT_UNKNOWN"),
+        (429, "ERROR_FIELDS"),
+    ],
+)
+async def test_invoice_unlisted_4xx_pairs_are_unknown(status_code, error_code):
+    response = httpx.Response(
+        status_code,
+        json={
+            "success": False,
+            "error": {"code": error_code, "details": "provider-secret"},
+        },
+        request=httpx.Request("POST", "https://multicard.example/payment/invoice"),
+    )
+    client = _multicard_invoice_client(response)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoiceOutcomeUnknown):
+            await multicard_api.create_invoice(
+                amount_tiyin=100_000,
+                invoice_id="order-123",
+                return_url="https://app.example/order-123",
+            )
+
+    client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invoice_token_failure_is_sanitized_and_not_attempted():
+    post = AsyncMock()
+    client = Mock()
+    client.post = post
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(side_effect=RuntimeError("credential-canary")),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        with pytest.raises(multicard_api.InvoicePreSubmitError) as exc_info:
+            await multicard_api.create_invoice(
+                amount_tiyin=100_000,
+                invoice_id="order-123",
+                return_url="https://app.example/order-123",
+            )
+
+    assert "credential-canary" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uuidless_legacy_checkout_requires_explicit_flag(monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        "multicard_allow_uuidless_sandbox_checkout",
+        True,
+        raising=False,
+    )
+    response = httpx.Response(
+        200,
+        json={"success": True, "data": {"uuid": None}},
+        request=httpx.Request("POST", "https://multicard.example/payment/invoice"),
+    )
+    client = _multicard_invoice_client(response)
+
+    with (
+        patch(
+            "app.services.multicard_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch("app.services.multicard_api.httpx.AsyncClient", return_value=client),
+    ):
+        invoice = await multicard_api.create_invoice(
+            amount_tiyin=100_000,
+            invoice_id="order-123",
+            return_url="https://app.example/order-123",
+        )
+
+    assert invoice["uuid"] is None
+    assert invoice["checkout_url"] == (
+        "https://checkout.multicard.uz/?store_id="
+        f"{settings.multicard_store_id}&invoice_id=order-123"
+    )
 
 
 @pytest.mark.asyncio

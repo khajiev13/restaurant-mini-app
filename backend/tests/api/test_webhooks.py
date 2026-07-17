@@ -481,6 +481,171 @@ async def test_multicard_callback_queues_exact_paid_order_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("payment_status", ["invoice_queued", "invoice_unknown"])
+async def test_multicard_callback_accepts_pre_checkout_invoice_states(
+    client,
+    webhook_db_session,
+    monkeypatch,
+    payment_status,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = payment_status
+    order.status = "PAYMENT_REVIEW"
+    if payment_status == "invoice_unknown":
+        order.multicard_invoice_uuid = "payment-uuid"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.payment_status == "paid"
+    assert order.status == "PAID_AWAITING_RESTAURANT"
+    assert order.alipos_sync_status == "queued"
+    dispatch.assert_awaited_once_with(order.id)
+
+
+@pytest.mark.asyncio
+async def test_multicard_callback_rejects_mismatched_known_invoice_uuid(
+    client,
+    webhook_db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = "invoice_unknown"
+    order.status = "PAYMENT_REVIEW"
+    order.multicard_invoice_uuid = "expected-invoice"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order, payment_uuid="different-invoice"),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 409
+    assert order.payment_status == "invoice_unknown"
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_callback_wins_invoice_create_finalizer_race(
+    client,
+    webhook_race_sessions,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    sessions, created_user_ids, _ = webhook_race_sessions
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    async def rejected_after_callback(**_kwargs):
+        provider_started.set()
+        await release_provider.wait()
+        raise order_service.multicard_api.InvoiceRejected(400)
+
+    monkeypatch.setattr(
+        order_service.multicard_api,
+        "create_invoice",
+        rejected_after_callback,
+    )
+
+    async with sessions() as invoice_db:
+        order = await _pending_online_order(invoice_db)
+        created_user_ids.append(order.user_id)
+        order.payment_status = "invoice_queued"
+        order.status = "PAYMENT_REVIEW"
+        await invoice_db.commit()
+        create_task = asyncio.create_task(
+            order_service._create_order_invoice(invoice_db, order)
+        )
+        try:
+            await asyncio.wait_for(provider_started.wait(), timeout=1)
+            async with sessions() as observer_db:
+                sending = await observer_db.get(Order, order.id)
+                assert sending is not None
+                assert sending.payment_status == "invoice_sending"
+
+            response = await client.post(
+                "/api/webhooks/multicard/callback",
+                json=_signed_callback(order),
+            )
+            assert response.status_code == 200
+            release_provider.set()
+            await create_task
+        finally:
+            release_provider.set()
+            if not create_task.done():
+                await asyncio.gather(create_task, return_exceptions=True)
+
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order.id)
+        assert persisted is not None
+        assert persisted.payment_status == "paid"
+        assert persisted.status == "PAID_AWAITING_RESTAURANT"
+        assert persisted.multicard_payment_uuid == "payment-uuid"
+        assert persisted.alipos_sync_status == "queued"
+    dispatch.assert_awaited_once_with(order.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("restaurant_status", "initial_sync_status"),
+    [("NEW", None), ("ACCEPTED_BY_RESTAURANT", "synced")],
+)
+async def test_legacy_pending_delivery_callback_marks_paid_without_second_alipos_create(
+    client,
+    webhook_db_session,
+    monkeypatch,
+    restaurant_status,
+    initial_sync_status,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    alipos_order_id = uuid.uuid4()
+    order.discriminator = "delivery"
+    order.table_id = None
+    order.status = restaurant_status
+    order.alipos_order_id = alipos_order_id
+    order.alipos_sync_status = initial_sync_status
+    order.multicard_invoice_uuid = "payment-uuid"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    create = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+    monkeypatch.setattr(order_service.alipos_api, "create_order", create)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.payment_status == "paid"
+    assert order.alipos_sync_status == "synced"
+    assert order.status == restaurant_status
+    assert order.alipos_order_id == alipos_order_id
+    dispatch.assert_not_awaited()
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("payment_status", "refund_sync_status"),
     [("refund_pending", "queued"), ("refunded", "refunded")],

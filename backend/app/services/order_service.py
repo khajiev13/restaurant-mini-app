@@ -6,7 +6,6 @@ import uuid
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
-import httpx
 from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +28,7 @@ ALIPOS_CANCEL_COMMENT = "Mijoz yangi buyurtmani bekor qildi"
 ALIPOS_CANCEL_UNKNOWN_ERROR = "AliPOS cancellation outcome is unknown"
 ALIPOS_CANCEL_RECONCILE_LIMIT = 5
 REFUND_RECONCILE_LIMIT = 5
+INVOICE_RECONCILE_LIMIT = 5
 ALIPOS_CANCEL_PENDING_STATUSES = (None, "not_started", "sending", "unknown")
 ALIPOS_CANCEL_REPAIRABLE_STATUSES = (*ALIPOS_CANCEL_PENDING_STATUSES, "not_cancelled")
 ALIPOS_CANCELLABLE_LOCAL_STATUSES = ("NEW", "PAID_AWAITING_RESTAURANT")
@@ -400,6 +400,55 @@ async def recover_queued_alipos_orders() -> None:
         asyncio.create_task(dispatch_queued_alipos_order(order_id))
 
 
+async def list_recoverable_invoice_order_ids(db: AsyncSession) -> list[uuid.UUID]:
+    """Return online invoices durably queued but never posted."""
+    result = await db.execute(
+        select(Order.id).where(
+            Order.payment_method == "rahmat",
+            Order.payment_provider == "multicard",
+            Order.payment_status == "invoice_queued",
+            Order.alipos_order_id.is_(None),
+        )
+    )
+    return list(result.scalars())
+
+
+async def recover_interrupted_invoice_operations(db: AsyncSession) -> int:
+    """Convert interrupted POST attempts to review without repeating them."""
+    result = await db.execute(
+        update(Order)
+        .where(Order.payment_status == "invoice_sending")
+        .values(
+            payment_status="invoice_unknown",
+            payment_error="The payment link outcome needs verification",
+            payment_expires_at=None,
+            multicard_checkout_url=None,
+            status="PAYMENT_REVIEW",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    return result.rowcount
+
+
+async def dispatch_queued_invoice(order_id: uuid.UUID) -> None:
+    """Claim one never-attempted invoice and make at most one provider POST."""
+    async with async_session() as db:
+        order = await db.get(Order, order_id)
+        if order is not None:
+            await _create_order_invoice(db, order)
+
+
+async def recover_invoice_operations() -> None:
+    """Resume only never-attempted invoices after process startup."""
+    async with async_session() as db:
+        await recover_interrupted_invoice_operations(db)
+        order_ids = await list_recoverable_invoice_order_ids(db)
+        await db.commit()
+    for order_id in order_ids:
+        asyncio.create_task(dispatch_queued_invoice(order_id))
+
+
 async def list_recoverable_refund_order_ids(
     db: AsyncSession,
     *,
@@ -624,6 +673,65 @@ async def reconcile_unknown_refunds(
                 payment_error="The refund is being verified",
                 load_order=False,
             )
+    return reconciled
+
+
+async def reconcile_unknown_invoices(
+    db: AsyncSession,
+    *,
+    limit: int = INVOICE_RECONCILE_LIMIT,
+) -> int:
+    """Resolve a bounded batch of known invoices using GET only."""
+    bounded_limit = min(max(limit, 0), INVOICE_RECONCILE_LIMIT)
+    if bounded_limit == 0:
+        return 0
+    result = await db.execute(
+        select(Order.id, Order.multicard_invoice_uuid)
+        .where(
+            Order.payment_status == "invoice_unknown",
+            Order.multicard_invoice_uuid.is_not(None),
+        )
+        .order_by(Order.updated_at, Order.id)
+        .limit(bounded_limit)
+    )
+    invoices = list(result.all())
+    await db.commit()
+
+    reconciled = 0
+    for order_id, invoice_uuid in invoices:
+        try:
+            invoice = await multicard_api.get_invoice(invoice_uuid)
+        except Exception:
+            logger.warning(
+                "multicard_invoice_reconcile_failed",
+                extra={"local_order_id": str(order_id)},
+            )
+            continue
+
+        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        result = await db.execute(
+            update(Order)
+            .where(
+                Order.id == order_id,
+                Order.payment_status == "invoice_unknown",
+                Order.multicard_invoice_uuid == invoice_uuid,
+            )
+            .values(
+                payment_status="pending",
+                payment_expires_at=now
+                + datetime.timedelta(
+                    seconds=settings.rahmat_payment_timeout_seconds
+                ),
+                payment_error=None,
+                multicard_checkout_url=invoice["checkout_url"],
+                alipos_sync_status="awaiting_payment",
+                alipos_sync_error=None,
+                status="AWAITING_PAYMENT",
+            )
+            .execution_options(synchronize_session=False)
+        )
+        reconciled += int(result.rowcount > 0)
+        await db.commit()
     return reconciled
 
 
@@ -967,6 +1075,7 @@ async def reconcile_provider_operations() -> tuple[int, int]:
     async with async_session() as db:
         reconciled_refunds = await reconcile_unknown_refunds(db)
         reconciled_cancellations = await reconcile_unknown_alipos_cancellations(db)
+        await reconcile_unknown_invoices(db)
     return reconciled_refunds, reconciled_cancellations
 
 
@@ -1292,36 +1401,102 @@ async def switch_customer_order_to_cash(
 
 
 async def _create_order_invoice(db: AsyncSession, order: Order) -> Order:
-    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-    order.payment_status = "pending"
-    order.payment_expires_at = now + datetime.timedelta(
-        seconds=settings.rahmat_payment_timeout_seconds
+    result = await db.execute(
+        select(Order)
+        .where(
+            Order.id == order.id,
+            Order.payment_method == "rahmat",
+            Order.payment_provider == "multicard",
+            Order.payment_status == "invoice_queued",
+            Order.alipos_order_id.is_(None),
+        )
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
     )
-    order.payment_error = None
-    order.multicard_invoice_uuid = None
-    order.multicard_checkout_url = None
-    order.alipos_sync_status = "awaiting_payment"
-    order.status = "AWAITING_PAYMENT"
+    claimed = result.scalar_one_or_none()
+    if claimed is None:
+        await db.commit()
+        current = await db.get(Order, order.id, populate_existing=True)
+        await db.commit()
+        return current or order
+
+    claimed.payment_status = "invoice_sending"
+    claimed.payment_expires_at = None
+    claimed.payment_error = None
+    claimed.multicard_invoice_uuid = None
+    claimed.multicard_checkout_url = None
+    claimed.multicard_payment_uuid = None
+    claimed.multicard_receipt_url = None
+    claimed.payment_paid_at = None
+    claimed.payment_card_pan = None
+    claimed.payment_ps = None
+    claimed.alipos_sync_status = "awaiting_payment"
+    claimed.alipos_sync_error = None
+    claimed.status = "PAYMENT_REVIEW"
     await db.commit()
+
+    values: dict[str, object]
     try:
         invoice = await multicard_api.create_invoice(
-            amount_tiyin=int(order.total_amount * 100),
-            invoice_id=str(order.id),
-            return_url=settings.telegram_order_deep_link(str(order.id)),
+            amount_tiyin=int(claimed.total_amount * 100),
+            invoice_id=str(claimed.id),
+            return_url=settings.telegram_order_deep_link(str(claimed.id)),
             ttl=settings.rahmat_payment_timeout_seconds,
         )
-        order.multicard_invoice_uuid = invoice.get("uuid")
-        order.multicard_checkout_url = invoice["checkout_url"]
-    except httpx.RequestError:
-        order.payment_status = "invoice_unknown"
-        order.payment_error = "The payment link outcome needs verification"
-        order.status = "PAYMENT_REVIEW"
+    except (multicard_api.InvoicePreSubmitError, multicard_api.InvoiceRejected):
+        values = {
+            "payment_status": "failed",
+            "payment_expires_at": None,
+            "payment_error": "Could not create the online payment",
+            "multicard_invoice_uuid": None,
+            "multicard_checkout_url": None,
+            "status": "PAYMENT_FAILED",
+        }
+    except multicard_api.InvoiceOutcomeUnknown as exc:
+        values = {
+            "payment_status": "invoice_unknown",
+            "payment_expires_at": None,
+            "payment_error": "The payment link outcome needs verification",
+            "multicard_invoice_uuid": exc.invoice_uuid,
+            "multicard_checkout_url": None,
+            "status": "PAYMENT_REVIEW",
+        }
     except Exception:
-        order.payment_status = "failed"
-        order.payment_error = "Could not create the online payment"
-        order.status = "PAYMENT_FAILED"
+        values = {
+            "payment_status": "invoice_unknown",
+            "payment_expires_at": None,
+            "payment_error": "The payment link outcome needs verification",
+            "multicard_invoice_uuid": None,
+            "multicard_checkout_url": None,
+            "status": "PAYMENT_REVIEW",
+        }
+    else:
+        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        values = {
+            "payment_status": "pending",
+            "payment_expires_at": now
+            + datetime.timedelta(
+                seconds=settings.rahmat_payment_timeout_seconds
+            ),
+            "payment_error": None,
+            "multicard_invoice_uuid": invoice.get("uuid"),
+            "multicard_checkout_url": invoice["checkout_url"],
+            "status": "AWAITING_PAYMENT",
+        }
+
+    await db.execute(
+        update(Order)
+        .where(
+            Order.id == claimed.id,
+            Order.payment_status == "invoice_sending",
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
     await db.commit()
-    return order
+    current = await db.get(Order, claimed.id, populate_existing=True)
+    await db.commit()
+    return current or claimed
 
 
 async def retry_customer_order_payment(
@@ -1355,6 +1530,11 @@ async def retry_customer_order_payment(
         raise PaymentRetryConflict(
             "Online payment is not available for table orders"
         )
+    order.payment_status = "invoice_queued"
+    order.payment_expires_at = None
+    order.payment_error = None
+    order.status = "PAYMENT_REVIEW"
+    await db.commit()
     return await _create_order_invoice(db, order)
 
 
@@ -1409,6 +1589,8 @@ async def create_customer_order(
         )
         existing = result.scalar_one_or_none()
         if existing is not None:
+            if existing.payment_status == "invoice_queued":
+                return await _create_order_invoice(db, existing)
             if existing.alipos_sync_status == "queued":
                 submitted = await _submit_queued_alipos_order(db, existing.id)
                 if submitted is not None:
@@ -1464,7 +1646,7 @@ async def create_customer_order(
         comment=body.comment,
         payment_method=body.payment_method,
         payment_provider="multicard" if online else None,
-        payment_status="pending" if online else None,
+        payment_status="invoice_queued" if online else None,
         discriminator=body.discriminator,
         table_id=table.table_id if table else None,
         table_title=table.table_title if table else None,
@@ -1478,7 +1660,7 @@ async def create_customer_order(
         ),
         alipos_eats_id=f"mrpub-{uuid.uuid4().hex[:12]}",
         alipos_sync_status="awaiting_payment" if online else "queued",
-        status="AWAITING_PAYMENT" if online else "NEW",
+        status="PAYMENT_REVIEW" if online else "NEW",
     )
     db.add(order)
     try:
@@ -1496,6 +1678,8 @@ async def create_customer_order(
         existing = result.scalar_one_or_none()
         if existing is None:
             raise
+        if existing.payment_status == "invoice_queued":
+            return await _create_order_invoice(db, existing)
         if existing.alipos_sync_status == "queued":
             submitted = await _submit_queued_alipos_order(db, existing.id)
             if submitted is not None:

@@ -110,12 +110,14 @@ async def start_payment_expiry_task() -> None:
 @app.on_event("startup")
 async def recover_paid_alipos_queue() -> None:
     from app.services.order_service import (
+        recover_invoice_operations,
         recover_queued_alipos_orders,
         recover_refund_operations,
     )
 
     await recover_queued_alipos_orders()
     await recover_refund_operations()
+    await recover_invoice_operations()
 
 
 def _provider_reconciliation_interval_seconds() -> float:

@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     multicard_application_id: str = ""
     multicard_secret: str = ""
     multicard_store_id: int = 0
+    multicard_allow_uuidless_sandbox_checkout: bool = False
     rahmat_payment_timeout_seconds: int = 600
     payment_expiry_check_interval_seconds: int = 30
     provider_reconciliation_interval_seconds: int = 30
