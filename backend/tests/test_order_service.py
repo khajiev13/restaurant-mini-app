@@ -1,5 +1,6 @@
 import datetime
 import uuid
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -20,6 +21,7 @@ from app.services.order_service import (
     _dispatch_queued_refund,
     _submit_queued_alipos_order,
     create_customer_order,
+    dispatch_queued_alipos_order,
     expire_due_payment_orders,
     list_recoverable_alipos_order_ids,
     list_recoverable_refund_order_ids,
@@ -837,6 +839,68 @@ async def test_alipos_create_order_rejected_response_is_status_only(status_code)
     assert exc.value.status_code == status_code
     assert "customer-secret" not in str(exc.value)
     client.request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_definite_rejection_logging_excludes_provider_context(
+    db_session,
+    caplog,
+):
+    user = await _customer(db_session)
+    order = await _queued_order(
+        db_session,
+        user,
+        payment_method="cash",
+        payment_status=None,
+    )
+    provider_url = "https://provider-url-secret.example/order"
+    provider_token = "provider-token-secret"
+    provider_body = "provider-body-secret"
+    response = httpx.Response(
+        400,
+        json={"detail": provider_body},
+        request=httpx.Request(
+            "POST",
+            f"{provider_url}?access_token={provider_token}",
+        ),
+    )
+    client = Mock()
+    client.request = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    @asynccontextmanager
+    async def session_override():
+        yield db_session
+
+    with (
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": CASH_PAYMENT_ID, "title": "Наличные"}]
+            ),
+        ),
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value=provider_token),
+        ),
+        patch("app.services.alipos_api.httpx.AsyncClient", return_value=client),
+        patch("app.services.order_service.async_session", session_override),
+        caplog.at_level("WARNING", logger="app.services.order_service"),
+    ):
+        await dispatch_queued_alipos_order(order.id)
+
+    dispatch_record = next(
+        record
+        for record in caplog.records
+        if record.name == "app.services.order_service"
+        and record.getMessage() == "alipos_dispatch_rejected"
+    )
+    assert dispatch_record.exc_info is None
+    assert dispatch_record.local_order_id == str(order.id)
+    assert provider_url not in caplog.text
+    assert provider_token not in caplog.text
+    assert provider_body not in caplog.text
 
 
 @pytest.mark.asyncio

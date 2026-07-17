@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
+import pytest_asyncio
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 from app.main import register_telegram_webhook
@@ -23,6 +27,41 @@ def webhook_db_session(db_session, monkeypatch):
 
     monkeypatch.setattr(webhooks_router, "async_session", _session_override)
     return db_session
+
+
+@pytest_asyncio.fixture
+async def webhook_race_sessions(db_session, monkeypatch):
+    _ = db_session  # Ensure the test schema exists before opening new connections.
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    sessions = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    created_user_ids: list[int] = []
+    webhook_session_ids: list[int] = []
+
+    @asynccontextmanager
+    async def webhook_session():
+        async with sessions() as session:
+            webhook_session_ids.append(id(session))
+            yield session
+
+    monkeypatch.setattr(webhooks_router, "async_session", webhook_session)
+    try:
+        yield sessions, created_user_ids, webhook_session_ids
+    finally:
+        if created_user_ids:
+            async with sessions() as cleanup_db:
+                await cleanup_db.execute(
+                    delete(Order).where(Order.user_id.in_(created_user_ids))
+                )
+                await cleanup_db.execute(
+                    delete(User).where(User.telegram_id.in_(created_user_ids))
+                )
+                await cleanup_db.commit()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -223,140 +262,169 @@ def _mock_alipos_client(request: AsyncMock) -> Mock:
 @pytest.mark.asyncio
 async def test_paid_submit_success_preserves_status_webhook_that_wins_race(
     client,
-    webhook_db_session,
+    webhook_race_sessions,
     monkeypatch,
 ):
     monkeypatch.setattr(settings, "alipos_api_client_id", "client")
     monkeypatch.setattr(settings, "alipos_api_client_secret", "secret")
-    order = await _paid_alipos_order(webhook_db_session)
-    provider_order_id = uuid.uuid4()
-    request_started = asyncio.Event()
-    release_request = asyncio.Event()
+    sessions, created_user_ids, webhook_session_ids = webhook_race_sessions
 
-    async def blocked_request(*_args, **_kwargs):
-        request_started.set()
-        await release_request.wait()
-        return httpx.Response(
-            200,
-            json={"result": "OK", "orderId": str(provider_order_id)},
-            request=httpx.Request("POST", "https://alipos.example/order"),
+    async with sessions() as submission_db:
+        order = await _paid_alipos_order(submission_db)
+        created_user_ids.append(order.user_id)
+        provider_order_id = uuid.uuid4()
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+
+        async def blocked_request(*_args, **_kwargs):
+            request_started.set()
+            await release_request.wait()
+            return httpx.Response(
+                200,
+                json={"result": "OK", "orderId": str(provider_order_id)},
+                request=httpx.Request("POST", "https://alipos.example/order"),
+            )
+
+        request = AsyncMock(side_effect=blocked_request)
+        monkeypatch.setattr(
+            alipos_api,
+            "get_payment_methods",
+            AsyncMock(
+                return_value=[{"id": str(uuid.uuid4()), "title": "online-order"}]
+            ),
+        )
+        monkeypatch.setattr(alipos_api, "_get_token", AsyncMock(return_value="token"))
+        monkeypatch.setattr(
+            alipos_api.httpx,
+            "AsyncClient",
+            Mock(return_value=_mock_alipos_client(request)),
         )
 
-    request = AsyncMock(side_effect=blocked_request)
-    monkeypatch.setattr(
-        alipos_api,
-        "get_payment_methods",
-        AsyncMock(return_value=[{"id": str(uuid.uuid4()), "title": "online-order"}]),
-    )
-    monkeypatch.setattr(alipos_api, "_get_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(
-        alipos_api.httpx,
-        "AsyncClient",
-        Mock(return_value=_mock_alipos_client(request)),
-    )
+        submit = asyncio.create_task(
+            order_service.submit_order_to_alipos(submission_db, order)
+        )
+        try:
+            await asyncio.wait_for(request_started.wait(), timeout=1)
+            assert order.alipos_sync_status == "sending"
 
-    submit = asyncio.create_task(
-        order_service.submit_order_to_alipos(webhook_db_session, order)
-    )
-    await asyncio.wait_for(request_started.wait(), timeout=1)
-    await webhook_db_session.refresh(order)
-    assert order.alipos_sync_status == "sending"
+            response = await client.post(
+                "/api/webhooks/order-status",
+                json={
+                    "eatsId": order.alipos_eats_id,
+                    "status": "ACCEPTED_BY_RESTAURANT",
+                    "orderNumber": "A-42",
+                },
+                headers={"clientId": "client", "clientSecret": "secret"},
+            )
+            assert response.status_code == 200
+            assert webhook_session_ids[-1] != id(submission_db)
+            async with sessions() as observer_db:
+                persisted = await observer_db.get(Order, order.id)
+                assert persisted is not None
+                assert persisted.status == "ACCEPTED_BY_RESTAURANT"
+                assert persisted.order_number == "A-42"
+            assert order.status == "PAID_AWAITING_RESTAURANT"
+            assert order.order_number is None
 
-    response = await client.post(
-        "/api/webhooks/order-status",
-        json={
-            "eatsId": order.alipos_eats_id,
-            "status": "ACCEPTED_BY_RESTAURANT",
-            "orderNumber": "A-42",
-        },
-        headers={"clientId": "client", "clientSecret": "secret"},
-    )
-    await webhook_db_session.refresh(order)
-    assert response.status_code == 200
-    assert order.status == "ACCEPTED_BY_RESTAURANT"
-    assert order.order_number == "A-42"
+            release_request.set()
+            await submit
 
-    release_request.set()
-    await submit
-    await webhook_db_session.refresh(order)
-
-    request.assert_awaited_once()
-    assert order.alipos_sync_status == "synced"
-    assert order.alipos_order_id == provider_order_id
-    assert order.status == "ACCEPTED_BY_RESTAURANT"
-    assert order.order_number == "A-42"
+            request.assert_awaited_once()
+            assert order.alipos_sync_status == "synced"
+            assert order.alipos_order_id == provider_order_id
+            assert order.status == "ACCEPTED_BY_RESTAURANT"
+            assert order.order_number == "A-42"
+        finally:
+            release_request.set()
+            if not submit.done():
+                await asyncio.gather(submit, return_exceptions=True)
 
 
 @pytest.mark.asyncio
 async def test_paid_submit_unknown_preserves_status_webhook_that_wins_race(
     client,
-    webhook_db_session,
+    webhook_race_sessions,
     monkeypatch,
 ):
     monkeypatch.setattr(settings, "alipos_api_client_id", "client")
     monkeypatch.setattr(settings, "alipos_api_client_secret", "secret")
-    order = await _paid_alipos_order(webhook_db_session)
-    request_started = asyncio.Event()
-    release_request = asyncio.Event()
+    sessions, created_user_ids, webhook_session_ids = webhook_race_sessions
 
-    async def blocked_request(*_args, **_kwargs):
-        request_started.set()
-        await release_request.wait()
-        return httpx.Response(
-            502,
-            json={"detail": "provider-secret"},
-            request=httpx.Request("POST", "https://alipos.example/order"),
+    async with sessions() as submission_db:
+        order = await _paid_alipos_order(submission_db)
+        created_user_ids.append(order.user_id)
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+
+        async def blocked_request(*_args, **_kwargs):
+            request_started.set()
+            await release_request.wait()
+            return httpx.Response(
+                502,
+                json={"detail": "provider-secret"},
+                request=httpx.Request("POST", "https://alipos.example/order"),
+            )
+
+        request = AsyncMock(side_effect=blocked_request)
+        refund = AsyncMock()
+        monkeypatch.setattr(
+            alipos_api,
+            "get_payment_methods",
+            AsyncMock(
+                return_value=[{"id": str(uuid.uuid4()), "title": "online-order"}]
+            ),
         )
+        monkeypatch.setattr(alipos_api, "_get_token", AsyncMock(return_value="token"))
+        monkeypatch.setattr(
+            alipos_api.httpx,
+            "AsyncClient",
+            Mock(return_value=_mock_alipos_client(request)),
+        )
+        monkeypatch.setattr(order_service.multicard_api, "refund_payment", refund)
 
-    request = AsyncMock(side_effect=blocked_request)
-    refund = AsyncMock()
-    monkeypatch.setattr(
-        alipos_api,
-        "get_payment_methods",
-        AsyncMock(return_value=[{"id": str(uuid.uuid4()), "title": "online-order"}]),
-    )
-    monkeypatch.setattr(alipos_api, "_get_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(
-        alipos_api.httpx,
-        "AsyncClient",
-        Mock(return_value=_mock_alipos_client(request)),
-    )
-    monkeypatch.setattr(order_service.multicard_api, "refund_payment", refund)
+        submit = asyncio.create_task(
+            order_service.submit_order_to_alipos(submission_db, order)
+        )
+        try:
+            await asyncio.wait_for(request_started.wait(), timeout=1)
 
-    submit = asyncio.create_task(
-        order_service.submit_order_to_alipos(webhook_db_session, order)
-    )
-    await asyncio.wait_for(request_started.wait(), timeout=1)
+            response = await client.post(
+                "/api/webhooks/order-status",
+                json={
+                    "eatsId": order.alipos_eats_id,
+                    "status": "ACCEPTED_BY_RESTAURANT",
+                    "orderNumber": "A-43",
+                },
+                headers={"clientId": "client", "clientSecret": "secret"},
+            )
+            assert response.status_code == 200
+            assert webhook_session_ids[-1] != id(submission_db)
+            async with sessions() as observer_db:
+                persisted = await observer_db.get(Order, order.id)
+                assert persisted is not None
+                assert persisted.status == "ACCEPTED_BY_RESTAURANT"
+                assert persisted.order_number == "A-43"
+            assert order.status == "PAID_AWAITING_RESTAURANT"
+            assert order.order_number is None
 
-    response = await client.post(
-        "/api/webhooks/order-status",
-        json={
-            "eatsId": order.alipos_eats_id,
-            "status": "ACCEPTED_BY_RESTAURANT",
-            "orderNumber": "A-43",
-        },
-        headers={"clientId": "client", "clientSecret": "secret"},
-    )
-    await webhook_db_session.refresh(order)
-    assert response.status_code == 200
-    assert order.status == "ACCEPTED_BY_RESTAURANT"
-    assert order.order_number == "A-43"
+            release_request.set()
+            await submit
+            assert await order_service._submit_queued_alipos_order(
+                submission_db,
+                order.id,
+            ) is None
 
-    release_request.set()
-    await submit
-    assert await order_service._submit_queued_alipos_order(
-        webhook_db_session,
-        order.id,
-    ) is None
-    await webhook_db_session.refresh(order)
-
-    request.assert_awaited_once()
-    refund.assert_not_awaited()
-    assert order.alipos_sync_status == "unknown"
-    assert order.payment_status == "paid"
-    assert order.refund_sync_status is None
-    assert order.status == "ACCEPTED_BY_RESTAURANT"
-    assert order.order_number == "A-43"
+            request.assert_awaited_once()
+            refund.assert_not_awaited()
+            assert order.alipos_sync_status == "unknown"
+            assert order.payment_status == "paid"
+            assert order.refund_sync_status is None
+            assert order.status == "ACCEPTED_BY_RESTAURANT"
+            assert order.order_number == "A-43"
+        finally:
+            release_request.set()
+            if not submit.done():
+                await asyncio.gather(submit, return_exceptions=True)
 
 
 def _signed_callback(

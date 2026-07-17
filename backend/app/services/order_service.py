@@ -374,7 +374,10 @@ async def dispatch_queued_alipos_order(order_id: uuid.UUID) -> None:
         try:
             await _submit_queued_alipos_order(db, order_id)
         except OrderSubmissionRejected:
-            logger.exception("AliPOS rejected queued local order %s", order_id)
+            logger.warning(
+                "alipos_dispatch_rejected",
+                extra={"local_order_id": str(order_id)},
+            )
 
 
 async def recover_queued_alipos_orders() -> None:
