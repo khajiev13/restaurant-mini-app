@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCartStore } from '../../stores/cartStore';
+import { useMenuStore } from '../../stores/menuStore';
 import { useTableOrderStore } from '../../stores/tableOrderStore';
 import type { CreateOrderPayload } from '../../types/api';
 import ArtisanCheckoutPage from './ArtisanCheckoutPage';
@@ -11,6 +12,7 @@ const apiMocks = vi.hoisted(() => ({
   createAddress: vi.fn(),
   createOrder: vi.fn(),
   getAddresses: vi.fn(),
+  getMenu: vi.fn(),
   getMe: vi.fn(),
 }));
 
@@ -58,6 +60,12 @@ describe('ArtisanCheckoutPage table mode', () => {
     });
     apiMocks.getAddresses.mockResolvedValue({ data: { data: [] } });
     useCartStore.setState({ items: [item] });
+    useMenuStore.setState({
+      menu: null,
+      loading: false,
+      loaded: false,
+      error: null,
+    });
     useTableOrderStore.setState({
       context: {
         tableTitle: 'Stol 12',
@@ -250,6 +258,74 @@ describe('ArtisanCheckoutPage table mode', () => {
     expect(retryPayload.client_request_id).toBe(firstPayload.client_request_id);
     expect(screen.getByTestId('location')).toHaveTextContent('/checkout');
     expect(useCartStore.getState().items).toEqual([item]);
+  });
+
+  it('requires_a_second_click_after_server_price_conflict', async () => {
+    const user = userEvent.setup();
+    apiMocks.createOrder
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: {
+            detail: {
+              code: 'cart_conflict',
+              changes: [{ id: item.id, reason: 'price_changed' }],
+            },
+          },
+        },
+      })
+      .mockRejectedValueOnce({ code: 'ECONNABORTED' });
+    apiMocks.getMenu.mockResolvedValue({
+      data: {
+        data: {
+          categories: [{ id: 'somsa', name: 'Somsa', sortOrder: 0 }],
+          items: [{
+            id: item.id,
+            categoryId: item.categoryId,
+            name: item.name,
+            description: item.description,
+            price: 20000,
+            sortOrder: item.sortOrder,
+            available: true,
+            availableCount: null,
+          }],
+        },
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <LocationProbe />
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    const placeOrder = await screen.findByRole('button', {
+      name: /place order|buyurtmani qabul qilish/i,
+    });
+    await user.click(placeOrder);
+
+    await waitFor(() => expect(apiMocks.getMenu).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(placeOrder).toBeEnabled());
+    expect(apiMocks.createOrder).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('location')).toHaveTextContent('/checkout');
+    expect(useCartStore.getState().items).toEqual([
+      expect.objectContaining({ id: item.id, quantity: 2, price: 20000 }),
+    ]);
+    expect(useCartStore.getState().getTotal()).toBe(40000);
+    expect(screen.getAllByText(/40.?000/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/44.?000/).length).toBeGreaterThan(0);
+
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+    expect(firstPayload.items[0].price).toBe(18000);
+
+    await user.click(placeOrder);
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+
+    const confirmedPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(confirmedPayload.items[0].price).toBe(20000);
+    expect(confirmedPayload.client_request_id).not.toBe(firstPayload.client_request_id);
+    await waitFor(() => expect(placeOrder).toBeEnabled());
+    expect(screen.getByTestId('location')).toHaveTextContent('/checkout');
   });
 
   it('rejects_a_nominal_success_body_for_submission_failed_order', async () => {

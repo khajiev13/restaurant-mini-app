@@ -1,5 +1,4 @@
 import uuid
-from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -62,30 +61,62 @@ async def test_customer_menu_merges_stoplist_without_mutating_cached_menu(
 
 
 @pytest.mark.asyncio
-async def test_price_cart_uses_current_server_name_and_price(db_session, monkeypatch):
+async def test_price_cart_rejects_stale_item_price(db_session, monkeypatch):
     monkeypatch.setattr(alipos_api, "get_menu", AsyncMock(return_value=MENU))
 
-    priced = await price_cart(
-        db_session,
-        [
-            {
-                "id": str(ITEM_ID),
-                "name": "Stale name",
-                "quantity": 2,
-                "price": 1,
-                "modifications": [],
-            }
-        ],
-    )
+    with pytest.raises(CartConflict) as exc_info:
+        await price_cart(
+            db_session,
+            [
+                {
+                    "id": str(ITEM_ID),
+                    "name": "Stale name",
+                    "quantity": 2,
+                    "price": 17000,
+                    "modifications": [],
+                }
+            ],
+        )
 
-    assert priced.items_cost == Decimal("36000")
-    assert priced.items[0] == {
-        "id": str(ITEM_ID),
-        "name": "Classic Somsa",
-        "quantity": 2.0,
-        "price": 18000.0,
-        "modifications": [],
+    assert exc_info.value.changes == [
+        {"id": str(ITEM_ID), "reason": "price_changed"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_price_cart_rejects_stale_modifier_price(db_session, monkeypatch):
+    modifier_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+    menu = {
+        **MENU,
+        "items": [{
+            **MENU["items"][0],
+            "modifierGroups": [{
+                "id": "group-1",
+                "modifiers": [
+                    {"id": str(modifier_id), "name": "Cheese", "price": 2000}
+                ],
+            }],
+        }],
     }
+    monkeypatch.setattr(alipos_api, "get_menu", AsyncMock(return_value=menu))
+
+    with pytest.raises(CartConflict) as exc_info:
+        await price_cart(db_session, [{
+            "id": str(ITEM_ID),
+            "quantity": 1,
+            "price": 18000,
+            "modifications": [{
+                "id": str(modifier_id),
+                "quantity": 1,
+                "price": 1500,
+            }],
+        }])
+
+    assert exc_info.value.changes == [{
+        "id": str(ITEM_ID),
+        "modifierId": str(modifier_id),
+        "reason": "price_changed",
+    }]
 
 
 @pytest.mark.asyncio
@@ -184,7 +215,12 @@ async def test_price_cart_rejects_unavailable_live_modifier(db_session, monkeypa
         await price_cart(db_session, [{
             "id": str(ITEM_ID),
             "quantity": 1,
-            "modifications": [{"id": str(modifier_id), "quantity": 1}],
+            "price": 18000,
+            "modifications": [{
+                "id": str(modifier_id),
+                "quantity": 1,
+                "price": 2000,
+            }],
         }])
 
     assert exc_info.value.changes == [{

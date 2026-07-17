@@ -524,3 +524,78 @@ async def test_client_request_id_replay_while_submission_sending_is_not_reported
     assert len(orders) == 1
     create.assert_awaited_once()
     refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payment_method", ["cash", "rahmat"])
+async def test_repriced_cart_has_no_order_or_provider_side_effects(
+    client,
+    db_session,
+    payment_method,
+):
+    request_id = uuid.uuid4()
+    user, body = await _delivery_order_request(
+        db_session,
+        telegram_id=6207,
+        client_request_id=request_id,
+    )
+    body["payment_method"] = payment_method
+    body["items"][0]["price"] = 17000
+    current_menu = {
+        "categories": [],
+        "items": [{
+            "id": "menu-item-1",
+            "name": "Classic Somsa",
+            "price": 18000,
+            "modifierGroups": [],
+        }],
+    }
+    alipos_create = AsyncMock(return_value={"orderId": str(uuid.uuid4())})
+    multicard_invoice = AsyncMock(return_value={
+        "uuid": str(uuid.uuid4()),
+        "checkout_url": "https://pay.example/checkout",
+    })
+
+    with (
+        patch(
+            "app.services.menu_catalog_service.alipos_api.get_menu",
+            new=AsyncMock(return_value=current_menu),
+        ),
+        patch(
+            "app.services.menu_catalog_service.alipos_api.get_menu_availability",
+            new=AsyncMock(return_value={"items": [], "modifiers": []}),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": CASH_PAYMENT_ID, "title": "Наличные"}]
+            ),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.create_order",
+            new=alipos_create,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.create_invoice",
+            new=multicard_invoice,
+        ),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json=body,
+        )
+
+    result = await db_session.execute(
+        select(Order).where(Order.client_request_id == request_id)
+    )
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "cart_conflict",
+            "changes": [{"id": "menu-item-1", "reason": "price_changed"}],
+        }
+    }
+    assert result.scalar_one_or_none() is None
+    alipos_create.assert_not_awaited()
+    multicard_invoice.assert_not_awaited()

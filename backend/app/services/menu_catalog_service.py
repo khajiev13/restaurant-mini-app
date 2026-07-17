@@ -198,6 +198,10 @@ async def price_cart(db: AsyncSession, requested_items: Iterable[Any]) -> Priced
         if item_price is None or item_price < 0:
             changes.append({"id": item_id, "reason": "invalid_menu_price"})
             continue
+        submitted_item_price = _as_decimal(_value(requested_item, "price"))
+        if submitted_item_price != item_price:
+            changes.append({"id": item_id, "reason": "price_changed"})
+            continue
 
         modifier_catalog = _modifier_catalog(menu_item)
         priced_modifiers: list[dict[str, Any]] = []
@@ -222,6 +226,13 @@ async def price_cart(db: AsyncSession, requested_items: Iterable[Any]) -> Priced
             if modifier_price is None or modifier_price < 0:
                 changes.append(
                     {"id": item_id, "modifierId": modifier_id, "reason": "invalid_modifier"}
+                )
+                invalid_modifier = True
+                continue
+            submitted_modifier_price = _as_decimal(_value(requested_modifier, "price"))
+            if submitted_modifier_price != modifier_price:
+                changes.append(
+                    {"id": item_id, "modifierId": modifier_id, "reason": "price_changed"}
                 )
                 invalid_modifier = True
                 continue
