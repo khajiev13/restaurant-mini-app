@@ -1,5 +1,4 @@
 import datetime
-import re
 import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
@@ -111,22 +110,41 @@ async def test_directory_rejects_invalid_service_percent(service_percent):
             await get_table_directory()
 
 
-def test_table_codes_are_stable_six_character_crockford_values():
+def test_numeric_start_parameter_round_trips_with_qr2_signature():
     service = _service()
 
-    code = service.build_manual_code(TABLE_ID)
+    start_param = service.build_start_param(_entry())
+    parsed = service.parse_start_param(start_param)
 
-    assert code == service.build_manual_code(TABLE_ID)
-    assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{6}", code)
+    assert start_param.startswith("t2_12_")
+    assert parsed.code == "12"
+    assert parsed.legacy is False
 
 
-def test_tampered_start_parameter_is_rejected():
+def test_tampered_numeric_start_parameter_is_rejected():
     service = _service()
-    start_param = service.build_start_param(TABLE_ID)
-
+    start_param = service.build_start_param(_entry())
     replacement = "0" if start_param[-1] != "0" else "1"
+
     with pytest.raises(InvalidTableEntry, match="Invalid table QR"):
         service.parse_start_param(start_param[:-1] + replacement)
+
+
+def test_legacy_signed_qr_still_resolves_to_current_numeric_context():
+    service = _service()
+    start_param = service.build_legacy_start_param(TABLE_ID)
+
+    resolution = service.resolve_start_param(start_param, [_entry()])
+
+    assert start_param.startswith("t_")
+    assert resolution.table_title == "Stol 12"
+    assert resolution.manual_code == "12"
+
+
+@pytest.mark.parametrize("code", ["12", "000012"])
+def test_numeric_manual_code_normalizes_and_resolves(code):
+    resolution = _service().resolve_manual_code(code, [_entry()])
+    assert resolution.manual_code == "12"
 
 
 def test_access_token_round_trip_and_expiry():
@@ -145,11 +163,12 @@ def test_access_token_round_trip_and_expiry():
         service.verify_access_token(token, now=issued_at + datetime.timedelta(hours=9))
 
 
-def test_resolve_code_returns_safe_table_context():
+def test_resolve_manual_code_returns_safe_table_context():
     service = _service()
-    resolution = service.resolve_code(service.build_manual_code(TABLE_ID), [_entry()])
+    resolution = service.resolve_manual_code("12", [_entry()])
 
     assert resolution.table_title == "Stol 12"
     assert resolution.hall_title == "Asosiy zal"
     assert resolution.service_percent == Decimal("10")
+    assert resolution.manual_code == "12"
     assert str(TABLE_ID) not in resolution.access_token

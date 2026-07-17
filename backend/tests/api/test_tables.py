@@ -1,5 +1,6 @@
 import datetime
 import uuid
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import Order, User
 from app.routers.tables import table_access
+from app.services.table_access_service import TableDirectoryEntry
 
 TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 HALL_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -18,11 +20,19 @@ DIRECTORY_RESPONSE = {
         {"id": str(TABLE_ID), "title": "Stol 12", "hallId": str(HALL_ID)},
     ],
 }
+DIRECTORY_ENTRY = TableDirectoryEntry(
+    table_id=TABLE_ID,
+    table_title="Stol 12",
+    hall_id=HALL_ID,
+    hall_title="Asosiy zal",
+    service_percent=Decimal("10"),
+    manual_code="12",
+)
 
 
 @pytest.mark.asyncio
 async def test_resolve_table_start_parameter_returns_customer_safe_context(client):
-    start_param = table_access.build_start_param(TABLE_ID)
+    start_param = table_access.build_start_param(DIRECTORY_ENTRY)
 
     with patch(
         "app.services.table_access_service.alipos_api.get_halls_and_tables",
@@ -35,7 +45,65 @@ async def test_resolve_table_start_parameter_returns_customer_safe_context(clien
     assert data["table_title"] == "Stol 12"
     assert data["hall_title"] == "Asosiy zal"
     assert data["service_percent"] == 10
-    assert data["manual_code"] == table_access.build_manual_code(TABLE_ID)
+    assert data["manual_code"] == "12"
+    assert str(TABLE_ID) not in response.text
+
+
+@pytest.mark.asyncio
+async def test_resolve_table_normalizes_numeric_manual_code(client):
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=DIRECTORY_RESPONSE),
+    ):
+        response = await client.post("/api/tables/resolve", json={"code": "000012"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["table_title"] == "Stol 12"
+    assert data["manual_code"] == "12"
+    assert str(TABLE_ID) not in response.text
+
+
+@pytest.mark.asyncio
+async def test_resolve_table_accepts_legacy_signed_qr(client):
+    start_param = table_access.build_legacy_start_param(TABLE_ID)
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=DIRECTORY_RESPONSE),
+    ):
+        response = await client.post("/api/tables/resolve", json={"entry": start_param})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["table_title"] == "Stol 12"
+    assert data["manual_code"] == "12"
+    assert str(TABLE_ID) not in response.text
+
+
+@pytest.mark.asyncio
+async def test_resolve_table_returns_503_for_invalid_directory(client):
+    duplicate_table_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+    invalid_directory = {
+        **DIRECTORY_RESPONSE,
+        "tables": [
+            *DIRECTORY_RESPONSE["tables"],
+            {
+                "id": str(duplicate_table_id),
+                "title": "Table 012",
+                "hallId": str(HALL_ID),
+            },
+        ],
+    }
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=invalid_directory),
+    ):
+        response = await client.post("/api/tables/resolve", json={"code": "12"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Table directory is temporarily unavailable"
     assert str(TABLE_ID) not in response.text
 
 
@@ -87,8 +155,10 @@ async def test_table_manifest_requires_admin_and_returns_deep_links(client, db_s
     assert allowed.status_code == 200
     item = allowed.json()["data"][0]
     assert item["table_title"] == "Stol 12"
-    assert item["manual_code"] == table_access.build_manual_code(TABLE_ID)
-    assert item["deep_link"].startswith("https://t.me/olotsomsa_zakaz_bot?startapp=t_")
+    assert item["manual_code"] == "12"
+    assert item["deep_link"].startswith(
+        "https://t.me/olotsomsa_zakaz_bot?startapp=t2_12_"
+    )
 
 
 @pytest.mark.asyncio
