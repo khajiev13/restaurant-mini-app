@@ -13,10 +13,24 @@ from app.services import alipos_api
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _MANUAL_CODE_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{6}$")
 _START_PARAM_RE = re.compile(r"^t_([0-9A-HJKMNP-TV-Z]{6})_([A-Za-z0-9_-]{12})$")
+_TABLE_NUMBER_RE = re.compile(r"([0-9]+)\s*$")
 
 
 class InvalidTableEntry(ValueError):
     pass
+
+
+class InvalidTableDirectory(RuntimeError):
+    pass
+
+
+def manual_code_from_title(title: str) -> str:
+    match = _TABLE_NUMBER_RE.search(title.strip())
+    if match is None or len(match.group(1)) > 6:
+        raise InvalidTableDirectory(
+            f"Table title has no one-to-six digit trailing number: {title!r}"
+        )
+    return str(int(match.group(1)))
 
 
 @dataclass(frozen=True)
@@ -26,6 +40,7 @@ class TableDirectoryEntry:
     hall_id: uuid.UUID
     hall_title: str
     service_percent: Decimal
+    manual_code: str
 
 
 @dataclass(frozen=True)
@@ -54,35 +69,55 @@ def _b64decode(value: str) -> bytes:
 
 async def get_table_directory() -> list[TableDirectoryEntry]:
     payload = await alipos_api.get_halls_and_tables()
+    if not isinstance(payload, dict):
+        raise InvalidTableDirectory("Table directory payload is not an object")
+    raw_halls = payload.get("halls")
+    raw_tables = payload.get("tables")
+    if not isinstance(raw_halls, list) or not isinstance(raw_tables, list):
+        raise InvalidTableDirectory("Table directory arrays are missing")
+
     halls: dict[uuid.UUID, tuple[str, Decimal]] = {}
-    for hall in payload.get("halls", []):
+    for hall in raw_halls:
         try:
             hall_id = uuid.UUID(str(hall["id"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-        halls[hall_id] = (
-            str(hall.get("title") or ""),
-            Decimal(str(hall.get("servicePercent") or 0)),
-        )
+            hall_title = str(hall.get("title") or "")
+            service_percent = Decimal(str(hall.get("servicePercent") or 0))
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise InvalidTableDirectory("Hall directory entry is invalid") from exc
+        if hall_id in halls:
+            raise InvalidTableDirectory("Duplicate hall identifier")
+        halls[hall_id] = (hall_title, service_percent)
 
     entries: list[TableDirectoryEntry] = []
-    for table in payload.get("tables", []):
+    table_ids: set[uuid.UUID] = set()
+    manual_codes: set[str] = set()
+    for table in raw_tables:
         try:
             table_id = uuid.UUID(str(table["id"]))
             hall_id = uuid.UUID(str(table["hallId"]))
-        except (KeyError, TypeError, ValueError):
-            continue
+            table_title = str(table.get("title") or "")
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise InvalidTableDirectory("Table directory entry is invalid") from exc
+        if table_id in table_ids:
+            raise InvalidTableDirectory("Duplicate table identifier")
         hall = halls.get(hall_id)
         if hall is None:
-            continue
+            raise InvalidTableDirectory(f"Table has unknown hall: {table_title!r}")
+        manual_code = manual_code_from_title(table_title)
+        if manual_code in manual_codes:
+            raise InvalidTableDirectory(f"Duplicate table number {manual_code}")
+
+        table_ids.add(table_id)
+        manual_codes.add(manual_code)
         hall_title, service_percent = hall
         entries.append(
             TableDirectoryEntry(
                 table_id=table_id,
-                table_title=str(table.get("title") or ""),
+                table_title=table_title,
                 hall_id=hall_id,
                 hall_title=hall_title,
                 service_percent=service_percent,
+                manual_code=manual_code,
             )
         )
     return entries

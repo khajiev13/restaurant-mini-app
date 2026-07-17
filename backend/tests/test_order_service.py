@@ -44,6 +44,7 @@ TABLE = TableDirectoryEntry(
     hall_id=HALL_ID,
     hall_title="Asosiy zal",
     service_percent=Decimal("10"),
+    manual_code="12",
 )
 
 

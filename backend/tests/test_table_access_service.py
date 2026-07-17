@@ -2,13 +2,17 @@ import datetime
 import re
 import uuid
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.services.table_access_service import (
+    InvalidTableDirectory,
     InvalidTableEntry,
     TableAccessService,
     TableDirectoryEntry,
+    get_table_directory,
+    manual_code_from_title,
 )
 
 TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -30,7 +34,55 @@ def _entry() -> TableDirectoryEntry:
         hall_id=HALL_ID,
         hall_title="Asosiy zal",
         service_percent=Decimal("10"),
+        manual_code="12",
     )
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Stol 1", "1"),
+        ("Table 12", "12"),
+        ("Stol 007", "7"),
+        ("VIP Stol 25", "25"),
+        ("Stol 000", "0"),
+    ],
+)
+def test_manual_code_uses_trailing_table_number(title, expected):
+    assert manual_code_from_title(title) == expected
+
+
+@pytest.mark.parametrize("title", ["Stol", "Stol 1234567", "Stol 12 VIP", ""])
+def test_manual_code_rejects_titles_without_one_to_six_trailing_digits(title):
+    with pytest.raises(InvalidTableDirectory):
+        manual_code_from_title(title)
+
+
+@pytest.mark.asyncio
+async def test_directory_rejects_duplicate_numeric_codes_across_halls():
+    other_hall_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+    other_table_id = uuid.UUID("44444444-4444-4444-8444-444444444444")
+    payload = {
+        "halls": [
+            {"id": str(HALL_ID), "title": "Asosiy zal", "servicePercent": 10},
+            {"id": str(other_hall_id), "title": "Terrace", "servicePercent": 15},
+        ],
+        "tables": [
+            {"id": str(TABLE_ID), "title": "Stol 12", "hallId": str(HALL_ID)},
+            {
+                "id": str(other_table_id),
+                "title": "Table 012",
+                "hallId": str(other_hall_id),
+            },
+        ],
+    }
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=payload),
+    ):
+        with pytest.raises(InvalidTableDirectory, match="Duplicate table number 12"):
+            await get_table_directory()
 
 
 def test_table_codes_are_stable_six_character_crockford_values():
