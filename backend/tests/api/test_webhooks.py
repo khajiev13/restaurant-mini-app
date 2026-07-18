@@ -13,10 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.config import settings
-from app.main import register_telegram_webhook
 from app.models.models import Order, User
 from app.routers import webhooks as webhooks_router
 from app.services import alipos_api, order_service
+from app.services.telegram_webhook_service import register_telegram_webhook
 
 
 @pytest.fixture
@@ -860,8 +860,11 @@ async def test_register_telegram_webhook_sets_when_url_matches_and_secret_is_con
     )
 
     with (
-        caplog.at_level("INFO", logger="app.main"),
-        patch("app.main.httpx.AsyncClient", return_value=client),
+        caplog.at_level("INFO", logger="app.services.telegram_webhook_service"),
+        patch(
+            "app.services.telegram_webhook_service.httpx.AsyncClient",
+            return_value=client,
+        ),
     ):
         await register_telegram_webhook()
 
@@ -889,7 +892,10 @@ async def test_register_telegram_webhook_skips_matching_url_only_when_secret_is_
         webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
     )
 
-    with patch("app.main.httpx.AsyncClient", return_value=client):
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
         await register_telegram_webhook()
 
     client.get.assert_awaited_once()
@@ -906,7 +912,10 @@ async def test_register_telegram_webhook_reapplies_changed_secret(
         webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
     )
 
-    with patch("app.main.httpx.AsyncClient", return_value=client):
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
         await register_telegram_webhook()
         monkeypatch.setattr(
             settings,
@@ -938,8 +947,11 @@ async def test_register_telegram_webhook_rejects_bot_api_ok_false(
     )
 
     with (
-        caplog.at_level("WARNING", logger="app.main"),
-        patch("app.main.httpx.AsyncClient", return_value=client),
+        caplog.at_level("WARNING", logger="app.services.telegram_webhook_service"),
+        patch(
+            "app.services.telegram_webhook_service.httpx.AsyncClient",
+            return_value=client,
+        ),
         pytest.raises(
             RuntimeError,
             match="telegram_webhook_registration_failed",
@@ -964,8 +976,11 @@ async def test_register_telegram_webhook_configured_secret_failure_aborts_startu
     client.post.side_effect = RuntimeError(telegram_startup_config["provider_body"])
 
     with (
-        caplog.at_level("WARNING", logger="app.main"),
-        patch("app.main.httpx.AsyncClient", return_value=client),
+        caplog.at_level("WARNING", logger="app.services.telegram_webhook_service"),
+        patch(
+            "app.services.telegram_webhook_service.httpx.AsyncClient",
+            return_value=client,
+        ),
         pytest.raises(
             RuntimeError,
             match="telegram_webhook_registration_failed",
@@ -996,7 +1011,10 @@ async def test_register_telegram_webhook_sets_when_url_differs(
         }
     )
 
-    with patch("app.main.httpx.AsyncClient", return_value=client):
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
         await register_telegram_webhook()
 
     client.post.assert_awaited_once_with(
@@ -1022,7 +1040,10 @@ async def test_register_telegram_webhook_sets_when_allowed_updates_differ(
         }
     )
 
-    with patch("app.main.httpx.AsyncClient", return_value=client):
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
         await register_telegram_webhook()
 
     client.post.assert_awaited_once()
