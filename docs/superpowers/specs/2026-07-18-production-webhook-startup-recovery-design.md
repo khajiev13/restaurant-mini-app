@@ -225,10 +225,12 @@ Post-deployment checks cover:
 ## Rollback
 
 Rollback uses the prepared fallback backend image from pinned source `81489d1`
-and the prepared Git rollback commit whose tree matches the pre-candidate
-production tree. The already unhealthy image that was running when the recovery
-began is evidence only and is never selected as the rollback image. If the
-candidate backend does not become healthy or any acceptance check fails:
+and the prepared Git rollback commit whose tree exactly matches `81489d1` while
+its parent is the candidate SHA. This makes an emergency rollback a non-force
+fast-forward on `prod` and keeps the server checkout aligned with the fallback
+image. The already unhealthy image that was running when the recovery began is
+evidence only and is never selected as the rollback image. If the candidate
+backend does not become healthy or any acceptance check fails:
 
 1. keep PostgreSQL, frontend, Caddy, tunnel, and BitAgent untouched;
 2. retag and restore the recorded fallback backend image by immutable image ID
