@@ -35,6 +35,12 @@ from both Uvicorn worker startup hooks. The current fail-closed behavior turns a
 redundant or concurrent registration failure in either worker into a complete
 backend restart.
 
+The host retains only the unhealthy newer backend image. It has no older
+restaurant backend image that can be used as a rollback target. Rollback
+preparation must therefore build and immutably tag a fallback backend image from
+the pinned `81489d1` source before the production checkout moves to the
+candidate. The fallback image is not started during a successful release.
+
 ## Scope
 
 This recovery includes:
@@ -171,9 +177,10 @@ No test may call the live Telegram API or use production credentials.
 ### Release verification
 
 Before production changes, pin and record the exact pre-release production SHA,
-candidate SHA, running image IDs, current database schema state, supervisor
-state, and any deploy-watcher state. Verify that the candidate is the exact
-production base plus only the approved recovery changes and this documentation.
+candidate SHA, running image IDs, current database schema state, scheduled-task
+and supervisor state, and the absence or presence of any other deploy watcher.
+Verify that the candidate is the exact production base plus only the approved
+recovery changes and this documentation.
 
 The production database is checked against the four migrations already present
 on `origin/prod`. No new migration is introduced. Any missing existing migration
@@ -181,20 +188,27 @@ is applied through its idempotent release procedure before the candidate backend
 starts; table rows or customer data are never printed.
 
 The exact candidate must pass repository CI before deployment. The Windows
-scheduled task and any WSL deploy watcher are paused only for the bounded
-cutover so they cannot race the manual checkout or backend recreation.
+scheduled task and its WSL supervisor are paused only for the bounded cutover so
+they cannot race the manual checkout or backend recreation. This host does not
+run systemd as PID 1, so the older `deploy-watcher.service` procedure is not a
+valid control path unless a fresh inspection proves that the host architecture
+has changed.
 
 Production deployment then:
 
-1. tags or otherwise records the current backend image for rollback;
-2. fast-forwards the clean production checkout to the exact candidate SHA;
-3. builds the backend image once;
-4. recreates only `restaurant_backend` without rebuilding or recreating
+1. while the checkout is still pinned at `81489d1`, builds one fallback backend
+   image, gives it a unique immutable rollback tag, and records its image ID;
+2. verifies that the fallback image was built from the pinned source and keeps
+   it stopped;
+3. fast-forwards the clean production checkout to the exact candidate SHA;
+4. builds the candidate backend image once;
+5. recreates only `restaurant_backend` without rebuilding or recreating
    PostgreSQL, frontend, Caddy, Cloudflare, or BitAgent;
-5. waits for the backend health check;
-6. confirms the running container uses the candidate backend image;
-7. resumes the existing supervisor and deploy watcher only after an equal-SHA
-   no-op check.
+6. waits for the backend health check;
+7. confirms the running container uses the candidate backend image;
+8. re-enables and starts the existing Windows scheduled task, then confirms its
+   supervisor performs an equal-SHA, no-rebuild Compose check without replacing
+   healthy containers.
 
 Post-deployment checks cover:
 
@@ -210,12 +224,15 @@ Post-deployment checks cover:
 
 ## Rollback
 
-Rollback uses the recorded pre-release backend image and pre-release checkout
-SHA. If the candidate backend does not become healthy or any acceptance check
-fails:
+Rollback uses the prepared fallback backend image from pinned source `81489d1`
+and the prepared Git rollback commit whose tree matches the pre-candidate
+production tree. The already unhealthy image that was running when the recovery
+began is evidence only and is never selected as the rollback image. If the
+candidate backend does not become healthy or any acceptance check fails:
 
 1. keep PostgreSQL, frontend, Caddy, tunnel, and BitAgent untouched;
-2. restore the recorded backend image without rebuilding it;
+2. retag and restore the recorded fallback backend image by immutable image ID
+   without rebuilding it;
 3. reconcile the production checkout to the recorded rollback commit through a
    non-force production fast-forward or the repository's prepared rollback
    mechanism;
@@ -236,6 +253,8 @@ rebuilds an old image from a mutable checkout.
   authorization and read/write boundaries.
 - PostgreSQL data, the healthy frontend, Caddy, Cloudflare tunnel, and BitAgent
   are preserved.
+- A stopped, immutable fallback backend image exists before the candidate
+  checkout or container is changed.
 - Local and public restaurant health checks remain HTTP 200 throughout the
   bounded stability observation after cutover.
 - The deployed checkout SHA and backend image match the tested candidate.
