@@ -7,6 +7,18 @@ from app.main import app
 from app.services.telegram_webhook_service import register_telegram_webhook
 
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
+EXPECTED_UVICORN_COMMAND = [
+    "uvicorn",
+    "app.main:app",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "8000",
+    "--workers",
+    "2",
+    "--proxy-headers",
+    "--forwarded-allow-ips=*",
+]
 
 
 def test_entrypoint_registers_once_before_exec(monkeypatch):
@@ -23,7 +35,7 @@ def test_entrypoint_registers_once_before_exec(monkeypatch):
     monkeypatch.setattr(container_entrypoint.os, "execvp", exec_once)
     with pytest.raises(SystemExit, match="0"):
         container_entrypoint.main()
-    assert events == ["register", ("uvicorn", container_entrypoint.UVICORN_COMMAND)]
+    assert events == ["register", ("uvicorn", EXPECTED_UVICORN_COMMAND)]
 
 
 def test_entrypoint_does_not_exec_after_registration_failure(monkeypatch):
