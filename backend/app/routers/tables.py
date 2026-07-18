@@ -14,7 +14,11 @@ from app.schemas.table import (
     TableResolveRequest,
 )
 from app.services.permissions import require_admin
-from app.services.table_access_service import InvalidTableEntry, TableAccessService
+from app.services.table_access_service import (
+    InvalidTableDirectory,
+    InvalidTableEntry,
+    TableAccessService,
+)
 
 router = APIRouter(prefix="/tables", tags=["tables"])
 
@@ -23,6 +27,14 @@ table_access = TableAccessService(
     bot_username=settings.telegram_bot_username,
     access_ttl_seconds=settings.table_access_ttl_seconds,
 )
+TABLE_DIRECTORY_UNAVAILABLE = "Table directory is temporarily unavailable"
+
+
+def _directory_unavailable(exc: InvalidTableDirectory) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=TABLE_DIRECTORY_UNAVAILABLE,
+    )
 
 
 def _context_response(resolved) -> dict:
@@ -39,6 +51,8 @@ def _context_response(resolved) -> dict:
 async def resolve_table(body: TableResolveRequest) -> ApiResponse:
     try:
         resolved = await table_access.resolve(body.entry, body.code)
+    except InvalidTableDirectory as exc:
+        raise _directory_unavailable(exc) from exc
     except InvalidTableEntry as exc:
         message = str(exc)
         code = (
@@ -82,6 +96,8 @@ async def restore_table(
             order.table_id,
             order.table_access_expires_at,
         )
+    except InvalidTableDirectory as exc:
+        raise _directory_unavailable(exc) from exc
     except InvalidTableEntry as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -93,8 +109,12 @@ async def restore_table(
 @router.get("/manifest")
 async def get_table_manifest(current_user: CurrentUserDep) -> ApiResponse:
     require_admin(current_user)
+    try:
+        manifest = await table_access.manifest()
+    except InvalidTableDirectory as exc:
+        raise _directory_unavailable(exc) from exc
     items = [
         TableManifestItem.model_validate(item).model_dump()
-        for item in await table_access.manifest()
+        for item in manifest
     ]
     return ApiResponse(success=True, data=items)
