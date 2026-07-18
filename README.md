@@ -247,7 +247,7 @@ restaurant-mini-app/
 | `DELETE` | `/api/orders/{id}` | JWT | Cancel the customer's new table order |
 | `POST` | `/api/orders/{id}/switch-to-cash` | JWT | Cancel an unpaid invoice, then submit the table order as cash |
 | `POST` | `/api/orders/{id}/retry-payment` | JWT | Create a new checkout after a definite payment failure or confirmed expiry |
-| `POST` | `/api/tables/resolve` | — | Resolve a signed QR entry or six-character manual table code |
+| `POST` | `/api/tables/resolve` | — | Resolve a signed QR entry or numeric manual table code |
 | `POST` | `/api/tables/restore/{order_id}` | JWT | Restore safe table context before its original QR session expires |
 | `GET` | `/api/tables/manifest` | Admin JWT | Generate current table deep links and manual codes |
 | `POST` | `/api/webhooks/order-status` | — | Receive AliPOS status updates |
@@ -269,14 +269,27 @@ restaurant-mini-app/
 
 ## QR Table Ordering
 
-Each physical table gets a Telegram deep link from the admin-only manifest plus its six-character fallback code. Generate the current manifest after the app is configured:
+Each physical table uses its number as the manual code: for example, `Stoll 12` uses manual code `12`. New manifest links use signed `t2_` start parameters; existing signed `t_` links remain compatible. Table-number gaps are valid, including the intentionally absent table `9`.
+
+Install the development dependencies, keep the admin JWT in the environment, and download the current manifest without writing the JWT into a command-line argument or file:
 
 ```bash
-curl -H "Authorization: Bearer $ADMIN_JWT" \
-  "$PUBLIC_APP_URL/api/tables/manifest"
+backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
+
+test -n "$ADMIN_JWT"
+backend/.venv/bin/python -c 'import os, urllib.request; from pathlib import Path; request = urllib.request.Request("https://restaurant.labtutor.app/api/tables/manifest", headers={"Authorization": "Bearer " + os.environ["ADMIN_JWT"]}); Path("/private/tmp/olot-table-manifest.json").write_bytes(urllib.request.urlopen(request, timeout=30).read())'
+
+backend/.venv/bin/python scripts/generate_table_qr_pngs.py \
+  --manifest /private/tmp/olot-table-manifest.json \
+  --public-base https://restaurant.labtutor.app \
+  --output /private/tmp/olot-table-qr-pngs
 ```
 
-Encode each item's `deep_link` as the table QR and print its `manual_code` next to it. A scan opens the existing menu with a session-scoped table context. Customers at the same table keep separate carts and orders; they never see a shared table bill.
+The generator checks both public health endpoints and resolves every signed manifest entry against the deployed API before rendering. It then decodes every generated symbol and delivers the folder atomically only when every decoded destination exactly matches its manifest deep link. It refuses to overwrite an existing output directory.
+
+The output directory contains only raw, opaque, black-on-white PNG QR symbols named for the manifest's table numbers. It contains no manifest, text in any language, numbers, labels, logo, frame, PDF, ZIP, JSON, CSV, README, design elements, or nested directory. The JWT remains environment-held and is used only by the separate manifest-download command; the generator itself uses no application credential.
+
+A scan opens the existing menu with a session-scoped table context. Customers at the same table keep separate carts and orders; they never see a shared table bill.
 
 Payment behavior:
 
