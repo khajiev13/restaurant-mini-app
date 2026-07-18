@@ -1,11 +1,14 @@
 import argparse
+import ctypes
+import errno
 import json
 import math
+import os
 import re
+import sys
 import tempfile
 import urllib.request
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import qrcode
 import zxingcpp
@@ -16,6 +19,7 @@ TITLE_CODE_RE = re.compile(r"([0-9]+)\s*$")
 START_PARAM_RE = re.compile(
     r"^t2_((?:0|[1-9][0-9]{0,5}))_([A-Za-z0-9_-]{12})$"
 )
+BOT_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 REQUIRED_TEXT_FIELDS = (
     "table_title",
     "hall_title",
@@ -26,6 +30,9 @@ REQUIRED_TEXT_FIELDS = (
 SENSITIVE_FIELDS = {"access_token", "table_id", "hall_id", "jwt", "token"}
 MIN_SIDE_PIXELS = 1200
 QUIET_ZONE_MODULES = 4
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+_RENAME_EXCL = 0x00000004
 
 
 def _title_code(title: str) -> str:
@@ -35,7 +42,9 @@ def _title_code(title: str) -> str:
     return str(int(match.group(1)))
 
 
-def validate_manifest_rows(rows: object) -> list[dict]:
+def validate_manifest_rows(rows: object, bot_username: str) -> list[dict]:
+    if BOT_USERNAME_RE.fullmatch(bot_username) is None:
+        raise ValueError("Bot username must be a single path segment")
     if not isinstance(rows, list) or not rows:
         raise ValueError("Manifest must contain at least one table")
     validated: list[dict] = []
@@ -59,29 +68,23 @@ def validate_manifest_rows(rows: object) -> list[dict]:
         start_match = START_PARAM_RE.fullmatch(raw["start_param"])
         if start_match is None or start_match.group(1) != code:
             raise ValueError(f"Start parameter/code mismatch for table {code}")
-        parsed = urlparse(raw["deep_link"])
-        query = parse_qs(parsed.query, keep_blank_values=True)
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != "t.me"
-            or not parsed.path.strip("/")
-            or parsed.fragment
-            or set(query) != {"startapp"}
-            or query["startapp"] != [raw["start_param"]]
-        ):
-            raise ValueError(f"Deep link/start parameter mismatch for table {code}")
+        expected_deep_link = (
+            f"https://t.me/{bot_username}?startapp={raw['start_param']}"
+        )
+        if raw["deep_link"] != expected_deep_link:
+            raise ValueError(f"Deep link is not for the trusted bot at table {code}")
 
         seen_codes.add(code)
         validated.append({field: raw[field] for field in REQUIRED_TEXT_FIELDS})
     return sorted(validated, key=lambda row: int(row["manual_code"]))
 
 
-def load_manifest(path: Path) -> list[dict]:
+def load_manifest(path: Path, bot_username: str) -> list[dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload.get("data") if isinstance(payload, dict) else payload
     if isinstance(payload, dict) and payload.get("success") is not True:
         raise ValueError("Manifest response was not successful")
-    return validate_manifest_rows(rows)
+    return validate_manifest_rows(rows, bot_username)
 
 
 def _read_response(request: urllib.request.Request) -> bytes:
@@ -132,6 +135,53 @@ def render_raw_qr(deep_link: str) -> Image.Image:
     return qr.make_image(fill_color="black", back_color="white").convert("RGB")
 
 
+def _publish_directory_no_replace(staging: Path, output: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(staging)
+    destination = os.fsencode(output)
+    ctypes.set_errno(0)
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is None:
+            raise RuntimeError("Atomic no-replace publication is unsupported")
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source, destination, _RENAME_EXCL)
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise RuntimeError("Atomic no-replace publication is unsupported")
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            _AT_FDCWD,
+            source,
+            _AT_FDCWD,
+            destination,
+            _RENAME_NOREPLACE,
+        )
+    else:
+        raise RuntimeError("Atomic no-replace publication is unsupported")
+
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise FileExistsError(error_number, os.strerror(error_number), output)
+    unsupported_errors = {errno.EINVAL, errno.ENOSYS}
+    if hasattr(errno, "ENOTSUP"):
+        unsupported_errors.add(errno.ENOTSUP)
+    if error_number in unsupported_errors:
+        raise RuntimeError("Atomic no-replace publication is unsupported")
+    raise OSError(error_number, os.strerror(error_number), output)
+
+
 def generate_verified_png_folder(rows: list[dict], output: Path) -> Path:
     if output.exists():
         raise FileExistsError(output)
@@ -164,7 +214,7 @@ def generate_verified_png_folder(rows: list[dict], output: Path) -> Path:
             path.is_dir() for path in staging.iterdir()
         ):
             raise ValueError("PNG delivery folder contents do not match the manifest")
-        staging.replace(output)
+        _publish_directory_no_replace(staging, output)
     return output
 
 
@@ -172,10 +222,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--public-base", required=True)
+    parser.add_argument("--bot-username", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    rows = load_manifest(args.manifest)
+    rows = load_manifest(args.manifest, args.bot_username)
     verify_deployment(rows, args.public_base)
     output = generate_verified_png_folder(rows, args.output)
     print(f"verified_pngs={len(rows)}")

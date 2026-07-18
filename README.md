@@ -277,15 +277,17 @@ Install the development dependencies, keep the admin JWT in the environment, and
 backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
 
 test -n "$ADMIN_JWT"
-backend/.venv/bin/python -c 'import os, urllib.request; from pathlib import Path; request = urllib.request.Request("https://restaurant.labtutor.app/api/tables/manifest", headers={"Authorization": "Bearer " + os.environ["ADMIN_JWT"]}); Path("/private/tmp/olot-table-manifest.json").write_bytes(urllib.request.urlopen(request, timeout=30).read())'
+backend/.venv/bin/python scripts/download_table_manifest.py \
+  --output /private/tmp/olot-table-manifest.json
 
 backend/.venv/bin/python scripts/generate_table_qr_pngs.py \
   --manifest /private/tmp/olot-table-manifest.json \
   --public-base https://restaurant.labtutor.app \
+  --bot-username olotsomsa_zakaz_bot \
   --output /private/tmp/olot-table-qr-pngs
 ```
 
-The generator checks both public health endpoints and resolves every signed manifest entry against the deployed API before rendering. It then decodes every generated symbol and delivers the folder atomically only when every decoded destination exactly matches its manifest deep link. It refuses to overwrite an existing output directory.
+Both output paths must be new. The downloader reads `ADMIN_JWT` only from the environment, accepts only a direct HTTP `200`, rejects redirects, never logs the token or response body, and refuses to overwrite an existing manifest file. The generator checks both public health endpoints, requires every deep link to target the explicitly trusted `olotsomsa_zakaz_bot`, and resolves every signed manifest entry against the deployed API before rendering. It then decodes every generated symbol and publishes the folder with an atomic no-replace operation only when every decoded destination exactly matches its manifest deep link. It refuses to overwrite an existing output directory.
 
 The output directory contains only raw, opaque, black-on-white PNG QR symbols named for the manifest's table numbers. It contains no manifest, text in any language, numbers, labels, logo, frame, PDF, ZIP, JSON, CSV, README, design elements, or nested directory. The JWT remains environment-held and is used only by the separate manifest-download command; the generator itself uses no application credential.
 

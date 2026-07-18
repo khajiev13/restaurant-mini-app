@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,8 @@ SPEC = importlib.util.spec_from_file_location("generate_table_qr_pngs", SCRIPT)
 assert SPEC and SPEC.loader
 qr_pngs = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(qr_pngs)
+
+BOT_USERNAME = "olotsomsa_zakaz_bot"
 
 
 def manifest_rows():
@@ -31,7 +34,7 @@ def manifest_rows():
                 "manual_code": code,
                 "start_param": start_param,
                 "deep_link": (
-                    "https://t.me/olotsomsa_zakaz_bot?startapp=" + start_param
+                    f"https://t.me/{BOT_USERNAME}?startapp=" + start_param
                 ),
             }
         )
@@ -40,7 +43,7 @@ def manifest_rows():
 
 def test_gap_manifest_generates_only_raw_verified_pngs(tmp_path):
     output = tmp_path / "table-qr-pngs"
-    rows = qr_pngs.validate_manifest_rows(manifest_rows())
+    rows = qr_pngs.validate_manifest_rows(manifest_rows(), BOT_USERNAME)
     result = qr_pngs.generate_verified_png_folder(rows, output)
 
     assert result == output
@@ -92,7 +95,27 @@ def test_manifest_rejects_missing_duplicate_or_mismatched_codes(mutate):
     rows = manifest_rows()
     mutate(rows)
     with pytest.raises(ValueError):
-        qr_pngs.validate_manifest_rows(rows)
+        qr_pngs.validate_manifest_rows(rows, BOT_USERNAME)
+
+
+@pytest.mark.parametrize(
+    "deep_link",
+    [
+        "https://t.me/wrong_bot?startapp=t2_1_aaaaaaaaaaaa",
+        "https://t.me/olotsomsa_zakaz_bot/extra?startapp=t2_1_aaaaaaaaaaaa",
+        "https://t.me/olotsomsa_zakaz_bot?startapp=t2_1_aaaaaaaaaaaa#fragment",
+        (
+            "https://t.me/olotsomsa_zakaz_bot?startapp=t2_1_aaaaaaaaaaaa"
+            "&extra=1"
+        ),
+    ],
+)
+def test_manifest_rejects_links_outside_the_trusted_bot(deep_link):
+    rows = manifest_rows()
+    rows[0]["deep_link"] = deep_link
+
+    with pytest.raises(ValueError, match="Deep link"):
+        qr_pngs.validate_manifest_rows(rows, BOT_USERNAME)
 
 
 class FakeResponse(io.BytesIO):
@@ -106,7 +129,7 @@ class FakeResponse(io.BytesIO):
 
 
 def test_deployment_verification_uses_signed_entries_and_safe_fields(monkeypatch):
-    rows = qr_pngs.validate_manifest_rows(manifest_rows())
+    rows = qr_pngs.validate_manifest_rows(manifest_rows(), BOT_USERNAME)
     requests = []
 
     def fake_urlopen(request, timeout):
@@ -148,7 +171,7 @@ def test_decode_failure_leaves_no_delivery_folder(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="QR decode mismatch"):
         qr_pngs.generate_verified_png_folder(
-            qr_pngs.validate_manifest_rows(manifest_rows()),
+            qr_pngs.validate_manifest_rows(manifest_rows(), BOT_USERNAME),
             output,
         )
     assert not output.exists()
@@ -159,9 +182,26 @@ def test_existing_output_is_never_overwritten(tmp_path):
     output.mkdir()
     with pytest.raises(FileExistsError):
         qr_pngs.generate_verified_png_folder(
-            qr_pngs.validate_manifest_rows(manifest_rows()),
+            qr_pngs.validate_manifest_rows(manifest_rows(), BOT_USERNAME),
             output,
         )
+
+
+def test_atomic_publish_does_not_replace_destination_created_at_publish_time(
+    tmp_path,
+):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "table-01.png").write_bytes(b"staged")
+    output = tmp_path / "table-qr-pngs"
+    output.mkdir()
+
+    with pytest.raises(FileExistsError):
+        qr_pngs._publish_directory_no_replace(staging, output)
+
+    assert output.is_dir()
+    assert list(output.iterdir()) == []
+    assert (staging / "table-01.png").read_bytes() == b"staged"
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -170,7 +210,10 @@ def test_load_manifest_accepts_raw_or_success_wrapper(tmp_path, wrapped):
     payload = {"success": True, "data": rows} if wrapped else rows
     source = tmp_path / "manifest.json"
     source.write_text(json.dumps(payload), encoding="utf-8")
-    assert qr_pngs.load_manifest(source) == qr_pngs.validate_manifest_rows(rows)
+    assert qr_pngs.load_manifest(source, BOT_USERNAME) == qr_pngs.validate_manifest_rows(
+        rows,
+        BOT_USERNAME,
+    )
 
 
 @pytest.mark.parametrize("field", ["access_token", "table_id", "hall_id"])
@@ -178,4 +221,41 @@ def test_manifest_rejects_sensitive_fields(field):
     rows = manifest_rows()
     rows[0][field] = "must-not-enter-the-generator"
     with pytest.raises(ValueError, match="sensitive"):
-        qr_pngs.validate_manifest_rows(rows)
+        qr_pngs.validate_manifest_rows(rows, BOT_USERNAME)
+
+
+def test_cli_requires_and_forwards_bot_username(tmp_path, monkeypatch):
+    manifest = tmp_path / "manifest.json"
+    output = tmp_path / "output"
+    observed = {}
+
+    def fake_load(path, bot_username):
+        observed["load"] = (path, bot_username)
+        return []
+
+    monkeypatch.setattr(qr_pngs, "load_manifest", fake_load)
+    monkeypatch.setattr(qr_pngs, "verify_deployment", lambda rows, base: None)
+    monkeypatch.setattr(
+        qr_pngs,
+        "generate_verified_png_folder",
+        lambda rows, path: path,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate_table_qr_pngs.py",
+            "--manifest",
+            str(manifest),
+            "--public-base",
+            "https://restaurant.labtutor.app",
+            "--bot-username",
+            BOT_USERNAME,
+            "--output",
+            str(output),
+        ],
+    )
+
+    qr_pngs.main()
+
+    assert observed["load"] == (manifest, BOT_USERNAME)
