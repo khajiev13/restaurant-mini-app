@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-18
 
-**Status:** Draft for written review
+**Status:** Approved on 2026-07-18
 
 ## Goal
 
