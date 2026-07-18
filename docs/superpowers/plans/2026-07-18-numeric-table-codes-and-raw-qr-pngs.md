@@ -36,6 +36,8 @@
 - Modify `frontend/src/stores/tableOrderStore.ts` and its test: defensive numeric normalization.
 - Modify `frontend/src/App.tsx` and its test: handle both `t2_` and legacy `t_` table start parameters without changing order-return handling.
 - Modify `frontend/src/i18n/locales/en.json`, `ru.json`, and `uz.json`: existing app copy for table-number entry; no copy is rendered into QR PNGs.
+- Create `scripts/download_table_manifest.py`: download the admin manifest with an environment-held JWT, direct HTTP `200` only, no redirects, and no overwrite.
+- Create `tests/scripts/test_download_table_manifest.py`: offline redirect, credential, direct-response, and no-overwrite tests.
 - Create `scripts/generate_table_qr_pngs.py`: strict manifest/deployment verification, raw rendering, decode verification, and atomic PNG-only delivery.
 - Create `tests/scripts/test_generate_table_qr_pngs.py`: offline generator, deployment-verifier, gap, image, and fail-closed tests.
 - Modify `backend/requirements-dev.txt`: add generator/test-only image and decoder dependencies.
@@ -713,18 +715,21 @@ git commit -m "feat: accept numeric table numbers"
 ### Task 4: Strict Raw PNG Generator and Operator Documentation
 
 **Files:**
+- Create: `scripts/download_table_manifest.py`
+- Create: `tests/scripts/test_download_table_manifest.py`
 - Create: `scripts/generate_table_qr_pngs.py`
 - Create: `tests/scripts/test_generate_table_qr_pngs.py`
 - Modify: `backend/requirements-dev.txt`
 - Modify: `README.md`
 
 **Interfaces:**
+- Downloads: the admin manifest only through `scripts/download_table_manifest.py`, which reads `ADMIN_JWT` from the environment, accepts only a direct HTTP `200`, rejects redirects, logs no credential or response body, and refuses to overwrite its output file.
 - Consumes: a JSON file containing either `{ "success": true, "data": [...] }` from the deployed admin manifest or the raw manifest array.
-- Consumes: `--public-base https://restaurant.labtutor.app`; verifies `/healthz`, `/api/health`, and every signed `entry` at `/api/tables/resolve` before rendering.
+- Consumes: `--public-base https://restaurant.labtutor.app` and the required trusted `--bot-username`; verifies `/healthz`, `/api/health`, and every signed `entry` at `/api/tables/resolve` before rendering.
 - Produces: one output directory containing only verified `table-XX.png` files.
 - Uses no application credential. The admin JWT is used only by the separate manifest-download command.
 
-- [ ] **Step 1: Add test-only image dependencies and write failing generator tests**
+- [ ] **Step 1: Add test-only image dependencies and write failing downloader/generator tests**
 
 Append these exact lines to `backend/requirements-dev.txt`:
 
@@ -734,7 +739,7 @@ Pillow>=11,<13
 zxing-cpp>=2.2,<3
 ```
 
-Create `tests/scripts/test_generate_table_qr_pngs.py` with fixtures for codes `1`, `8`, `10`, and `30`, canonical `t2_` parameters with twelve-character signatures, and matching Telegram deep links. Cover these exact behaviors:
+Create `tests/scripts/test_download_table_manifest.py` with offline coverage for redirect rejection, a direct HTTP `200`, refusal before network when the output exists, missing `ADMIN_JWT`, and the absence of credential or response-body logging. Create `tests/scripts/test_generate_table_qr_pngs.py` with fixtures for codes `1`, `8`, `10`, and `30`, canonical `t2_` parameters with twelve-character signatures, and exact deep links for the required trusted bot. Cover these exact generator behaviors:
 
 ```python
 import importlib.util
@@ -924,14 +929,14 @@ Run:
 
 ```bash
 backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
-backend/.venv/bin/python -m pytest tests/scripts/test_generate_table_qr_pngs.py -q
+backend/.venv/bin/python -m pytest tests/scripts/test_download_table_manifest.py tests/scripts/test_generate_table_qr_pngs.py -q
 ```
 
-Expected: collection fails because `scripts/generate_table_qr_pngs.py` does not exist.
+Expected: collection fails because `scripts/download_table_manifest.py` and `scripts/generate_table_qr_pngs.py` do not exist.
 
-- [ ] **Step 3: Implement strict manifest and deployed-resolver verification**
+- [ ] **Step 3: Implement the hardened downloader and strict manifest/deployed-resolver verification**
 
-Create the script with these constants and boundaries:
+Create `scripts/download_table_manifest.py` with the downloader boundaries described above, then create the generator with these constants and boundaries:
 
 ```python
 import argparse
@@ -1129,15 +1134,15 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 5: Run generator tests and verify GREEN**
+- [ ] **Step 5: Run publication-tooling tests and verify GREEN**
 
 Run:
 
 ```bash
-backend/.venv/bin/python -m pytest tests/scripts/test_generate_table_qr_pngs.py -q
+backend/.venv/bin/python -m pytest tests/scripts/test_download_table_manifest.py tests/scripts/test_generate_table_qr_pngs.py -q
 ```
 
-Expected: all validation, gap, health/resolver, image, decode, staging-cleanup, and no-overwrite tests pass.
+Expected: all downloader, validation, trusted-bot, gap, health/resolver, image, decode, staging-cleanup, and no-overwrite tests pass.
 
 - [ ] **Step 6: Document the exact PNG-only workflow**
 
@@ -1145,20 +1150,24 @@ Replace the README's six-character QR paragraph and update the endpoint descript
 
 ```bash
 test -n "$ADMIN_JWT"
-backend/.venv/bin/python -c 'import os, urllib.request; from pathlib import Path; request = urllib.request.Request("https://restaurant.labtutor.app/api/tables/manifest", headers={"Authorization": "Bearer " + os.environ["ADMIN_JWT"]}); Path("/private/tmp/olot-table-manifest.json").write_bytes(urllib.request.urlopen(request, timeout=30).read())'
+test ! -e /private/tmp/olot-table-manifest.json
+test ! -e /private/tmp/olot-table-qr-pngs
+backend/.venv/bin/python scripts/download_table_manifest.py \
+  --output /private/tmp/olot-table-manifest.json
 
 backend/.venv/bin/python scripts/generate_table_qr_pngs.py \
   --manifest /private/tmp/olot-table-manifest.json \
   --public-base https://restaurant.labtutor.app \
+  --bot-username olotsomsa_zakaz_bot \
   --output /private/tmp/olot-table-qr-pngs
 ```
 
-State explicitly that the JWT remains environment-held and the output directory contains only raw black-on-white PNGs; it contains no manifest, text, PDF, ZIP, or design elements.
+State explicitly that both output paths must be new and neither tool overwrites an existing file or directory. The JWT remains environment-held and the output directory contains only raw black-on-white PNGs; it contains no manifest, text, PDF, ZIP, or design elements.
 
 - [ ] **Step 7: Commit the generator and documentation**
 
 ```bash
-git add scripts/generate_table_qr_pngs.py tests/scripts/test_generate_table_qr_pngs.py backend/requirements-dev.txt README.md
+git add scripts/download_table_manifest.py tests/scripts/test_download_table_manifest.py scripts/generate_table_qr_pngs.py tests/scripts/test_generate_table_qr_pngs.py backend/requirements-dev.txt README.md
 git commit -m "feat: generate verified raw table QR PNGs"
 ```
 
@@ -1199,13 +1208,13 @@ cd frontend
 
 Expected: all tests and static checks pass and Vite completes the production build.
 
-- [ ] **Step 3: Re-run the standalone generator suite**
+- [ ] **Step 3: Re-run the standalone publication-tooling suite**
 
 ```bash
-backend/.venv/bin/python -m pytest tests/scripts/test_generate_table_qr_pngs.py -q
+backend/.venv/bin/python -m pytest tests/scripts/test_download_table_manifest.py tests/scripts/test_generate_table_qr_pngs.py -q
 ```
 
-Expected: all generator tests pass.
+Expected: all downloader and generator tests pass.
 
 - [ ] **Step 4: Audit the release diff**
 
@@ -1270,11 +1279,13 @@ Expected: the remote revision exactly equals the reviewed commit and both endpoi
 
 - [ ] **Step 4: Download the admin manifest without exposing the JWT**
 
-Place the authenticated admin JWT only in the current shell environment, then run:
+Place the authenticated admin JWT only in the current shell environment. The manifest path must be new because the downloader refuses to overwrite an existing file. Then run:
 
 ```bash
 test -n "$ADMIN_JWT"
-backend/.venv/bin/python -c 'import os, urllib.request; from pathlib import Path; request = urllib.request.Request("https://restaurant.labtutor.app/api/tables/manifest", headers={"Authorization": "Bearer " + os.environ["ADMIN_JWT"]}); Path("/private/tmp/olot-table-manifest.json").write_bytes(urllib.request.urlopen(request, timeout=30).read())'
+test ! -e /private/tmp/olot-table-manifest.json
+backend/.venv/bin/python scripts/download_table_manifest.py \
+  --output /private/tmp/olot-table-manifest.json
 jq '{count: (.data | length), codes: [.data[].manual_code]}' /private/tmp/olot-table-manifest.json
 ```
 
@@ -1283,13 +1294,15 @@ Expected when the live directory is unchanged: count `29`, codes `1-8, 10-30`, e
 - [ ] **Step 5: Generate and verify the live folder**
 
 ```bash
+test ! -e /Users/khajievroma/.codex/visualizations/2026/07/18/019f743f-91fb-7643-91e8-416ef880162e/table-qr-pngs
 backend/.venv/bin/python scripts/generate_table_qr_pngs.py \
   --manifest /private/tmp/olot-table-manifest.json \
   --public-base https://restaurant.labtutor.app \
+  --bot-username olotsomsa_zakaz_bot \
   --output /Users/khajievroma/.codex/visualizations/2026/07/18/019f743f-91fb-7643-91e8-416ef880162e/table-qr-pngs
 ```
 
-Expected: `verified_pngs=29` when the live set is unchanged. The output folder contains `table-01.png` through `table-08.png` and `table-10.png` through `table-30.png`, with no `table-09.png` and no non-PNG file. Any health, manifest, signed-resolver, image, or decode failure leaves no delivered folder.
+Expected: `verified_pngs=29` when the live set is unchanged. The output folder must be new because the generator refuses to overwrite an existing directory. It contains `table-01.png` through `table-08.png` and `table-10.png` through `table-30.png`, with no `table-09.png` and no non-PNG file. Any health, manifest, signed-resolver, image, or decode failure leaves no delivered folder.
 
 - [ ] **Step 6: Deliver the folder and remove the temporary manifest**
 
