@@ -1,16 +1,10 @@
-import { type CSSProperties, useEffect, useRef, useState } from 'react';
+import { type CSSProperties, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import StaffLayout from '../../components/staff/StaffLayout';
 import StaffPaymentBlock from '../../components/staff/StaffPaymentBlock';
-import {
-  getActiveStaffOrder,
-  getStaffOrder,
-  isStaffOrderTakeTransportAmbiguity,
-  reconcileStaffOrderTake,
-  takeStaffOrder,
-} from '../../services/staffApi';
+import { getActiveStaffOrder, getStaffOrder, takeStaffOrder } from '../../services/staffApi';
 import type { StaffOrder } from '../../types/staff';
 
 const floatingButtonBar: CSSProperties = {
@@ -22,8 +16,6 @@ const floatingButtonBar: CSSProperties = {
   backgroundColor: 'rgba(246, 246, 246, 0.92)',
   backdropFilter: 'blur(12px)',
 };
-
-const TAKE_ORDER_RECONCILIATION_ERROR = 'Could not refresh order status. Try again.';
 
 function canHandleDeliveryPayment(order: StaffOrder): boolean {
   return order.payment_method === 'cash' || order.payment_status === 'paid';
@@ -38,7 +30,6 @@ export default function StaffOrderDetailPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const takeReconciliationControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!orderId) {
@@ -73,10 +64,6 @@ export default function StaffOrderDetailPage() {
     };
   }, [orderId, t]);
 
-  useEffect(() => () => {
-    takeReconciliationControllerRef.current?.abort();
-  }, []);
-
   const handleTakeOrder = async () => {
     if (!order) {
       return;
@@ -96,67 +83,15 @@ export default function StaffOrderDetailPage() {
             'Finish your current delivery before taking another order.',
           ),
         );
-        setIsSubmitting(false);
         return;
       }
-    } catch {
-      setError(t('staff.order_detail.take_error', 'This order is no longer available.'));
-      setIsSubmitting(false);
-      return;
-    }
 
-    takeReconciliationControllerRef.current?.abort();
-    const reconciliationController = new AbortController();
-    takeReconciliationControllerRef.current = reconciliationController;
-    const mutationStartedAt = Date.now();
-    try {
       await takeStaffOrder(order.id);
       navigate('/staff/orders?tab=active', { replace: true });
-    } catch (takeError) {
-      if (!isStaffOrderTakeTransportAmbiguity(takeError)) {
-        setError(t('staff.order_detail.take_error', 'This order is no longer available.'));
-        return;
-      }
-
-      try {
-        const result = await reconcileStaffOrderTake(
-          order.id,
-          mutationStartedAt,
-          reconciliationController.signal,
-        );
-        if (reconciliationController.signal.aborted) {
-          return;
-        }
-
-        if (result.outcome === 'same') {
-          navigate('/staff/orders?tab=active', { replace: true });
-          return;
-        }
-
-        if (result.outcome === 'different') {
-          setActiveOrder(result.order);
-          setError(
-            t(
-              'staff.order_detail.active_delivery_error',
-              'Finish your current delivery before taking another order.',
-            ),
-          );
-          return;
-        }
-
-        setError(t('staff.order_detail.take_unknown', TAKE_ORDER_RECONCILIATION_ERROR));
-      } catch {
-        if (!reconciliationController.signal.aborted) {
-          setError(t('staff.order_detail.take_unknown', TAKE_ORDER_RECONCILIATION_ERROR));
-        }
-      }
+    } catch {
+      setError(t('staff.order_detail.take_error', 'This order is no longer available.'));
     } finally {
-      if (takeReconciliationControllerRef.current === reconciliationController) {
-        takeReconciliationControllerRef.current = null;
-      }
-      if (!reconciliationController.signal.aborted) {
-        setIsSubmitting(false);
-      }
+      setIsSubmitting(false);
     }
   };
 

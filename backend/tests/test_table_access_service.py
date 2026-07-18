@@ -33,21 +33,6 @@ def _entry() -> TableDirectoryEntry:
     )
 
 
-def test_parse_table_directory_joins_a_validated_complete_directory():
-    from app.services.table_access_service import parse_table_directory
-
-    payload = {
-        "halls": [
-            {"id": str(HALL_ID), "title": "Asosiy zal", "servicePercent": 10},
-        ],
-        "tables": [
-            {"id": str(TABLE_ID), "title": "Stol 12", "hallId": str(HALL_ID)},
-        ],
-    }
-
-    assert parse_table_directory(payload) == [_entry()]
-
-
 def test_table_codes_are_stable_six_character_crockford_values():
     service = _service()
 

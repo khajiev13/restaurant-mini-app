@@ -45,38 +45,19 @@ set_env_value() {
   mv "$tmp_file" .env
 }
 
-telegram_api_response_ok() {
-  python3 -c '
-import json
-import sys
-
-try:
-    payload = json.load(sys.stdin)
-except (json.JSONDecodeError, UnicodeDecodeError):
-    raise SystemExit(1)
-
-raise SystemExit(0 if isinstance(payload, dict) and payload.get("ok") is True else 1)
-' 2>/dev/null
-}
-
 telegram_api_json() {
   local method="$1"
   local payload="$2"
   curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}" \
     -H 'Content-Type: application/json' \
-    -d "$payload" 2>/dev/null | telegram_api_response_ok
+    -d "$payload"
 }
 
 telegram_api_form() {
   local method="$1"
   shift
-  curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}" "$@" \
-    2>/dev/null | telegram_api_response_ok
+  curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}" "$@"
 }
-
-if [[ "${START_SH_HELPERS_ONLY:-0}" == "1" ]]; then
-  return 0 2>/dev/null || exit 0
-fi
 
 command -v docker >/dev/null 2>&1 || die "docker not found. Install Docker Desktop."
 [ -f .env ] || die ".env file not found. Copy .env.example → .env and fill in your values."
@@ -138,21 +119,17 @@ info "Updating Telegram webhook..."
 telegram_api_form setWebhook \
   --data-urlencode "url=${PUBLIC_URL}/api/webhooks/bot" \
   --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
-  --data-urlencode "allowed_updates=[\"message\"]" \
-  || die "telegram_api_failed category=set_webhook"
+  --data-urlencode "allowed_updates=[\"message\"]" >/dev/null
 
 info "Updating Telegram menu button..."
 MENU_PAYLOAD=$(cat <<JSON
 {"menu_button":{"type":"web_app","text":"Open Menu","web_app":{"url":"${PUBLIC_URL}/"}}}
 JSON
 )
-telegram_api_json setChatMenuButton "${MENU_PAYLOAD}" \
-  || die "telegram_api_failed category=set_chat_menu_button"
+telegram_api_json setChatMenuButton "${MENU_PAYLOAD}" >/dev/null
 
-telegram_api_form getWebhookInfo \
-  || die "telegram_api_failed category=get_webhook_info"
-telegram_api_form getChatMenuButton \
-  || die "telegram_api_failed category=get_chat_menu_button"
+WEBHOOK_INFO="$(telegram_api_form getWebhookInfo)"
+MENU_INFO="$(telegram_api_form getChatMenuButton)"
 
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -162,6 +139,10 @@ echo ""
 echo -e "  🌍  Public app     →  ${YELLOW}${PUBLIC_URL}/${NC}"
 echo -e "  🔗  Webhook        →  ${YELLOW}${PUBLIC_URL}/api/webhooks/bot${NC}"
 echo ""
-echo -e "  🤖  Telegram webhook and menu button verified"
+echo -e "  🤖  Telegram webhook info:"
+echo "      ${WEBHOOK_INFO}"
+echo ""
+echo -e "  📱  Telegram menu button:"
+echo "      ${MENU_INFO}"
 echo ""
 info "Named tunnel mode uses a stable hostname."

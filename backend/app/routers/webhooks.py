@@ -13,10 +13,7 @@ from app.database import async_session
 from app.models.models import Order, Stoplist, User
 from app.services import multicard_api
 from app.services.order_service import dispatch_queued_alipos_order
-from app.services.order_status_service import (
-    apply_alipos_status_update_for_order,
-    parse_alipos_updated_at,
-)
+from app.services.order_status_service import apply_alipos_status_update_for_order
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +135,6 @@ async def order_status_webhook(
     eats_id = body.get("eatsId")
     new_status = body.get("status")
     order_number = body.get("orderNumber")
-    provider_updated_at = parse_alipos_updated_at(body.get("updatedAt"))
 
     if not eats_id or not new_status:
         raise HTTPException(
@@ -153,7 +149,6 @@ async def order_status_webhook(
             order,
             new_status,
             order_number,
-            provider_updated_at=provider_updated_at,
         ):
             await db.commit()
 
@@ -299,50 +294,12 @@ async def multicard_callback(
             )
             return {}
 
-        known_provider_references = {
-            str(reference)
-            for reference in (
-                order.multicard_invoice_uuid,
-                order.multicard_payment_uuid,
-            )
-            if reference
-        }
-        if known_provider_references and str(payment_uuid) not in known_provider_references:
-            logger.warning(
-                "Multicard callback payment mismatch for order=%s",
-                order_uuid,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Payment identifier does not match order",
-            )
-
-        legacy_paid_delivery = (
-            order.discriminator == "delivery"
-            and order.payment_method == "rahmat"
-            and order.payment_provider == "multicard"
-            and order.payment_status == "pending"
-            and order.alipos_order_id is not None
-            and order.multicard_invoice_uuid is not None
-            and order.alipos_sync_status in {None, "synced"}
-        )
         valid_payment_state = (
             order.payment_method == "rahmat"
-            and order.payment_provider == "multicard"
-            and order.alipos_order_id is None
-            and (
-                (
-                    order.status == "AWAITING_PAYMENT"
-                    and order.payment_status == "pending"
-                )
-                or (
-                    order.status == "PAYMENT_REVIEW"
-                    and order.payment_status
-                    in {"invoice_queued", "invoice_sending", "invoice_unknown"}
-                )
-            )
+            and order.status in {"AWAITING_PAYMENT", "PAYMENT_REVIEW"}
+            and order.payment_status in {"pending", "invoice_unknown"}
         )
-        if not valid_payment_state and not legacy_paid_delivery:
+        if not valid_payment_state:
             logger.warning(
                 "Multicard callback order is not awaiting online payment: order=%s",
                 order_uuid,
@@ -354,25 +311,19 @@ async def multicard_callback(
 
         order.payment_provider = "multicard"
         order.payment_status = "paid"
-        order.invoice_cancel_status = "paid"
         order.payment_paid_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         order.multicard_payment_uuid = str(payment_uuid)
         order.multicard_receipt_url = str(receipt_url) if receipt_url else None
         order.payment_card_pan = str(card_pan) if card_pan else None
         order.payment_ps = str(ps) if ps else None
         order.payment_error = None
-        if legacy_paid_delivery:
-            order.alipos_sync_status = "synced"
-            order.alipos_sync_error = None
-        else:
-            order.alipos_sync_status = "queued"
-            order.alipos_sync_error = None
-            order.status = "PAID_AWAITING_RESTAURANT"
+        order.alipos_sync_status = "queued"
+        order.alipos_sync_error = None
+        order.status = "PAID_AWAITING_RESTAURANT"
 
         await db.commit()
 
-    if not legacy_paid_delivery:
-        background_tasks.add_task(dispatch_queued_alipos_order, order_uuid)
+    background_tasks.add_task(dispatch_queued_alipos_order, order_uuid)
 
     logger.info(
         "Multicard payment confirmed: order=%s amount=%s ps=%s",

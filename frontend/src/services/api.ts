@@ -26,7 +26,6 @@ const RETRYABLE_METHODS = new Set(['get', 'head', 'options']);
 
 type RetriableRequestConfig = InternalAxiosRequestConfig & {
   _retryCount?: number;
-  skipRetry?: boolean;
 };
 
 const api = axios.create({
@@ -55,7 +54,7 @@ api.interceptors.response.use(
       || !error.response
       || (typeof status === 'number' && status >= 500);
 
-    if (!config || config.skipRetry || !isRetryableMethod || !isTransientFailure) {
+    if (!config || !isRetryableMethod || !isTransientFailure) {
       throw error;
     }
 

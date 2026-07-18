@@ -43,7 +43,6 @@ export function formatDate(date: Date | string, language: string = i18n.language
 
 export function formatDateTime(date: Date | string, language: string = i18n.language): string {
   const dateObj = typeof date === 'string' ? new Date(date) : date;
-  const lang = language.split('-')[0];
   
   const localeMap: Record<string, string> = {
     uz: 'uz-UZ',
@@ -51,7 +50,7 @@ export function formatDateTime(date: Date | string, language: string = i18n.lang
     en: 'en-US',
   };
   
-  const locale = localeMap[lang] || 'en-US';
+  const locale = localeMap[language] || 'en-US';
   
   return new Intl.DateTimeFormat(locale, {
     year: 'numeric',

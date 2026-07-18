@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
@@ -11,22 +11,19 @@ import {
   getActiveStaffOrder,
   getAvailableStaffOrders,
   getCompletedStaffOrders,
-  isStaffOrderTakeTransportAmbiguity,
   markStaffOrderDelivered,
-  reconcileStaffOrderTake,
   takeStaffOrder,
 } from '../../services/staffApi';
 import type { StaffOrder } from '../../types/staff';
 
 const validTabs: ReadonlyArray<StaffOrderTab> = ['available', 'active', 'completed'];
 const ACTIVE_ORDER_CONFLICT = 'Finish your active delivery before taking another order.';
-const TAKE_ORDER_RECONCILIATION_ERROR = 'Could not refresh order status. Try again.';
 const TAKE_ORDER_ERROR_DETAILS = new Set([
   ACTIVE_ORDER_CONFLICT,
   'This order was already taken by another staff member.',
   'This order is no longer available.',
   'This order is not ready for delivery payment handling.',
-  TAKE_ORDER_RECONCILIATION_ERROR,
+  'Could not refresh order status. Try again.',
 ]);
 
 function getTakeOrderError(error: unknown): string {
@@ -57,7 +54,6 @@ export default function StaffOrdersPage() {
   const [deliveryError, setDeliveryError] = useState<string | null>(null);
   const [confirmingOrder, setConfirmingOrder] = useState<StaffOrder | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const takeReconciliationControllerRef = useRef<AbortController | null>(null);
   const loadErrorMessage = t('staff.orders.load_error', 'Could not load staff orders. Try again.');
 
   const loadOrders = useCallback(async () => {
@@ -84,10 +80,6 @@ export default function StaffOrdersPage() {
     void loadOrders();
   }, [loadOrders]);
 
-  useEffect(() => () => {
-    takeReconciliationControllerRef.current?.abort();
-  }, []);
-
   const setTab = (tab: StaffOrderTab) => {
     setSearchParams({ tab }, { replace: true });
   };
@@ -98,60 +90,17 @@ export default function StaffOrdersPage() {
       return;
     }
 
-    takeReconciliationControllerRef.current?.abort();
-    const reconciliationController = new AbortController();
-    takeReconciliationControllerRef.current = reconciliationController;
     setActionError(null);
     setPageError(null);
-    const mutationStartedAt = Date.now();
     try {
       await takeStaffOrder(order.id);
       await loadOrders();
       setTab('active');
     } catch (error) {
-      if (isStaffOrderTakeTransportAmbiguity(error)) {
-        try {
-          const result = await reconcileStaffOrderTake(
-            order.id,
-            mutationStartedAt,
-            reconciliationController.signal,
-          );
-          if (reconciliationController.signal.aborted) {
-            return;
-          }
-
-          if (result.outcome === 'same') {
-            setActiveOrder(result.order);
-            setTab('active');
-            return;
-          }
-
-          if (result.outcome === 'different') {
-            setActiveOrder(result.order);
-            setActionError(ACTIVE_ORDER_CONFLICT);
-            setTab('active');
-            return;
-          }
-
-          setActionError(TAKE_ORDER_RECONCILIATION_ERROR);
-        } catch {
-          if (!reconciliationController.signal.aborted) {
-            setActionError(TAKE_ORDER_RECONCILIATION_ERROR);
-          }
-        }
-        return;
-      }
-
       const nextError = getTakeOrderError(error);
       setActionError(nextError);
       await loadOrders();
-      if (!reconciliationController.signal.aborted) {
-        setActionError(nextError);
-      }
-    } finally {
-      if (takeReconciliationControllerRef.current === reconciliationController) {
-        takeReconciliationControllerRef.current = null;
-      }
+      setActionError(nextError);
     }
   };
 

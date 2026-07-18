@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useState } from 'react';
 import type { StaffOrder } from '../../types/staff';
 import { formatPrice } from '../../utils/format';
 import { COLORS, FONTS, Icon } from '../artisan/ArtisanLayout';
@@ -20,76 +20,11 @@ export default function ConfirmDeliveredSheet({
 }) {
   const isCash = order.payment_method === 'cash';
   const [collectedCash, setCollectedCash] = useState(!isCash);
-  const titleId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const checkboxRef = useRef<HTMLInputElement>(null);
-  const confirmRef = useRef<HTMLButtonElement>(null);
-  const onCancelRef = useRef(onCancel);
-  onCancelRef.current = onCancel;
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return undefined;
-    const trigger = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    const inerted: Array<{ element: HTMLElement; hadInert: boolean }> = [];
-    let branch: HTMLElement | null = dialog;
-    while (branch?.parentElement && branch.parentElement !== document.body) {
-      for (const sibling of Array.from(branch.parentElement.children)) {
-        if (sibling !== branch && sibling instanceof HTMLElement) {
-          inerted.push({ element: sibling, hadInert: sibling.hasAttribute('inert') });
-          sibling.setAttribute('inert', '');
-        }
-      }
-      branch = branch.parentElement;
-    }
-
-    const focusables = () => Array.from(dialog.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-    ));
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onCancelRef.current();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const candidates = focusables();
-      if (candidates.length === 0) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = candidates[0];
-      const last = candidates[candidates.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', onKeyDown);
-    (isCash ? checkboxRef.current : confirmRef.current)?.focus();
-
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      for (const { element, hadInert } of inerted) {
-        if (!hadInert) element.removeAttribute('inert');
-      }
-      if (trigger?.isConnected) trigger.focus();
-    };
-  }, [isCash]);
 
   return (
     <div
-      ref={dialogRef}
       role="dialog"
       aria-modal="true"
-      aria-labelledby={titleId}
-      tabIndex={-1}
       style={{
         position: 'fixed',
         inset: 0,
@@ -124,7 +59,6 @@ export default function ConfirmDeliveredSheet({
         </div>
 
         <h2
-          id={titleId}
           style={{
             margin: '20px 0 8px',
             fontFamily: FONTS.headline,
@@ -151,7 +85,6 @@ export default function ConfirmDeliveredSheet({
             }}
           >
             <input
-              ref={checkboxRef}
               type="checkbox"
               aria-label={`I have collected ${formatPrice(order.total_amount, language)} cash`}
               checked={collectedCash}
@@ -174,7 +107,6 @@ export default function ConfirmDeliveredSheet({
         ) : null}
 
         <button
-          ref={confirmRef}
           type="button"
           disabled={!collectedCash || submitting}
           onClick={onConfirm}

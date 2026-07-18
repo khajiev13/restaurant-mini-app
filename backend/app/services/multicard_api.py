@@ -15,34 +15,6 @@ _mc_token: str | None = None
 _mc_token_expires_at: float = 0
 
 
-class InvoicePreSubmitError(RuntimeError):
-    """Invoice creation definitely did not reach the provider POST."""
-
-
-class InvoiceRejected(RuntimeError):
-    """Multicard definitely rejected an invoice request."""
-
-    def __init__(self, status_code: int):
-        super().__init__(f"Multicard invoice was rejected (HTTP {status_code})")
-        self.status_code = status_code
-
-
-class InvoiceOutcomeUnknown(RuntimeError):
-    """An invoice may exist, so another POST would be unsafe."""
-
-    def __init__(self, invoice_uuid: str | None = None):
-        super().__init__("Multicard invoice outcome is unknown")
-        self.invoice_uuid = invoice_uuid
-
-
-class InvoiceCancelNotAttempted(RuntimeError):
-    """Invoice cancellation definitely did not reach the provider DELETE."""
-
-
-class InvoiceCancelOutcomeUnknown(RuntimeError):
-    """Invoice cancellation may have completed, so DELETE must not be repeated."""
-
-
 class RefundRejected(RuntimeError):
     """Multicard definitely rejected a refund request."""
 
@@ -52,10 +24,6 @@ class RefundRejected(RuntimeError):
             message += f" (HTTP {status_code})"
         super().__init__(message)
         self.status_code = status_code
-
-
-class RefundNotAttempted(RuntimeError):
-    """A refund request definitely did not reach the provider DELETE."""
 
 
 class RefundOutcomeUnknown(RuntimeError):
@@ -82,53 +50,6 @@ def _refund_error_code(payload: Any) -> str | None:
     if not isinstance(code, str) or not code.strip():
         return None
     return code.strip().upper()
-
-
-def _invoice_uuid(payload: Any) -> str | None:
-    if not isinstance(payload, dict):
-        return None
-    invoice = payload.get("data")
-    if not isinstance(invoice, dict):
-        return None
-    value = invoice.get("uuid")
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _validated_invoice(
-    payload: Any,
-    *,
-    invoice_id: str,
-    allow_uuidless: bool,
-) -> dict[str, Any]:
-    invoice_uuid = _invoice_uuid(payload)
-    if not isinstance(payload, dict) or payload.get("success") is not True:
-        raise InvoiceOutcomeUnknown(invoice_uuid)
-    raw_invoice = payload.get("data")
-    if not isinstance(raw_invoice, dict):
-        raise InvoiceOutcomeUnknown(invoice_uuid)
-
-    invoice = dict(raw_invoice)
-    if invoice_uuid is None:
-        if raw_invoice.get("uuid") is not None:
-            raise InvoiceOutcomeUnknown()
-        if not allow_uuidless:
-            raise InvoiceOutcomeUnknown()
-        invoice["uuid"] = None
-        invoice["checkout_url"] = (
-            "https://checkout.multicard.uz/"
-            f"?store_id={settings.multicard_store_id}&invoice_id={invoice_id}"
-        )
-        return invoice
-
-    checkout_url = invoice.get("checkout_url")
-    if not isinstance(checkout_url, str) or not checkout_url.strip():
-        raise InvoiceOutcomeUnknown(invoice_uuid)
-    invoice["uuid"] = invoice_uuid
-    invoice["checkout_url"] = checkout_url.strip()
-    return invoice
 
 
 async def _get_token() -> str:
@@ -188,100 +109,67 @@ async def create_invoice(
         The invoice data dict from Multicard (includes uuid, checkout_url, short_link).
 
     Raises:
-        InvoicePreSubmitError: Provider POST definitely did not start.
-        InvoiceRejected: Provider returned one documented deterministic rejection.
-        InvoiceOutcomeUnknown: An invoice may exist and must not be posted again.
+        RuntimeError: On API error or non-success response.
     """
-    post_started = False
-    response: httpx.Response | None = None
-    try:
-        payload: dict[str, Any] = {
-            "store_id": settings.multicard_store_id,
-            "amount": amount_tiyin,
-            "invoice_id": invoice_id,
-            "callback_url": settings.multicard_callback_url,
-            "return_url": return_url,
-            "return_error_url": return_url,
-            "ttl": ttl,
-        }
-        token = await _get_token()
-        async with httpx.AsyncClient() as client:
-            post_started = True
-            response = await client.post(
-                f"{settings.multicard_api_base_url}/payment/invoice",
-                json=payload,
-                # Sandbox `dev` uses Bearer; production accepts X-Access-Token.
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "X-Access-Token": token,
-                    "Content-Type": "application/json",
-                },
-                timeout=30,
-            )
-    except Exception:
-        if not post_started:
-            raise InvoicePreSubmitError(
-                "Multicard invoice request was not attempted"
-            ) from None
-        response_payload = None
-        if response is not None:
-            try:
-                response_payload = response.json()
-            except (TypeError, ValueError):
-                pass
-        raise InvoiceOutcomeUnknown(_invoice_uuid(response_payload)) from None
+    token = await _get_token()
 
-    try:
-        response_payload = response.json()
-    except (TypeError, ValueError):
-        raise InvoiceOutcomeUnknown() from None
+    payload: dict[str, Any] = {
+        "store_id": settings.multicard_store_id,
+        "amount": amount_tiyin,
+        "invoice_id": invoice_id,
+        "callback_url": settings.multicard_callback_url,
+        "return_url": return_url,
+        "return_error_url": return_url,
+        "ttl": ttl,
+    }
 
-    error_code = _refund_error_code(response_payload)
-    definite_rejection = (
-        isinstance(response_payload, dict)
-        and response_payload.get("success") is False
-        and (
-            (response.status_code == 400 and error_code == "ERROR_FIELDS")
-            or (response.status_code == 404 and error_code == "ERROR_NOT_FOUND")
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{settings.multicard_api_base_url}/payment/invoice",
+            json=payload,
+            # Use both headers: sandbox `dev` role requires Bearer; production uses X-Access-Token.
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Access-Token": token,
+                "Content-Type": "application/json",
+            },
+            timeout=30,
         )
-    )
-    if definite_rejection:
-        raise InvoiceRejected(response.status_code)
-    if not 200 <= response.status_code < 300:
-        raise InvoiceOutcomeUnknown(_invoice_uuid(response_payload))
-    return _validated_invoice(
-        response_payload,
-        invoice_id=invoice_id,
-        allow_uuidless=settings.multicard_allow_uuidless_sandbox_checkout,
-    )
+        resp.raise_for_status()
+        data = resp.json()
 
-
-async def get_invoice(invoice_uuid: str) -> dict[str, Any]:
-    """Read one known invoice without creating a replacement."""
-    try:
-        token = await _get_token()
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{settings.multicard_api_base_url}/payment/invoice/{invoice_uuid}",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "X-Access-Token": token,
-                },
-                timeout=30,
-            )
-        if not 200 <= response.status_code < 300:
-            raise RuntimeError
-        payload = response.json()
-        invoice = _validated_invoice(
-            payload,
-            invoice_id="",
-            allow_uuidless=False,
+    if not data.get("success"):
+        err = data.get("error", {})
+        raise RuntimeError(
+            f"Multicard create_invoice failed: {err.get('code')} — {err.get('details')}"
         )
-        if invoice["uuid"] != invoice_uuid:
-            raise RuntimeError
-        return invoice
-    except Exception:
-        raise RuntimeError("Multicard invoice lookup failed") from None
+
+    invoice = data["data"]
+
+    # Resolve the best usable checkout URL.
+    # Production: checkout_url = "https://checkout.multicard.uz/invoice/{uuid}" (complete, card-first)
+    # Sandbox:    uuid is null; store has old_checkout=true & disable_deeplink=true.
+    #             Correct URL: "https://checkout.multicard.uz/?store_id={id}&invoice_id={invoice_id}"
+    inv_uuid = invoice.get("uuid")
+    checkout_url = invoice.get("checkout_url", "")
+
+    if inv_uuid:
+        if checkout_url and str(inv_uuid) not in checkout_url:
+            # Safety net: UUID present but missing from URL — append it
+            invoice["checkout_url"] = checkout_url.rstrip("/") + "/" + inv_uuid
+        # else: checkout_url already contains the uuid (production normal case)
+    else:
+        # No UUID assigned (sandbox regression / old_checkout store).
+        # Construct the old-style checkout URL directly — this is what the deeplink
+        # redirects to anyway but avoids an extra hop and works with disable_deeplink stores.
+        old_checkout_url = (
+            f"https://checkout.multicard.uz/"
+            f"?store_id={settings.multicard_store_id}&invoice_id={invoice_id}"
+        )
+        invoice["checkout_url"] = old_checkout_url
+        logger.debug("No invoice UUID: using old checkout URL: %s", old_checkout_url)
+
+    return invoice
 
 
 async def cancel_invoice(invoice_uuid: str) -> None:
@@ -309,48 +197,31 @@ async def cancel_invoice(invoice_uuid: str) -> None:
 
 async def cancel_invoice_strict(invoice_uuid: str) -> None:
     """Cancel an unpaid invoice and fail unless Multicard confirms cancellation."""
-    delete_invocation_started = False
-    try:
-        token = await _get_token()
-        async with httpx.AsyncClient() as client:
-            delete_invocation_started = True
-            response = await client.delete(
-                f"{settings.multicard_api_base_url}/payment/invoice/{invoice_uuid}",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "X-Access-Token": token,
-                },
-                timeout=30,
-            )
-    except Exception:
-        if not delete_invocation_started:
-            raise InvoiceCancelNotAttempted(
-                "Multicard invoice cancellation was not attempted"
-            ) from None
-        raise InvoiceCancelOutcomeUnknown(
-            "Multicard invoice cancellation outcome is unknown"
-        ) from None
-
-    try:
+    token = await _get_token()
+    async with httpx.AsyncClient() as client:
+        response = await client.delete(
+            f"{settings.multicard_api_base_url}/payment/invoice/{invoice_uuid}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Access-Token": token,
+            },
+            timeout=30,
+        )
         response.raise_for_status()
         payload = response.json()
-    except Exception:
-        raise InvoiceCancelOutcomeUnknown(
-            "Multicard invoice cancellation outcome is unknown"
-        ) from None
-    if not isinstance(payload, dict) or payload.get("success") is not True:
-        raise InvoiceCancelOutcomeUnknown(
-            "Multicard invoice cancellation outcome is unknown"
-        ) from None
+    if not payload.get("success"):
+        error = payload.get("error") or {}
+        raise RuntimeError(
+            "Multicard invoice cancellation failed: "
+            f"{error.get('code')} — {error.get('details')}"
+        )
 
 
 async def refund_payment(payment_uuid: str) -> dict[str, Any]:
     """Request one full refund for a completed Multicard payment."""
-    delete_invocation_started = False
+    token = await _get_token()
     try:
-        token = await _get_token()
         async with httpx.AsyncClient() as client:
-            delete_invocation_started = True
             response = await client.delete(
                 f"{settings.multicard_api_base_url}/payment/{payment_uuid}",
                 headers={
@@ -359,14 +230,12 @@ async def refund_payment(payment_uuid: str) -> dict[str, Any]:
                 },
                 timeout=30,
             )
-    except Exception:
-        if not delete_invocation_started:
-            raise RefundNotAttempted("Multicard refund was not attempted") from None
-        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from None
+    except httpx.RequestError as exc:
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
 
     try:
         response.raise_for_status()
-    except httpx.HTTPStatusError:
+    except httpx.HTTPStatusError as exc:
         try:
             error_code = _refund_error_code(response.json())
         except (TypeError, ValueError):
@@ -376,13 +245,13 @@ async def refund_payment(payment_uuid: str) -> dict[str, Any]:
             and error_code is not None
             and error_code not in _AMBIGUOUS_REFUND_ERROR_CODES
         ):
-            raise RefundRejected(response.status_code) from None
-        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from None
+            raise RefundRejected(response.status_code) from exc
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
 
     try:
         payload = response.json()
-    except (TypeError, ValueError):
-        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from None
+    except (TypeError, ValueError) as exc:
+        raise RefundOutcomeUnknown("Multicard refund outcome is unknown") from exc
     if not isinstance(payload, dict) or payload.get("success") is not True:
         error_code = _refund_error_code(payload)
         if (
@@ -401,24 +270,21 @@ async def refund_payment(payment_uuid: str) -> dict[str, Any]:
 
 async def get_payment(payment_uuid: str) -> dict[str, Any]:
     """Read the provider state of a payment for refund reconciliation."""
-    try:
-        token = await _get_token()
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{settings.multicard_api_base_url}/payment/{payment_uuid}",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "X-Access-Token": token,
-                },
-                timeout=30,
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except Exception:
-        raise RuntimeError("Multicard payment lookup failed") from None
-    if not isinstance(payload, dict) or payload.get("success") is not True:
-        raise RuntimeError("Multicard payment lookup failed") from None
-    payment = payload.get("data")
-    if not isinstance(payment, dict):
-        raise RuntimeError("Multicard payment lookup failed") from None
-    return payment
+    token = await _get_token()
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{settings.multicard_api_base_url}/payment/{payment_uuid}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Access-Token": token,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not payload.get("success"):
+        error = payload.get("error") or {}
+        raise RuntimeError(
+            f"Multicard payment lookup failed: {error.get('code')} — {error.get('details')}"
+        )
+    return payload.get("data") or payload

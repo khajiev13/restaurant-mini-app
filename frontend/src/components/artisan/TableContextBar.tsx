@@ -81,7 +81,7 @@ export default function TableContextBar({
           : t('table.enter_code', 'Stol kodini kiritish')}
         style={{
           minWidth: 44,
-          minHeight: 44,
+          minHeight: 40,
           padding: '0 12px',
           border: 'none',
           borderRadius: 12,

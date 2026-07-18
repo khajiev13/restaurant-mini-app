@@ -1,19 +1,11 @@
 # OLOT SOMSA — Telegram Mini App
 
-A production Telegram Mini App for restaurant ordering, built around a real food-ordering workflow: menu sync, cart checkout, AliPOS order creation, hosted payment callbacks, and live order status.
+A Telegram Mini App for ordering food from the OLOT SOMSA restaurant, built with:
 
-**Highlights**
-
-- Telegram Mini App frontend with React 19, Vite, and `@telegram-apps/telegram-ui`
-- FastAPI backend with async SQLAlchemy, PostgreSQL 16, JWT auth, and Telegram `initData` validation
-- AliPOS menu/order integration plus Multicard/Rahmat hosted checkout callbacks
-- Docker Compose deployment with Caddy and Cloudflare Tunnel
-- Signed callback handling, webhook endpoints, and automated checks for payment/order flows
-
-**Links**
-
-- Telegram bot: [@olotsomsa_zakaz_bot](https://t.me/olotsomsa_zakaz_bot)
-- Repository: [github.com/khajiev13/restaurant-mini-app](https://github.com/khajiev13/restaurant-mini-app)
+- **Frontend**: React 18 + Vite + `@telegram-apps/telegram-ui`
+- **Backend**: FastAPI + SQLAlchemy (async) + PostgreSQL 16
+- **POS Integration**: AliPOS
+- **Infrastructure**: Docker Compose + Caddy + Cloudflare Tunnel
 
 ---
 

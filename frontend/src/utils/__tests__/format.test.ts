@@ -7,7 +7,7 @@ vi.mock('../../i18n', () => ({
   },
 }));
 
-import { formatDate, formatDateTime, formatPrice } from '../format';
+import { formatPrice, formatDate } from '../format';
 
 describe('formatPrice', () => {
   it('formats in English', () => {
@@ -47,13 +47,5 @@ describe('formatDate', () => {
   it('accepts a string date', () => {
     const result = formatDate('2026-04-04', 'en');
     expect(result).toContain('2026');
-  });
-});
-
-describe('formatDateTime', () => {
-  it('normalizes a Russian locale suffix before selecting the formatter locale', () => {
-    const result = formatDateTime('2026-04-04T13:45:00Z', 'ru-RU');
-
-    expect(result.toLocaleLowerCase('ru-RU')).toContain('апрел');
   });
 });

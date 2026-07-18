@@ -86,27 +86,9 @@ describe('cartStore', () => {
       { ...limited, availableCount: 2 },
     ]);
 
-    expect(adjustment).toEqual({ removed: 1, reduced: 1, repriced: 0 });
+    expect(adjustment).toEqual({ removed: 1, reduced: 1 });
     expect(useCartStore.getState().items).toEqual([
       expect.objectContaining({ id: '2', quantity: 2, availableCount: 2 }),
     ]);
-  });
-
-  it('updates_price_only_catalog_changes', () => {
-    const item = {
-      id: '1', categoryId: '1', name: 'Cola', price: 15,
-      description: null, sortOrder: 1, available: true, availableCount: null,
-    };
-    useCartStore.getState().addItem(item);
-
-    const adjustment = useCartStore.getState().reconcileAvailability([
-      { ...item, price: 18 },
-    ]);
-
-    expect(adjustment).toEqual({ removed: 0, reduced: 0, repriced: 1 });
-    expect(useCartStore.getState().items).toEqual([
-      expect.objectContaining({ id: '1', quantity: 1, price: 18 }),
-    ]);
-    expect(useCartStore.getState().getTotal()).toBe(18);
   });
 });

@@ -14,7 +14,6 @@ from app.services.order_service import (
     CancellationError,
     CustomerOrderError,
     CustomerOrderNotFound,
-    OrderSubmissionInProgress,
     OrderSubmissionRejected,
     PaymentCheckoutError,
     PaymentRetryConflict,
@@ -25,10 +24,7 @@ from app.services.order_service import (
     retry_customer_order_payment,
     switch_customer_order_to_cash,
 )
-from app.services.order_status_service import (
-    apply_alipos_status_update_for_order,
-    parse_alipos_updated_at,
-)
+from app.services.order_status_service import apply_alipos_status_update_for_order
 from app.services.table_access_service import InvalidTableEntry
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -53,14 +49,6 @@ async def create_order(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
-        ) from exc
-    except OrderSubmissionInProgress as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "order_id": str(exc.order_id),
-                "status": exc.sync_status,
-            },
         ) from exc
     except OrderSubmissionRejected as exc:
         raise HTTPException(
@@ -172,13 +160,7 @@ async def get_order_status(
             new_status = alipos_data.get("status", order.status)
             order_number = alipos_data.get("orderNumber")
             if await apply_alipos_status_update_for_order(
-                db,
-                order,
-                new_status,
-                order_number,
-                provider_updated_at=parse_alipos_updated_at(
-                    alipos_data.get("updatedAt")
-                ),
+                db, order, new_status, order_number
             ):
                 await db.commit()
         except Exception:

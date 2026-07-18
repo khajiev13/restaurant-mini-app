@@ -122,7 +122,6 @@ class Order(Base):
     multicard_checkout_url: Mapped[str | None] = mapped_column(Text)
     multicard_receipt_url: Mapped[str | None] = mapped_column(Text)
     multicard_payment_uuid: Mapped[str | None] = mapped_column(String(64))
-    invoice_cancel_status: Mapped[str | None] = mapped_column(String(32))
     refund_sync_status: Mapped[str | None] = mapped_column(String(32))
     refund_sync_error: Mapped[str | None] = mapped_column(Text)
     alipos_cancel_status: Mapped[str | None] = mapped_column(String(50))
@@ -130,9 +129,6 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(50), default="NEW")
     order_number: Mapped[str | None] = mapped_column(String(50))
     status_updated_at: Mapped[datetime.datetime | None] = mapped_column()
-    alipos_status_updated_at: Mapped[datetime.datetime | None] = mapped_column()
-    alipos_status_check_attempted_at: Mapped[datetime.datetime | None] = mapped_column()
-    alipos_status_checked_at: Mapped[datetime.datetime | None] = mapped_column()
     cancel_requested_at: Mapped[datetime.datetime | None] = mapped_column()
     created_at: Mapped[datetime.datetime] = mapped_column(
         default=lambda: datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
@@ -165,14 +161,6 @@ class Order(Base):
         Index("idx_orders_alipos_eats_id", "alipos_eats_id"),
         Index("idx_orders_table_id", "table_id"),
         Index("idx_orders_alipos_sync_status", "alipos_sync_status"),
-        Index(
-            "idx_orders_inplace_workspace",
-            "table_id",
-            "alipos_sync_status",
-            "status",
-            "alipos_status_check_attempted_at",
-            postgresql_where=text("discriminator = 'inplace'"),
-        ),
         Index("idx_orders_payment_status", "payment_status"),
         Index("idx_orders_payment_expires_at", "payment_expires_at"),
         Index("idx_orders_multicard_payment_uuid", "multicard_payment_uuid"),
