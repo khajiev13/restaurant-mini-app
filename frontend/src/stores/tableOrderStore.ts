@@ -106,7 +106,8 @@ export const useTableOrderStore = create<TableOrderState>((set) => ({
   },
 
   resolveCode: async (code) => {
-    const normalized = code.toUpperCase().replace(/[\s-]/g, '');
+    const digits = code.replace(/\D/g, '').slice(0, 6);
+    const normalized = digits.replace(/^0+(?=\d)/, '');
     await resolveAndStore(resolveTable({ code: normalized }), set);
   },
 
