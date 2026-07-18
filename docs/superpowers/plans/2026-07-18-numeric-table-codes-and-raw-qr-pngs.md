@@ -739,189 +739,25 @@ Pillow>=11,<13
 zxing-cpp>=2.2,<3
 ```
 
-Create `tests/scripts/test_download_table_manifest.py` with offline coverage for redirect rejection, a direct HTTP `200`, refusal before network when the output exists, missing `ADMIN_JWT`, and the absence of credential or response-body logging. Create `tests/scripts/test_generate_table_qr_pngs.py` with fixtures for codes `1`, `8`, `10`, and `30`, canonical `t2_` parameters with twelve-character signatures, and exact deep links for the required trusted bot. Cover these exact generator behaviors:
+Create `tests/scripts/test_download_table_manifest.py` with offline coverage for redirect rejection, a direct HTTP `200`, refusal before network when the output exists, missing `ADMIN_JWT`, and the absence of credential or response-body logging.
+
+Treat the checked-in `tests/scripts/test_generate_table_qr_pngs.py` as the authoritative generator-test implementation instead of copying the complete test module into this plan. Its fixtures use codes `1`, `8`, `10`, and `30`, twelve-character `t2_` signatures, and this trusted-bot contract:
 
 ```python
-import importlib.util
-import io
-import json
-from pathlib import Path
-from types import SimpleNamespace
+BOT_USERNAME = "olotsomsa_zakaz_bot"
 
-import pytest
-import zxingcpp
-from PIL import Image
-
-SCRIPT = Path(__file__).parents[2] / "scripts" / "generate_table_qr_pngs.py"
-SPEC = importlib.util.spec_from_file_location("generate_table_qr_pngs", SCRIPT)
-assert SPEC and SPEC.loader
-qr_pngs = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(qr_pngs)
-
-
-def manifest_rows():
-    rows = []
-    for code, signature in (
-        ("1", "aaaaaaaaaaaa"),
-        ("8", "bbbbbbbbbbbb"),
-        ("10", "cccccccccccc"),
-        ("30", "dddddddddddd"),
-    ):
-        start_param = f"t2_{code}_{signature}"
-        rows.append(
-            {
-                "table_title": f"Stoll {code}",
-                "hall_title": "Zal",
-                "manual_code": code,
-                "start_param": start_param,
-                "deep_link": (
-                    "https://t.me/olotsomsa_zakaz_bot?startapp=" + start_param
-                ),
-            }
-        )
-    return rows
-
-
-def test_gap_manifest_generates_only_raw_verified_pngs(tmp_path):
-    output = tmp_path / "table-qr-pngs"
-    rows = qr_pngs.validate_manifest_rows(manifest_rows())
-    result = qr_pngs.generate_verified_png_folder(rows, output)
-
-    assert result == output
-    assert [path.name for path in sorted(output.iterdir())] == [
-        "table-01.png",
-        "table-08.png",
-        "table-10.png",
-        "table-30.png",
-    ]
-    assert not (output / "table-09.png").exists()
-    for row, path in zip(rows, sorted(output.iterdir()), strict=True):
-        with Image.open(path) as image:
-            assert image.format == "PNG"
-            assert image.mode == "RGB"
-            assert image.width == image.height
-            assert image.width >= 1200
-            assert image.getpixel((0, 0)) == (255, 255, 255)
-            assert "transparency" not in image.info
-            assert set(image.getdata()) <= {(0, 0, 0), (255, 255, 255)}
-            decoded = zxingcpp.read_barcode(image)
-        assert decoded is not None
-        assert decoded.text == row["deep_link"]
-
-    assert qr_pngs.QUIET_ZONE_MODULES >= 4
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda rows: rows[0].pop("manual_code"),
-        lambda rows: rows[0].__setitem__("manual_code", "A1"),
-        lambda rows: rows[0].__setitem__("manual_code", "01"),
-        lambda rows: rows[1].__setitem__("manual_code", "1"),
-        lambda rows: rows[0].__setitem__("table_title", "Stoll 2"),
-        lambda rows: rows[0].__setitem__("start_param", "t_AAAAAA_aaaaaaaaaaaa"),
-        lambda rows: rows[0].__setitem__("start_param", "t2_2_aaaaaaaaaaaa"),
-        lambda rows: rows[0].__setitem__(
-            "deep_link",
-            "https://t.me/olotsomsa_zakaz_bot?startapp=t2_2_aaaaaaaaaaaa",
-        ),
-    ],
-)
-def test_manifest_rejects_missing_duplicate_or_mismatched_codes(mutate):
-    rows = manifest_rows()
-    mutate(rows)
-    with pytest.raises(ValueError):
-        qr_pngs.validate_manifest_rows(rows)
-
-
-class FakeResponse(io.BytesIO):
-    status = 200
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, traceback):
-        self.close()
-
-
-def test_deployment_verification_uses_signed_entries_and_safe_fields(monkeypatch):
-    rows = qr_pngs.validate_manifest_rows(manifest_rows())
-    requests = []
-
-    def fake_urlopen(request, timeout):
-        assert timeout == 20
-        requests.append(request)
-        if request.full_url.endswith(("/healthz", "/api/health")):
-            return FakeResponse(b"ok")
-        submitted = json.loads(request.data)
-        assert set(submitted) == {"entry"}
-        row = next(item for item in rows if item["start_param"] == submitted["entry"])
-        return FakeResponse(
-            json.dumps(
-                {
-                    "success": True,
-                    "data": {
-                        "manual_code": row["manual_code"],
-                        "table_title": row["table_title"],
-                        "hall_title": "ignored safe field",
-                        "access_token": "must-not-be-persisted-or-printed",
-                    },
-                }
-            ).encode()
-        )
-
-    monkeypatch.setattr(qr_pngs.urllib.request, "urlopen", fake_urlopen)
-    qr_pngs.verify_deployment(rows, "https://restaurant.labtutor.app")
-    resolver_requests = [request for request in requests if request.data is not None]
-    assert [json.loads(request.data) for request in resolver_requests] == [
-        {"entry": row["start_param"]} for row in rows
-    ]
-
-
-def test_decode_failure_leaves_no_delivery_folder(tmp_path, monkeypatch):
-    output = tmp_path / "table-qr-pngs"
-    monkeypatch.setattr(
-        qr_pngs.zxingcpp,
-        "read_barcode",
-        lambda image: SimpleNamespace(text="wrong destination"),
-    )
-    with pytest.raises(ValueError, match="QR decode mismatch"):
-        qr_pngs.generate_verified_png_folder(
-            qr_pngs.validate_manifest_rows(manifest_rows()),
-            output,
-        )
-    assert not output.exists()
-
-
-def test_existing_output_is_never_overwritten(tmp_path):
-    output = tmp_path / "table-qr-pngs"
-    output.mkdir()
-    with pytest.raises(FileExistsError):
-        qr_pngs.generate_verified_png_folder(
-            qr_pngs.validate_manifest_rows(manifest_rows()),
-            output,
-        )
+validated = qr_pngs.validate_manifest_rows(manifest_rows(), BOT_USERNAME)
+loaded = qr_pngs.load_manifest(source, BOT_USERNAME)
 ```
 
-Add these file-boundary cases:
+The generator suite must retain these named behaviors:
 
-```python
-@pytest.mark.parametrize("wrapped", [False, True])
-def test_load_manifest_accepts_raw_or_success_wrapper(tmp_path, wrapped):
-    rows = manifest_rows()
-    payload = {"success": True, "data": rows} if wrapped else rows
-    source = tmp_path / "manifest.json"
-    source.write_text(json.dumps(payload), encoding="utf-8")
-    assert qr_pngs.load_manifest(source) == qr_pngs.validate_manifest_rows(rows)
-
-
-@pytest.mark.parametrize("field", ["access_token", "table_id", "hall_id"])
-def test_manifest_rejects_sensitive_fields(field):
-    rows = manifest_rows()
-    rows[0][field] = "must-not-enter-the-generator"
-    with pytest.raises(ValueError, match="sensitive"):
-        qr_pngs.validate_manifest_rows(rows)
-```
+- gap-preserving, raw black-on-white PNG generation and byte-for-byte decode verification;
+- missing, duplicate, non-canonical, sensitive, or mismatched manifest data is rejected;
+- `test_manifest_rejects_links_outside_the_trusted_bot` rejects a wrong bot, extra path segment, fragment, or extra query field;
+- `test_cli_requires_and_forwards_bot_username` proves `--bot-username` is required and forwarded to `load_manifest(path, bot_username)`;
+- health and signed-resolver verification uses only safe fields and logs no response body;
+- decode failure leaves no delivered folder, an existing output is never overwritten, and the publish-time destination race preserves both the existing destination and staging directory.
 
 - [ ] **Step 2: Install the declared dependencies and verify RED**
 
@@ -936,194 +772,85 @@ Expected: collection fails because `scripts/download_table_manifest.py` and `scr
 
 - [ ] **Step 3: Implement the hardened downloader and strict manifest/deployed-resolver verification**
 
-Create `scripts/download_table_manifest.py` with the downloader boundaries described above, then create the generator with these constants and boundaries:
+Create `scripts/download_table_manifest.py` with the downloader boundaries described above. Treat the checked-in `scripts/download_table_manifest.py` and `tests/scripts/test_download_table_manifest.py` as authoritative for redirect and credential handling.
+
+Treat the checked-in `scripts/generate_table_qr_pngs.py` as authoritative for complete validation and deployed-resolver behavior. The stable manifest interface is:
 
 ```python
-import argparse
-import json
-import math
-import re
-import tempfile
-import urllib.request
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
-
-import qrcode
-import zxingcpp
-from PIL import Image
-
-CODE_RE = re.compile(r"^(?:0|[1-9][0-9]{0,5})$")
-TITLE_CODE_RE = re.compile(r"([0-9]+)\s*$")
-START_PARAM_RE = re.compile(
-    r"^t2_((?:0|[1-9][0-9]{0,5}))_([A-Za-z0-9_-]{12})$"
-)
-REQUIRED_TEXT_FIELDS = (
-    "table_title",
-    "hall_title",
-    "manual_code",
-    "start_param",
-    "deep_link",
-)
-SENSITIVE_FIELDS = {"access_token", "table_id", "hall_id", "jwt", "token"}
-MIN_SIDE_PIXELS = 1200
-QUIET_ZONE_MODULES = 4
-
-
-def _title_code(title: str) -> str:
-    match = TITLE_CODE_RE.search(title.strip())
-    if match is None or not 1 <= len(match.group(1)) <= 6:
-        raise ValueError("Table title has no valid trailing number")
-    return str(int(match.group(1)))
-
-
-def validate_manifest_rows(rows: object) -> list[dict]:
-    if not isinstance(rows, list) or not rows:
-        raise ValueError("Manifest must contain at least one table")
-    validated: list[dict] = []
-    seen_codes: set[str] = set()
+def validate_manifest_rows(rows: object, bot_username: str) -> list[dict]:
+    if BOT_USERNAME_RE.fullmatch(bot_username) is None:
+        raise ValueError("Bot username must be a single path segment")
+    validated = []
     for raw in rows:
-        if not isinstance(raw, dict):
-            raise ValueError("Manifest row is not an object")
-        if SENSITIVE_FIELDS.intersection(raw):
-            raise ValueError("Manifest row contains a sensitive field")
-        if any(not isinstance(raw.get(field), str) for field in REQUIRED_TEXT_FIELDS):
-            raise ValueError("Manifest row has missing text fields")
-
-        code = raw["manual_code"]
-        if CODE_RE.fullmatch(code) is None:
-            raise ValueError(f"Invalid manual code: {code!r}")
-        if code in seen_codes:
-            raise ValueError(f"Duplicate manual code: {code}")
-        if _title_code(raw["table_title"]) != code:
-            raise ValueError(f"Table title/code mismatch for table {code}")
-
-        start_match = START_PARAM_RE.fullmatch(raw["start_param"])
-        if start_match is None or start_match.group(1) != code:
-            raise ValueError(f"Start parameter/code mismatch for table {code}")
-        parsed = urlparse(raw["deep_link"])
-        query = parse_qs(parsed.query, keep_blank_values=True)
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != "t.me"
-            or not parsed.path.strip("/")
-            or parsed.fragment
-            or set(query) != {"startapp"}
-            or query["startapp"] != [raw["start_param"]]
-        ):
-            raise ValueError(f"Deep link/start parameter mismatch for table {code}")
-
-        seen_codes.add(code)
+        # Preserve strict row, sensitive-field, numeric-code, title, and t2_ checks.
+        ...
+        expected_deep_link = (
+            f"https://t.me/{bot_username}?startapp={raw['start_param']}"
+        )
+        if raw["deep_link"] != expected_deep_link:
+            raise ValueError("Deep link is not for the trusted bot")
         validated.append({field: raw[field] for field in REQUIRED_TEXT_FIELDS})
     return sorted(validated, key=lambda row: int(row["manual_code"]))
 
 
-def load_manifest(path: Path) -> list[dict]:
+def load_manifest(path: Path, bot_username: str) -> list[dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload.get("data") if isinstance(payload, dict) else payload
     if isinstance(payload, dict) and payload.get("success") is not True:
         raise ValueError("Manifest response was not successful")
-    return validate_manifest_rows(rows)
+    return validate_manifest_rows(rows, bot_username)
 ```
 
-Add network helpers that never print response bodies:
-
-```python
-def _read_response(request: urllib.request.Request) -> bytes:
-    with urllib.request.urlopen(request, timeout=20) as response:
-        if getattr(response, "status", 200) != 200:
-            raise ValueError("Deployed endpoint did not return HTTP 200")
-        return response.read()
-
-
-def verify_deployment(rows: list[dict], public_base: str) -> None:
-    base = public_base.rstrip("/")
-    for health_url in (f"{base}/healthz", f"{base}/api/health"):
-        _read_response(urllib.request.Request(health_url, method="GET"))
-
-    endpoint = f"{base}/api/tables/resolve"
-    for row in rows:
-        request = urllib.request.Request(
-            endpoint,
-            data=json.dumps({"entry": row["start_param"]}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        payload = json.loads(_read_response(request))
-        data = payload.get("data") if isinstance(payload, dict) else None
-        actual = (
-            data.get("manual_code") if isinstance(data, dict) else None,
-            data.get("table_title") if isinstance(data, dict) else None,
-        )
-        expected = (row["manual_code"], row["table_title"])
-        if (
-            not isinstance(payload, dict)
-            or payload.get("success") is not True
-            or actual != expected
-        ):
-            raise ValueError(f"Deployed resolver mismatch for table {row['manual_code']}")
-```
+Deep-link acceptance is exact string equality with `https://t.me/{bot_username}?startapp={start_param}`. Do not replace it with permissive URL parsing: a wrong bot, extra path, fragment, or extra query parameter must fail. Deployment verification must continue to check both health endpoints and submit each signed `entry` to `/api/tables/resolve`, compare only the safe table number/title fields, and never print response bodies.
 
 - [ ] **Step 4: Implement raw integer-scaled rendering and atomic delivery**
 
-Add:
+Treat `render_raw_qr` and `generate_verified_png_folder` in the checked-in `scripts/generate_table_qr_pngs.py` as authoritative for image shape, integer scaling, PNG verification, decode verification, and staging cleanup. Final publication must use the native no-replace helper:
 
 ```python
-def render_raw_qr(deep_link: str) -> Image.Image:
-    qr = qrcode.QRCode(
-        error_correction=qrcode.constants.ERROR_CORRECT_Q,
-        box_size=1,
-        border=QUIET_ZONE_MODULES,
-    )
-    qr.add_data(deep_link)
-    qr.make(fit=True)
-    total_modules = qr.modules_count + 2 * QUIET_ZONE_MODULES
-    qr.box_size = math.ceil(MIN_SIDE_PIXELS / total_modules)
-    return qr.make_image(fill_color="black", back_color="white").convert("RGB")
+def _publish_directory_no_replace(staging: Path, output: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(staging)
+    destination = os.fsencode(output)
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is None:
+            raise RuntimeError("Atomic no-replace publication is unsupported")
+        result = rename(source, destination, _RENAME_EXCL)
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise RuntimeError("Atomic no-replace publication is unsupported")
+        result = rename(
+            _AT_FDCWD,
+            source,
+            _AT_FDCWD,
+            destination,
+            _RENAME_NOREPLACE,
+        )
+    else:
+        raise RuntimeError("Atomic no-replace publication is unsupported")
+    # EEXIST becomes FileExistsError; missing symbols and unsupported syscall errors
+    # fail closed. Other native errors propagate without replacing the destination.
 
 
-def generate_verified_png_folder(rows: list[dict], output: Path) -> Path:
-    if output.exists():
-        raise FileExistsError(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".table-qr-", dir=output.parent) as temp_dir:
-        staging = Path(temp_dir) / "delivery"
-        staging.mkdir()
-        for row in rows:
-            destination = staging / f"table-{int(row['manual_code']):02d}.png"
-            render_raw_qr(row["deep_link"]).save(destination, format="PNG", optimize=True)
-            with Image.open(destination) as image:
-                if (
-                    image.format != "PNG"
-                    or image.mode != "RGB"
-                    or image.width != image.height
-                    or image.width < MIN_SIDE_PIXELS
-                ):
-                    raise ValueError(f"Invalid PNG for table {row['manual_code']}")
-                decoded = zxingcpp.read_barcode(image)
-            if decoded is None or decoded.text != row["deep_link"]:
-                raise ValueError(f"QR decode mismatch for table {row['manual_code']}")
-
-        expected_names = {
-            f"table-{int(row['manual_code']):02d}.png" for row in rows
-        }
-        actual_names = {path.name for path in staging.iterdir() if path.is_file()}
-        if actual_names != expected_names or any(path.is_dir() for path in staging.iterdir()):
-            raise ValueError("PNG delivery folder contents do not match the manifest")
-        staging.replace(output)
-    return output
+_publish_directory_no_replace(staging, output)
 ```
 
-Add this CLI. It prints only the verified count and directory path:
+Darwin must call `renamex_np` with `RENAME_EXCL`; Linux must call `renameat2` with `RENAME_NOREPLACE`. Missing native symbols, unsupported platforms, and unsupported syscall errors fail closed. `Path.replace`, `os.replace`, and any check-then-overwrite fallback are prohibited for final publication because they can replace a destination created during the publish race.
+
+The CLI must require and forward the trusted bot username. It prints only the verified count and directory path:
 
 ```python
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--public-base", required=True)
+    parser.add_argument("--bot-username", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    rows = load_manifest(args.manifest)
+    rows = load_manifest(args.manifest, args.bot_username)
     verify_deployment(rows, args.public_base)
     output = generate_verified_png_folder(rows, args.output)
     print(f"verified_pngs={len(rows)}")
