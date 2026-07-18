@@ -144,6 +144,8 @@ async def get_table_directory() -> list[TableDirectoryEntry]:
             hall_id = uuid.UUID(str(raw_hall["id"]))
             hall_title = str(raw_hall.get("title") or "")
             service_percent = Decimal(str(raw_hall.get("servicePercent") or 0))
+            if not service_percent.is_finite():
+                raise InvalidTableDirectory("Hall directory entry is invalid")
         except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
             raise InvalidTableDirectory("Hall directory entry is invalid") from exc
         if hall_id in halls:
@@ -325,6 +327,13 @@ class TableAccessService:
         directory: list[TableDirectoryEntry],
     ) -> TableResolution:
         parsed = self.parse_start_param(value)
+        return self._resolve_parsed_start_param(parsed, directory)
+
+    def _resolve_parsed_start_param(
+        self,
+        parsed: ParsedTableEntry,
+        directory: list[TableDirectoryEntry],
+    ) -> TableResolution:
         if parsed.legacy:
             matches = [
                 item
@@ -340,9 +349,11 @@ class TableAccessService:
         return self._resolution_for(matches[0])
 
     async def resolve(self, entry: str | None, code: str | None) -> TableResolution:
-        directory = await get_table_directory()
         if entry is not None:
-            return self.resolve_start_param(entry, directory)
+            parsed = self.parse_start_param(entry)
+            directory = await get_table_directory()
+            return self._resolve_parsed_start_param(parsed, directory)
+        directory = await get_table_directory()
         return self.resolve_manual_code(code or "", directory)
 
     async def resolve_access_token(self, token: str) -> TableDirectoryEntry:

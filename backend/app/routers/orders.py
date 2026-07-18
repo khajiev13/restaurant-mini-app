@@ -29,10 +29,11 @@ from app.services.order_status_service import (
     apply_alipos_status_update_for_order,
     parse_alipos_updated_at,
 )
-from app.services.table_access_service import InvalidTableEntry
+from app.services.table_access_service import InvalidTableDirectory, InvalidTableEntry
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 ORDER_SUBMISSION_ERROR_DETAIL = "Could not submit the order to the restaurant"
+TABLE_DIRECTORY_UNAVAILABLE = "Table directory is temporarily unavailable"
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -48,6 +49,11 @@ async def create_order(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "cart_conflict", "changes": exc.changes},
+        ) from exc
+    except InvalidTableDirectory as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=TABLE_DIRECTORY_UNAVAILABLE,
         ) from exc
     except (CustomerOrderError, InvalidTableEntry) as exc:
         raise HTTPException(

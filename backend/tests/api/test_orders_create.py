@@ -15,8 +15,12 @@ from app.routers.orders import create_order as create_order_endpoint
 from app.schemas.order import OrderCreate
 from app.services import alipos_api
 from app.services.menu_catalog_service import PricedCart
+from app.services.order_service import table_access as order_table_access
+from app.services.table_access_service import TableDirectoryEntry
 
 CASH_PAYMENT_ID = "59FFAC8D-ACE5-4758-8FB7-6C1F69713C37"
+TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+HALL_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
 PRICED_CART = PricedCart(
     items=[
         {
@@ -29,6 +33,17 @@ PRICED_CART = PricedCart(
     ],
     items_cost=Decimal("36000"),
 )
+
+
+def _table_directory_payload() -> dict:
+    return {
+        "halls": [
+            {"id": str(HALL_ID), "title": "Asosiy zal", "servicePercent": 10},
+        ],
+        "tables": [
+            {"id": str(TABLE_ID), "title": "Stol 12", "hallId": str(HALL_ID)},
+        ],
+    }
 
 
 async def _delivery_order_request(
@@ -71,6 +86,77 @@ async def _delivery_order_request(
         "payment_method": "cash",
         "discriminator": "delivery",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("directory_kind", ["duplicate", "malformed"])
+async def test_create_table_order_returns_generic_503_for_invalid_live_directory(
+    client,
+    db_session,
+    directory_kind,
+):
+    user = User(
+        telegram_id=6200,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+        phone_number="+998901112233",
+    )
+    db_session.add(user)
+    await db_session.commit()
+    entry = TableDirectoryEntry(
+        table_id=TABLE_ID,
+        table_title="Stol 12",
+        hall_id=HALL_ID,
+        hall_title="Asosiy zal",
+        service_percent=Decimal("10"),
+        manual_code="12",
+    )
+    access_token = order_table_access.issue_access_token(entry)
+    directory = _table_directory_payload()
+    leaked_detail = "Duplicate table number 12"
+    if directory_kind == "duplicate":
+        directory["tables"].append(
+            {
+                "id": "33333333-3333-4333-8333-333333333333",
+                "title": "Stol 012",
+                "hallId": str(HALL_ID),
+            }
+        )
+    else:
+        directory["halls"][0]["id"] = "not-a-uuid"
+        leaked_detail = "Hall directory entry is invalid"
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=directory),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "items": [
+                    {
+                        "id": "menu-item-1",
+                        "name": "Classic Somsa",
+                        "quantity": 2,
+                        "price": 18000,
+                        "modifications": [],
+                    }
+                ],
+                "phone_number": "+998901112233",
+                "payment_method": "cash",
+                "discriminator": "inplace",
+                "table_access_token": access_token,
+            },
+        )
+
+    result = await db_session.execute(select(Order).where(Order.user_id == user.telegram_id))
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Table directory is temporarily unavailable"
+    assert result.scalar_one_or_none() is None
+    assert leaked_detail not in response.text
+    assert str(TABLE_ID) not in response.text
 
 
 @pytest.mark.asyncio

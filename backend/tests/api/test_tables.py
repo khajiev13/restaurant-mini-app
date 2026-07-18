@@ -101,14 +101,22 @@ async def test_resolve_table_accepts_legacy_start_parameter(client):
 async def test_resolve_table_rejects_tampered_numeric_start_parameter(client):
     start_param = table_access.build_start_param(DIRECTORY_ENTRY)
     replacement = "0" if start_param[-1] != "0" else "1"
-
-    response = await client.post(
-        "/api/tables/resolve",
-        json={"entry": start_param[:-1] + replacement},
+    directory_loader = AsyncMock(
+        side_effect=AssertionError("directory loader must not be called")
     )
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=directory_loader,
+    ):
+        response = await client.post(
+            "/api/tables/resolve",
+            json={"entry": start_param[:-1] + replacement},
+        )
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid table QR"
+    directory_loader.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -246,6 +254,34 @@ async def test_resolve_returns_generic_503_for_duplicate_numeric_directory(clien
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Table directory is temporarily unavailable"
+    assert str(TABLE_ID) not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service_percent", ["NaN", "Infinity", "-Infinity"])
+async def test_resolve_returns_generic_503_for_non_finite_service_percent(
+    client,
+    service_percent,
+):
+    payload = {
+        "halls": [
+            {
+                "id": str(HALL_ID),
+                "title": "Asosiy zal",
+                "servicePercent": service_percent,
+            },
+        ],
+        "tables": DIRECTORY_RESPONSE["tables"],
+    }
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=payload),
+    ):
+        response = await client.post("/api/tables/resolve", json={"code": "12"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Table directory is temporarily unavailable"
+    assert service_percent not in response.text
     assert str(TABLE_ID) not in response.text
 
 
