@@ -27,7 +27,9 @@ describe('TableContextBar', () => {
   it('keeps the change-table control at least 44px tall', () => {
     render(<TableContextBar context={null} onChange={vi.fn()} />);
 
-    expect(screen.getByRole('button', { name: 'Enter table code' })).toHaveStyle({
+    expect(
+      screen.getByRole('button', { name: 'Enter table number' }),
+    ).toHaveStyle({
       minHeight: '44px',
     });
   });
