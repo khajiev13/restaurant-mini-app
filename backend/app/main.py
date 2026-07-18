@@ -20,7 +20,6 @@ from app.routers import (
     users,
     webhooks,
 )
-from app.services.telegram_webhook_service import register_telegram_webhook
 
 logger = logging.getLogger(__name__)
 PAYMENTS_EXPIRY_LOCK_ID = 841_337_204
@@ -28,7 +27,6 @@ PROVIDER_RECONCILIATION_MIN_INTERVAL_SECONDS = 1
 PROVIDER_RECONCILIATION_MAX_INTERVAL_SECONDS = 3600
 
 app = FastAPI(title="Mr.Pub Restaurant API", version="0.1.0")
-app.router.add_event_handler("startup", register_telegram_webhook)
 
 
 @app.on_event("startup")
