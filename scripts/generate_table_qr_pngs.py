@@ -30,6 +30,7 @@ REQUIRED_TEXT_FIELDS = (
 SENSITIVE_FIELDS = {"access_token", "table_id", "hall_id", "jwt", "token"}
 MIN_SIDE_PIXELS = 1200
 QUIET_ZONE_MODULES = 4
+USER_AGENT = "restaurant-mini-app-qr-tools/1.0"
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 _RENAME_EXCL = 0x00000004
@@ -97,14 +98,23 @@ def _read_response(request: urllib.request.Request) -> bytes:
 def verify_deployment(rows: list[dict], public_base: str) -> None:
     base = public_base.rstrip("/")
     for health_url in (f"{base}/healthz", f"{base}/api/health"):
-        _read_response(urllib.request.Request(health_url, method="GET"))
+        _read_response(
+            urllib.request.Request(
+                health_url,
+                headers={"User-Agent": USER_AGENT},
+                method="GET",
+            )
+        )
 
     endpoint = f"{base}/api/tables/resolve"
     for row in rows:
         request = urllib.request.Request(
             endpoint,
             data=json.dumps({"entry": row["start_param"]}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
             method="POST",
         )
         payload = json.loads(_read_response(request))

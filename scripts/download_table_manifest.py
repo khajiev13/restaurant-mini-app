@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 MANIFEST_URL = "https://restaurant.labtutor.app/api/tables/manifest"
+USER_AGENT = "restaurant-mini-app-qr-tools/1.0"
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -29,7 +30,10 @@ def download_manifest(
 
     request = urllib.request.Request(
         url,
-        headers={"Authorization": f"Bearer {token}"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": USER_AGENT,
+        },
         method="GET",
     )
     direct_opener = opener or urllib.request.build_opener(RejectRedirects())

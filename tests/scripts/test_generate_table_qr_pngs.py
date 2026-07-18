@@ -156,6 +156,10 @@ def test_deployment_verification_uses_signed_entries_and_safe_fields(monkeypatch
 
     monkeypatch.setattr(qr_pngs.urllib.request, "urlopen", fake_urlopen)
     qr_pngs.verify_deployment(rows, "https://restaurant.labtutor.app")
+    assert all(
+        request.get_header("User-agent") == "restaurant-mini-app-qr-tools/1.0"
+        for request in requests
+    )
     resolver_requests = [request for request in requests if request.data is not None]
     assert [json.loads(request.data) for request in resolver_requests] == [
         {"entry": row["start_param"]} for row in rows

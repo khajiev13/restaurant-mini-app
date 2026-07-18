@@ -68,6 +68,7 @@ def test_direct_200_writes_manifest_once_without_logging_secrets(tmp_path, capsy
     assert result == output
     assert output.read_bytes() == body
     assert request.get_header("Authorization") == "Bearer header-secret"
+    assert request.get_header("User-agent") == "restaurant-mini-app-qr-tools/1.0"
     assert timeout == 30
     assert "header-secret" not in captured.out + captured.err
     assert body.decode() not in captured.out + captured.err
