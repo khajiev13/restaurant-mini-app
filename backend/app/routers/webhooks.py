@@ -1,5 +1,6 @@
 import datetime
 import hmac
+import json
 import logging
 import time
 import uuid
@@ -84,15 +85,23 @@ async def telegram_bot_webhook(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram webhook secret is not configured",
         )
-    if not x_telegram_bot_api_secret_token or not hmac.compare_digest(
-        x_telegram_bot_api_secret_token, webhook_secret
-    ):
+    try:
+        secret_is_valid = bool(x_telegram_bot_api_secret_token) and hmac.compare_digest(
+            x_telegram_bot_api_secret_token, webhook_secret
+        )
+    except TypeError:
+        secret_is_valid = False
+    if not secret_is_valid:
         _log_telegram_webhook_outcome("invalid_secret", None, started_at)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret"
         )
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        _log_telegram_webhook_outcome("invalid_json", None, started_at)
+        return {"result": "OK"}
     if not isinstance(body, dict):
         _log_telegram_webhook_outcome("invalid_structure", None, started_at)
         return {"result": "OK"}

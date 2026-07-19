@@ -140,10 +140,44 @@ async def test_telegram_bot_webhook_rejects_invalid_secret(client, monkeypatch, 
             "/api/webhooks/bot",
             json={"update_id": 103, "message": {}},
             headers={"x-telegram-bot-api-secret-token": "wrong-secret"},
-    )
+        )
 
     assert response.status_code == 401
     assert "outcome=invalid_secret" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_ignores_malformed_authenticated_json(
+    client, monkeypatch, caplog
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    with caplog.at_level("INFO", logger="app.routers.webhooks"):
+        response = await client.post(
+            "/api/webhooks/bot",
+            content=b"not-json",
+            headers={
+                "content-type": "application/json",
+                "x-telegram-bot-api-secret-token": "test-secret",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "outcome=invalid_json" in caplog.text
+    assert "not-json" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_rejects_non_ascii_invalid_secret(client, monkeypatch):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={"update_id": 103, "message": {}},
+        headers=[(b"x-telegram-bot-api-secret-token", b"\xff")],
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
