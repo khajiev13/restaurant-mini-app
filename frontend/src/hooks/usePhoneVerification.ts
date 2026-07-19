@@ -22,15 +22,33 @@ const PROFILE_POLL_INTERVAL_MS = 1_500;
 const MAX_PROFILE_REQUESTS = 10;
 let automaticRequestClaimed = false;
 
-function getInitialStatus(): PhoneVerificationStatus {
+type PhoneVerificationEnvironment =
+  | { status: 'ready'; requestContact: (callback: (shared: boolean) => void) => void }
+  | { status: 'unsupported' | 'outside_telegram' };
+
+function classifyPhoneVerificationEnvironment(): PhoneVerificationEnvironment {
   const telegram = window.Telegram?.WebApp;
-  if (!telegram) {
-    return 'outside_telegram';
+  if (!telegram || typeof telegram.initData !== 'string' || !telegram.initData.trim()) {
+    return { status: 'outside_telegram' };
   }
-  if (!telegram.requestContact) {
-    return 'unsupported';
+
+  const requestContact = telegram.requestContact;
+  if (typeof requestContact !== 'function' || typeof telegram.isVersionAtLeast !== 'function') {
+    return { status: 'unsupported' };
   }
-  return 'ready';
+
+  try {
+    if (telegram.isVersionAtLeast('6.9') !== true) {
+      return { status: 'unsupported' };
+    }
+  } catch {
+    return { status: 'unsupported' };
+  }
+
+  return {
+    status: 'ready',
+    requestContact: (callback) => requestContact.call(telegram, callback),
+  };
 }
 
 export function usePhoneVerification({
@@ -38,7 +56,9 @@ export function usePhoneVerification({
 }: {
   autoRequest: boolean;
 }): PhoneVerificationController {
-  const [status, setStatus] = useState<PhoneVerificationStatus>(getInitialStatus);
+  const [status, setStatus] = useState<PhoneVerificationStatus>(
+    () => classifyPhoneVerificationEnvironment().status,
+  );
   const acceptVerifiedProfile = useAuthStore((state) => state.acceptVerifiedProfile);
   const mountedRef = useRef(true);
   const pollCycleRef = useRef(0);
@@ -107,19 +127,15 @@ export function usePhoneVerification({
     pollCycleRef.current += 1;
     clearPendingTimer();
 
-    const telegram = window.Telegram?.WebApp;
-    if (!telegram) {
-      setStatus('outside_telegram');
-      return;
-    }
-    if (!telegram.requestContact) {
-      setStatus('unsupported');
+    const environment = classifyPhoneVerificationEnvironment();
+    if (environment.status !== 'ready') {
+      setStatus(environment.status);
       return;
     }
 
     setStatus('requesting');
     try {
-      telegram.requestContact((shared) => {
+      environment.requestContact((shared) => {
         if (!mountedRef.current || promptCycleRef.current !== promptCycle) {
           return;
         }
@@ -132,6 +148,17 @@ export function usePhoneVerification({
     } catch {
       setStatus('unsupported');
     }
+  }, [clearPendingTimer, pollProfile]);
+
+  const checkAgain = useCallback(async () => {
+    const environment = classifyPhoneVerificationEnvironment();
+    if (environment.status !== 'ready') {
+      pollCycleRef.current += 1;
+      clearPendingTimer();
+      setStatus(environment.status);
+      return;
+    }
+    await pollProfile();
   }, [clearPendingTimer, pollProfile]);
 
   const requestPhoneRef = useRef(requestPhone);
@@ -158,6 +185,6 @@ export function usePhoneVerification({
   return {
     status,
     requestPhone,
-    checkAgain: pollProfile,
+    checkAgain,
   };
 }

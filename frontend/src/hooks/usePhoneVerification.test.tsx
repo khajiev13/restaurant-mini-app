@@ -35,16 +35,22 @@ const verifiedUser: User = {
   phone_verified: true,
 };
 
-function setTelegram(requestContact?: (callback: (shared: boolean) => void) => void) {
+function setTelegram(
+  requestContact?: (callback: (shared: boolean) => void) => void,
+  options: { initData?: string; supportsContactApi?: boolean } = {},
+) {
+  const isVersionAtLeast = vi.fn(() => options.supportsContactApi ?? true);
   Object.defineProperty(window, 'Telegram', {
     configurable: true,
     value: {
       WebApp: {
-        initData: 'telegram-init-data',
+        initData: options.initData ?? 'telegram-init-data',
+        isVersionAtLeast,
         requestContact,
       },
     },
   });
+  return { isVersionAtLeast };
 }
 
 function profileResponse(user: User) {
@@ -201,6 +207,40 @@ describe('usePhoneVerification', () => {
     expect(result.current.status).toBe('unsupported');
     act(() => result.current.requestPhone());
     expect(result.current.status).toBe('unsupported');
+  });
+
+  it('reports outside Telegram when the globally loaded SDK has empty initData', async () => {
+    const requestContact = vi.fn();
+    const { isVersionAtLeast } = setTelegram(requestContact, { initData: '   ' });
+    const { result } = renderHook(() => usePhoneVerification({ autoRequest: false }));
+
+    expect(result.current.status).toBe('outside_telegram');
+    act(() => result.current.requestPhone());
+    await act(async () => {
+      await result.current.checkAgain();
+    });
+
+    expect(result.current.status).toBe('outside_telegram');
+    expect(requestContact).not.toHaveBeenCalled();
+    expect(isVersionAtLeast).not.toHaveBeenCalled();
+    expect(apiMocks.getMe).not.toHaveBeenCalled();
+  });
+
+  it('reports unsupported inside Telegram before WebApp 6.9', async () => {
+    const requestContact = vi.fn();
+    const { isVersionAtLeast } = setTelegram(requestContact, { supportsContactApi: false });
+    const { result } = renderHook(() => usePhoneVerification({ autoRequest: false }));
+
+    expect(result.current.status).toBe('unsupported');
+    act(() => result.current.requestPhone());
+    await act(async () => {
+      await result.current.checkAgain();
+    });
+
+    expect(result.current.status).toBe('unsupported');
+    expect(requestContact).not.toHaveBeenCalled();
+    expect(isVersionAtLeast).toHaveBeenCalledWith('6.9');
+    expect(apiMocks.getMe).not.toHaveBeenCalled();
   });
 
   it('reports outside Telegram without a manual phone fallback', () => {
