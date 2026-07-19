@@ -1,4 +1,5 @@
 import type { CSSProperties, ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useLocation } from 'react-router-dom';
 import logo from '../../assets/logo.webp';
 import { useAuthStore } from '../../stores/authStore';
@@ -81,6 +82,7 @@ function NavItem({
   return (
     <Link
       to={to}
+      aria-label={label}
       aria-current={active ? 'page' : undefined}
       style={{
         height: 56,
@@ -104,22 +106,45 @@ function NavItem({
 
 export default function StaffLayout({ children }: { children: ReactNode }) {
   const location = useLocation();
+  const { t } = useTranslation();
   const role = useAuthStore((state) => state.user?.role);
   const isAdmin = role === 'admin';
 
+  const tablesActive = location.pathname.startsWith('/staff/tables');
   const ordersActive = location.pathname.startsWith('/staff/orders');
   const profileActive = location.pathname === '/profile';
   const adminActive = location.pathname.startsWith('/admin');
+  const sharedItems = [
+    {
+      active: tablesActive,
+      icon: 'table_restaurant',
+      label: t('staff_tables.nav_tables', 'Tables'),
+      to: '/staff/tables',
+    },
+    {
+      active: ordersActive,
+      icon: 'receipt_long',
+      label: t('staff_tables.nav_delivery', 'Delivery'),
+      to: '/staff/orders',
+    },
+    {
+      active: profileActive,
+      icon: 'person',
+      label: t('nav.profile', 'Profile'),
+      to: '/profile',
+    },
+  ];
   const navItems = isAdmin
     ? [
-        { active: adminActive, icon: 'admin_panel_settings', label: 'Admin', to: '/admin' },
-        { active: ordersActive, icon: 'receipt_long', label: 'Orders', to: '/staff/orders' },
-        { active: profileActive, icon: 'person', label: 'Profile', to: '/profile' },
+        {
+          active: adminActive,
+          icon: 'admin_panel_settings',
+          label: t('staff_tables.nav_admin', 'Admin'),
+          to: '/admin',
+        },
+        ...sharedItems,
       ]
-    : [
-        { active: ordersActive, icon: 'receipt_long', label: 'Orders', to: '/staff/orders' },
-        { active: profileActive, icon: 'person', label: 'Profile', to: '/profile' },
-      ];
+    : sharedItems;
 
   return (
     <div style={shellStyle}>

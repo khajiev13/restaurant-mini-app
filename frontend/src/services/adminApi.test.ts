@@ -1,6 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchAdminUsers, updateAdminUserRole } from './adminApi';
 
+type AdminApiUser = Awaited<ReturnType<typeof searchAdminUsers>>['data']['data'][number];
+
+const adminUserWithoutSelfCapability = {
+  telegram_id: 992208572,
+  first_name: 'Rakhmonberdi',
+  last_name: 'Khajiev',
+  username: 'khajiev13',
+  phone_number: '8613269797807',
+  phone_verified: false,
+  language: 'en',
+  role: 'customer' as const,
+} satisfies AdminApiUser;
+
 const apiMocks = vi.hoisted(() => ({
   get: vi.fn(),
   patch: vi.fn(),
@@ -16,7 +29,9 @@ describe('adminApi', () => {
   });
 
   it('searches admin users by query', async () => {
-    apiMocks.get.mockResolvedValue({ data: { data: [] } });
+    apiMocks.get.mockResolvedValue({
+      data: { data: [adminUserWithoutSelfCapability] },
+    });
 
     await searchAdminUsers('8613269797807');
 

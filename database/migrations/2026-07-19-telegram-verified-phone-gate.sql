@@ -1,0 +1,7 @@
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified_fingerprint VARCHAR(64);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified_message_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified_update_id BIGINT;
+
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS contact_phone_verified BOOLEAN NOT NULL DEFAULT FALSE;

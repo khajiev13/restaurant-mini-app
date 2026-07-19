@@ -1,15 +1,23 @@
+import asyncio
 import datetime
 import hashlib
 import uuid
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
+import pytest_asyncio
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
-from app.main import register_telegram_webhook
 from app.models.models import Order, User
 from app.routers import webhooks as webhooks_router
+from app.services import alipos_api, order_service
+from app.services.phone_verification_service import phone_verification_fingerprint
+from app.services.telegram_webhook_service import register_telegram_webhook
 
 
 @pytest.fixture
@@ -20,6 +28,41 @@ def webhook_db_session(db_session, monkeypatch):
 
     monkeypatch.setattr(webhooks_router, "async_session", _session_override)
     return db_session
+
+
+@pytest_asyncio.fixture
+async def webhook_race_sessions(db_session, monkeypatch):
+    _ = db_session  # Ensure the test schema exists before opening new connections.
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    sessions = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    created_user_ids: list[int] = []
+    webhook_session_ids: list[int] = []
+
+    @asynccontextmanager
+    async def webhook_session():
+        async with sessions() as session:
+            webhook_session_ids.append(id(session))
+            yield session
+
+    monkeypatch.setattr(webhooks_router, "async_session", webhook_session)
+    try:
+        yield sessions, created_user_ids, webhook_session_ids
+    finally:
+        if created_user_ids:
+            async with sessions() as cleanup_db:
+                await cleanup_db.execute(
+                    delete(Order).where(Order.user_id.in_(created_user_ids))
+                )
+                await cleanup_db.execute(
+                    delete(User).where(User.telegram_id.in_(created_user_ids))
+                )
+                await cleanup_db.commit()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -42,6 +85,7 @@ async def test_telegram_bot_webhook_updates_phone_number(
     payload = {
         "update_id": 101,
         "message": {
+            "date": 1_784_833_200,
             "from": {"id": 12345678},
             "contact": {"user_id": 12345678, "phone_number": "+998901234567"},
         },
@@ -58,7 +102,15 @@ async def test_telegram_bot_webhook_updates_phone_number(
 
     assert response.status_code == 200
     assert user.phone_number == "+998901234567"
-    assert "result=phone_saved" in caplog.text
+    assert user.phone_verified_at is not None
+    assert user.phone_verified_message_at == datetime.datetime(
+        2026, 7, 23, 19, tzinfo=datetime.UTC
+    )
+    assert user.phone_verified_update_id == 101
+    assert user.phone_verified_fingerprint == phone_verification_fingerprint(
+        user.telegram_id, user.phone_number
+    )
+    assert "outcome=phone_saved" in caplog.text
     assert "+998901234567" not in caplog.text
 
 
@@ -76,7 +128,7 @@ async def test_telegram_bot_webhook_ignores_messages_without_contact(
         )
 
     assert response.status_code == 200
-    assert "result=no_contact" in caplog.text
+    assert "outcome=no_contact" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -91,7 +143,41 @@ async def test_telegram_bot_webhook_rejects_invalid_secret(client, monkeypatch, 
         )
 
     assert response.status_code == 401
-    assert "secret_valid=false" in caplog.text
+    assert "outcome=invalid_secret" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_ignores_malformed_authenticated_json(
+    client, monkeypatch, caplog
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    with caplog.at_level("INFO", logger="app.routers.webhooks"):
+        response = await client.post(
+            "/api/webhooks/bot",
+            content=b"not-json",
+            headers={
+                "content-type": "application/json",
+                "x-telegram-bot-api-secret-token": "test-secret",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "outcome=invalid_json" in caplog.text
+    assert "not-json" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_rejects_non_ascii_invalid_secret(client, monkeypatch):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={"update_id": 103, "message": {}},
+        headers=[(b"x-telegram-bot-api-secret-token", b"\xff")],
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -103,6 +189,7 @@ async def test_telegram_bot_webhook_ignores_unknown_user(
     payload = {
         "update_id": 104,
         "message": {
+            "date": 1_784_833_200,
             "from": {"id": 87654321},
             "contact": {"user_id": 87654321, "phone_number": "+998998887766"},
         },
@@ -116,8 +203,324 @@ async def test_telegram_bot_webhook_ignores_unknown_user(
         )
 
     assert response.status_code == 200
-    assert "result=user_not_found" in caplog.text
+    assert "outcome=user_not_found" in caplog.text
     assert "+998998887766" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_returns_503_before_parsing_when_secret_missing(
+    client, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        content=b"not-json",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_rejects_missing_secret_header(client, monkeypatch):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    response = await client.post("/api/webhooks/bot", json={"update_id": 1})
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"update_id": True, "message": {}},
+        {"update_id": 110, "message": {"date": True, "contact": {}}},
+        {
+            "update_id": 111,
+            "message": {"date": 1_784_833_200, "from": {"id": True}, "contact": {}},
+        },
+        {
+            "update_id": 112,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": 12345678},
+                "contact": {"user_id": True},
+            },
+        },
+        {
+            "update_id": "113",
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": 12345678},
+                "contact": {"user_id": 12345678},
+            },
+        },
+    ],
+)
+async def test_telegram_bot_webhook_ignores_non_exact_integer_structure(
+    client, monkeypatch, payload
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json=payload,
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_ignores_another_users_contact(
+    client, webhook_db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=12345679,
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": 114,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": user.telegram_id},
+                "contact": {"user_id": user.telegram_id + 1, "phone_number": "+998901234567"},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    await webhook_db_session.refresh(user)
+    assert response.status_code == 200
+    assert user.phone_number is None
+    assert user.phone_verified_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phone_number",
+    [
+        "998 90 (123)-4567",
+        "+998 90 (123)-4567",
+        "+44 (20) 1234-5678",
+    ],
+)
+async def test_telegram_bot_webhook_persists_canonical_phone_number(
+    client, webhook_db_session, monkeypatch, phone_number
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=20_000_000 + len(phone_number),
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": 115,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": user.telegram_id},
+                "contact": {"user_id": user.telegram_id, "phone_number": phone_number},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    await webhook_db_session.refresh(user)
+    assert response.status_code == 200
+    assert user.phone_number == "+" + "".join(character for character in phone_number if character.isdigit())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phone_number",
+    ["+99890abc4567", "+99890.1234567", "1234567", "1234567890123456", "++998901234567"],
+)
+async def test_telegram_bot_webhook_ignores_invalid_phone_boundaries(
+    client, webhook_db_session, monkeypatch, phone_number
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=30_000_000 + len(phone_number),
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": 116,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": user.telegram_id},
+                "contact": {"user_id": user.telegram_id, "phone_number": phone_number},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    await webhook_db_session.refresh(user)
+    assert response.status_code == 200
+    assert user.phone_number is None
+
+
+async def _telegram_contact_update(
+    client,
+    *,
+    telegram_id: int,
+    update_id: int,
+    message_timestamp: int,
+    phone_number: str,
+):
+    return await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": update_id,
+            "message": {
+                "date": message_timestamp,
+                "from": {"id": telegram_id},
+                "contact": {"user_id": telegram_id, "phone_number": phone_number},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_orders_replays_and_phone_replacements(
+    client, webhook_db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=40_000_001,
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    first = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=120,
+        message_timestamp=1_784_833_200,
+        phone_number="+998901234567",
+    )
+    await webhook_db_session.refresh(user)
+    first_receipt_at = user.phone_verified_at
+    replay = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=120,
+        message_timestamp=1_784_833_200,
+        phone_number="+998909999999",
+    )
+    older = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=999,
+        message_timestamp=1_784_833_199,
+        phone_number="+998909999999",
+    )
+    same_second_newer = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=121,
+        message_timestamp=1_784_833_200,
+        phone_number="+998909999999",
+    )
+    later_lower_update = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=1,
+        message_timestamp=1_784_833_201,
+        phone_number="+998901112233",
+    )
+
+    await webhook_db_session.refresh(user)
+    assert [response.status_code for response in (first, replay, older, same_second_newer, later_lower_update)] == [200] * 5
+    assert first_receipt_at is not None
+    assert user.phone_number == "+998901112233"
+    assert user.phone_verified_message_at == datetime.datetime(
+        2026, 7, 23, 19, 0, 1, tzinfo=datetime.UTC
+    )
+    assert user.phone_verified_update_id == 1
+    assert user.phone_verified_fingerprint == phone_verification_fingerprint(
+        user.telegram_id, user.phone_number
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_serializes_concurrent_updates_by_ordering_pair(
+    client, webhook_race_sessions, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    sessions, created_user_ids, webhook_session_ids = webhook_race_sessions
+    telegram_id = 50_000_001
+    created_user_ids.append(telegram_id)
+    async with sessions() as seed_db:
+        seed_db.add(
+            User(
+                telegram_id=telegram_id,
+                first_name="Test",
+                last_name=None,
+                username="tester",
+            )
+        )
+        await seed_db.commit()
+
+    newer = asyncio.create_task(
+        _telegram_contact_update(
+            client,
+            telegram_id=telegram_id,
+            update_id=1,
+            message_timestamp=1_784_833_202,
+            phone_number="+998901112233",
+        )
+    )
+    older = asyncio.create_task(
+        _telegram_contact_update(
+            client,
+            telegram_id=telegram_id,
+            update_id=999,
+            message_timestamp=1_784_833_201,
+            phone_number="+998909999999",
+        )
+    )
+    responses = await asyncio.gather(newer, older)
+
+    async with sessions() as observer_db:
+        user = await observer_db.get(User, telegram_id)
+        assert user is not None
+        assert user.phone_number == "+998901112233"
+        assert user.phone_verified_message_at == datetime.datetime(
+            2026, 7, 23, 19, 0, 2, tzinfo=datetime.UTC
+        )
+        assert user.phone_verified_update_id == 1
+        assert user.phone_verified_fingerprint == phone_verification_fingerprint(
+            telegram_id, user.phone_number
+        )
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len(set(webhook_session_ids)) == 2
 
 
 @pytest.mark.asyncio
@@ -199,8 +602,198 @@ async def _pending_online_order(db_session) -> Order:
     return order
 
 
+async def _paid_alipos_order(db_session) -> Order:
+    order = await _pending_online_order(db_session)
+    order.payment_status = "paid"
+    order.multicard_payment_uuid = "payment-uuid"
+    order.alipos_sync_status = "queued"
+    order.status = "PAID_AWAITING_RESTAURANT"
+    await db_session.commit()
+    return order
+
+
+def _mock_alipos_client(request: AsyncMock) -> Mock:
+    client = Mock()
+    client.request = request
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_paid_submit_success_preserves_status_webhook_that_wins_race(
+    client,
+    webhook_race_sessions,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "alipos_api_client_id", "client")
+    monkeypatch.setattr(settings, "alipos_api_client_secret", "secret")
+    sessions, created_user_ids, webhook_session_ids = webhook_race_sessions
+
+    async with sessions() as submission_db:
+        order = await _paid_alipos_order(submission_db)
+        created_user_ids.append(order.user_id)
+        provider_order_id = uuid.uuid4()
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+
+        async def blocked_request(*_args, **_kwargs):
+            request_started.set()
+            await release_request.wait()
+            return httpx.Response(
+                200,
+                json={"result": "OK", "orderId": str(provider_order_id)},
+                request=httpx.Request("POST", "https://alipos.example/order"),
+            )
+
+        request = AsyncMock(side_effect=blocked_request)
+        monkeypatch.setattr(
+            alipos_api,
+            "get_payment_methods",
+            AsyncMock(
+                return_value=[{"id": str(uuid.uuid4()), "title": "online-order"}]
+            ),
+        )
+        monkeypatch.setattr(alipos_api, "_get_token", AsyncMock(return_value="token"))
+        monkeypatch.setattr(
+            alipos_api.httpx,
+            "AsyncClient",
+            Mock(return_value=_mock_alipos_client(request)),
+        )
+
+        submit = asyncio.create_task(
+            order_service.submit_order_to_alipos(submission_db, order)
+        )
+        try:
+            await asyncio.wait_for(request_started.wait(), timeout=1)
+            assert order.alipos_sync_status == "sending"
+
+            response = await client.post(
+                "/api/webhooks/order-status",
+                json={
+                    "eatsId": order.alipos_eats_id,
+                    "status": "ACCEPTED_BY_RESTAURANT",
+                    "orderNumber": "A-42",
+                },
+                headers={"clientId": "client", "clientSecret": "secret"},
+            )
+            assert response.status_code == 200
+            assert webhook_session_ids[-1] != id(submission_db)
+            async with sessions() as observer_db:
+                persisted = await observer_db.get(Order, order.id)
+                assert persisted is not None
+                assert persisted.status == "ACCEPTED_BY_RESTAURANT"
+                assert persisted.order_number == "A-42"
+            assert order.status == "PAID_AWAITING_RESTAURANT"
+            assert order.order_number is None
+
+            release_request.set()
+            await submit
+
+            request.assert_awaited_once()
+            assert order.alipos_sync_status == "synced"
+            assert order.alipos_order_id == provider_order_id
+            assert order.status == "ACCEPTED_BY_RESTAURANT"
+            assert order.order_number == "A-42"
+        finally:
+            release_request.set()
+            if not submit.done():
+                await asyncio.gather(submit, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_paid_submit_unknown_preserves_status_webhook_that_wins_race(
+    client,
+    webhook_race_sessions,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "alipos_api_client_id", "client")
+    monkeypatch.setattr(settings, "alipos_api_client_secret", "secret")
+    sessions, created_user_ids, webhook_session_ids = webhook_race_sessions
+
+    async with sessions() as submission_db:
+        order = await _paid_alipos_order(submission_db)
+        created_user_ids.append(order.user_id)
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+
+        async def blocked_request(*_args, **_kwargs):
+            request_started.set()
+            await release_request.wait()
+            return httpx.Response(
+                502,
+                json={"detail": "provider-secret"},
+                request=httpx.Request("POST", "https://alipos.example/order"),
+            )
+
+        request = AsyncMock(side_effect=blocked_request)
+        refund = AsyncMock()
+        monkeypatch.setattr(
+            alipos_api,
+            "get_payment_methods",
+            AsyncMock(
+                return_value=[{"id": str(uuid.uuid4()), "title": "online-order"}]
+            ),
+        )
+        monkeypatch.setattr(alipos_api, "_get_token", AsyncMock(return_value="token"))
+        monkeypatch.setattr(
+            alipos_api.httpx,
+            "AsyncClient",
+            Mock(return_value=_mock_alipos_client(request)),
+        )
+        monkeypatch.setattr(order_service.multicard_api, "refund_payment", refund)
+
+        submit = asyncio.create_task(
+            order_service.submit_order_to_alipos(submission_db, order)
+        )
+        try:
+            await asyncio.wait_for(request_started.wait(), timeout=1)
+
+            response = await client.post(
+                "/api/webhooks/order-status",
+                json={
+                    "eatsId": order.alipos_eats_id,
+                    "status": "ACCEPTED_BY_RESTAURANT",
+                    "orderNumber": "A-43",
+                },
+                headers={"clientId": "client", "clientSecret": "secret"},
+            )
+            assert response.status_code == 200
+            assert webhook_session_ids[-1] != id(submission_db)
+            async with sessions() as observer_db:
+                persisted = await observer_db.get(Order, order.id)
+                assert persisted is not None
+                assert persisted.status == "ACCEPTED_BY_RESTAURANT"
+                assert persisted.order_number == "A-43"
+            assert order.status == "PAID_AWAITING_RESTAURANT"
+            assert order.order_number is None
+
+            release_request.set()
+            await submit
+            assert await order_service._submit_queued_alipos_order(
+                submission_db,
+                order.id,
+            ) is None
+
+            request.assert_awaited_once()
+            refund.assert_not_awaited()
+            assert order.alipos_sync_status == "unknown"
+            assert order.payment_status == "paid"
+            assert order.refund_sync_status is None
+            assert order.status == "ACCEPTED_BY_RESTAURANT"
+            assert order.order_number == "A-43"
+        finally:
+            release_request.set()
+            if not submit.done():
+                await asyncio.gather(submit, return_exceptions=True)
+
+
 def _signed_callback(
-    order: Order, *, amount: int | None = None, store_id: int = 42
+    order: Order,
+    *,
+    amount: int | None = None,
+    store_id: int = 42,
+    payment_uuid: str = "payment-uuid",
 ) -> dict:
     callback_amount = amount if amount is not None else int(order.total_amount * 100)
     raw = f"{store_id}{order.id}{callback_amount}{settings.multicard_secret}"
@@ -209,7 +802,7 @@ def _signed_callback(
         "invoice_id": str(order.id),
         "amount": callback_amount,
         "sign": hashlib.md5(raw.encode()).hexdigest(),
-        "uuid": "payment-uuid",
+        "uuid": payment_uuid,
         "receipt_url": "https://pay.example/receipt",
         "card_pan": "8600********1234",
         "ps": "UZCARD",
@@ -246,6 +839,269 @@ async def test_multicard_callback_queues_exact_paid_order_once(
     assert order.status == "PAID_AWAITING_RESTAURANT"
     assert order.alipos_sync_status == "queued"
     dispatch.assert_awaited_once_with(order.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payment_status", ["invoice_queued", "invoice_unknown"])
+async def test_multicard_callback_accepts_pre_checkout_invoice_states(
+    client,
+    webhook_db_session,
+    monkeypatch,
+    payment_status,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = payment_status
+    order.status = "PAYMENT_REVIEW"
+    if payment_status == "invoice_unknown":
+        order.multicard_invoice_uuid = "payment-uuid"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.payment_status == "paid"
+    assert order.status == "PAID_AWAITING_RESTAURANT"
+    assert order.alipos_sync_status == "queued"
+    dispatch.assert_awaited_once_with(order.id)
+
+
+@pytest.mark.asyncio
+async def test_multicard_callback_rejects_mismatched_known_invoice_uuid(
+    client,
+    webhook_db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = "invoice_unknown"
+    order.status = "PAYMENT_REVIEW"
+    order.multicard_invoice_uuid = "expected-invoice"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order, payment_uuid="different-invoice"),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 409
+    assert order.payment_status == "invoice_unknown"
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_callback_wins_invoice_create_finalizer_race(
+    client,
+    webhook_race_sessions,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    sessions, created_user_ids, _ = webhook_race_sessions
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    async def rejected_after_callback(**_kwargs):
+        provider_started.set()
+        await release_provider.wait()
+        raise order_service.multicard_api.InvoiceRejected(400)
+
+    monkeypatch.setattr(
+        order_service.multicard_api,
+        "create_invoice",
+        rejected_after_callback,
+    )
+
+    async with sessions() as invoice_db:
+        order = await _pending_online_order(invoice_db)
+        created_user_ids.append(order.user_id)
+        order.payment_status = "invoice_queued"
+        order.status = "PAYMENT_REVIEW"
+        await invoice_db.commit()
+        create_task = asyncio.create_task(
+            order_service._create_order_invoice(invoice_db, order)
+        )
+        try:
+            await asyncio.wait_for(provider_started.wait(), timeout=1)
+            async with sessions() as observer_db:
+                sending = await observer_db.get(Order, order.id)
+                assert sending is not None
+                assert sending.payment_status == "invoice_sending"
+
+            response = await client.post(
+                "/api/webhooks/multicard/callback",
+                json=_signed_callback(order),
+            )
+            assert response.status_code == 200
+            release_provider.set()
+            await create_task
+        finally:
+            release_provider.set()
+            if not create_task.done():
+                await asyncio.gather(create_task, return_exceptions=True)
+
+    async with sessions() as inspect_db:
+        persisted = await inspect_db.get(Order, order.id)
+        assert persisted is not None
+        assert persisted.payment_status == "paid"
+        assert persisted.status == "PAID_AWAITING_RESTAURANT"
+        assert persisted.multicard_payment_uuid == "payment-uuid"
+        assert persisted.alipos_sync_status == "queued"
+    dispatch.assert_awaited_once_with(order.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("restaurant_status", "initial_sync_status"),
+    [("NEW", None), ("ACCEPTED_BY_RESTAURANT", "synced")],
+)
+async def test_legacy_pending_delivery_callback_marks_paid_without_second_alipos_create(
+    client,
+    webhook_db_session,
+    monkeypatch,
+    restaurant_status,
+    initial_sync_status,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    alipos_order_id = uuid.uuid4()
+    order.discriminator = "delivery"
+    order.table_id = None
+    order.status = restaurant_status
+    order.alipos_order_id = alipos_order_id
+    order.alipos_sync_status = initial_sync_status
+    order.multicard_invoice_uuid = "payment-uuid"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    create = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+    monkeypatch.setattr(order_service.alipos_api, "create_order", create)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 200
+    assert order.payment_status == "paid"
+    assert order.alipos_sync_status == "synced"
+    assert order.status == restaurant_status
+    assert order.alipos_order_id == alipos_order_id
+    dispatch.assert_not_awaited()
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payment_status", "refund_sync_status"),
+    [("refund_pending", "queued"), ("refunded", "refunded")],
+)
+async def test_multicard_callback_acknowledges_refund_lifecycle_duplicate(
+    client,
+    webhook_db_session,
+    monkeypatch,
+    payment_status,
+    refund_sync_status,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = payment_status
+    order.multicard_payment_uuid = "payment-uuid"
+    order.refund_sync_status = refund_sync_status
+    order.alipos_sync_status = "failed"
+    order.status = "SUBMISSION_FAILED"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    refund = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+    monkeypatch.setattr(webhooks_router.multicard_api, "refund_payment", refund)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 200
+    assert response.json() == {}
+    assert order.payment_status == payment_status
+    assert order.refund_sync_status == refund_sync_status
+    assert order.alipos_sync_status == "failed"
+    assert order.status == "SUBMISSION_FAILED"
+    dispatch.assert_not_awaited()
+    refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multicard_processed_callback_rejects_mismatched_payment_uuid(
+    client,
+    webhook_db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = "refunded"
+    order.multicard_payment_uuid = "payment-uuid"
+    order.refund_sync_status = "refunded"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order, payment_uuid="different-payment-uuid"),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Payment identifier does not match order"
+    assert order.payment_status == "refunded"
+    assert order.refund_sync_status == "refunded"
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multicard_paid_duplicate_still_validates_expected_amount(
+    client,
+    webhook_db_session,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "multicard_store_id", 42)
+    monkeypatch.setattr(settings, "multicard_secret", "callback-secret")
+    order = await _pending_online_order(webhook_db_session)
+    order.payment_status = "paid"
+    order.multicard_payment_uuid = "payment-uuid"
+    await webhook_db_session.commit()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(webhooks_router, "dispatch_queued_alipos_order", dispatch)
+
+    response = await client.post(
+        "/api/webhooks/multicard/callback",
+        json=_signed_callback(order, amount=int(order.total_amount * 100) + 1),
+    )
+
+    await webhook_db_session.refresh(order)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Payment amount does not match order"
+    assert order.payment_status == "paid"
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -314,32 +1170,93 @@ async def test_multicard_callback_without_payment_uuid_is_rejected(
     assert order.payment_status == "pending"
 
 
-@pytest.mark.asyncio
-async def test_register_telegram_webhook_skips_when_url_matches(monkeypatch):
-    monkeypatch.setattr(
-        settings, "public_backend_url", "https://restaurant.labtutor.app"
-    )
-    monkeypatch.setattr(settings, "public_app_url", "")
-    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
-
-    webhook_info_response = Mock()
-    webhook_info_response.raise_for_status = Mock()
-    webhook_info_response.json.return_value = {
-        "ok": True,
-        "result": {
-            "url": "https://restaurant.labtutor.app/api/webhooks/bot",
-            "allowed_updates": ["message"],
-        },
+@pytest.fixture
+def telegram_startup_config(monkeypatch):
+    values = {
+        "public_url": "https://restaurant.labtutor.app",
+        "bot_token": "fixture-bot-token",
+        "current_secret": "fixture-current-webhook-secret",
+        "next_secret": "fixture-next-webhook-secret",
+        "provider_body": "fixture-provider-response-body",
     }
+    monkeypatch.setattr(settings, "public_backend_url", values["public_url"])
+    monkeypatch.setattr(settings, "public_app_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", values["bot_token"])
+    monkeypatch.setattr(
+        settings,
+        "telegram_webhook_secret",
+        values["current_secret"],
+    )
+    return values
 
+
+def _telegram_response(payload):
+    response = Mock()
+    response.raise_for_status = Mock()
+    response.json.return_value = payload
+    return response
+
+
+def _telegram_startup_client(*, webhook_info, set_webhook_payload=None):
     client = AsyncMock()
-    client.get = AsyncMock(return_value=webhook_info_response)
-    client.post = AsyncMock()
+    client.get = AsyncMock(
+        return_value=_telegram_response({"ok": True, "result": webhook_info})
+    )
+    client.post = AsyncMock(
+        return_value=_telegram_response(set_webhook_payload or {"ok": True})
+    )
     client.__aenter__.return_value = client
     client.__aexit__.return_value = None
+    return client
 
-    with patch("app.main.httpx.AsyncClient", return_value=client):
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_sets_when_url_matches_and_secret_is_configured(
+    telegram_startup_config,
+    caplog,
+):
+    webhook_url = f"{telegram_startup_config['public_url']}/api/webhooks/bot"
+    client = _telegram_startup_client(
+        webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
+    )
+
+    with (
+        caplog.at_level("INFO", logger="app.services.telegram_webhook_service"),
+        patch(
+            "app.services.telegram_webhook_service.httpx.AsyncClient",
+            return_value=client,
+        ),
+    ):
+        await register_telegram_webhook()
+
+    client.post.assert_awaited_once_with(
+        f"https://api.telegram.org/bot{telegram_startup_config['bot_token']}/setWebhook",
+        json={
+            "url": webhook_url,
+            "allowed_updates": ["message"],
+            "secret_token": telegram_startup_config["current_secret"],
+        },
+        timeout=10,
+    )
+    assert telegram_startup_config["bot_token"] not in caplog.text
+    assert telegram_startup_config["current_secret"] not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_skips_matching_url_only_when_secret_is_empty(
+    telegram_startup_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+    webhook_url = f"{telegram_startup_config['public_url']}/api/webhooks/bot"
+    client = _telegram_startup_client(
+        webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
+    )
+
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
         await register_telegram_webhook()
 
     client.get.assert_awaited_once()
@@ -347,76 +1264,147 @@ async def test_register_telegram_webhook_skips_when_url_matches(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_register_telegram_webhook_sets_when_url_differs(monkeypatch):
-    monkeypatch.setattr(
-        settings, "public_backend_url", "https://restaurant.labtutor.app"
+async def test_register_telegram_webhook_reapplies_changed_secret(
+    telegram_startup_config,
+    monkeypatch,
+):
+    webhook_url = f"{telegram_startup_config['public_url']}/api/webhooks/bot"
+    client = _telegram_startup_client(
+        webhook_info={"url": webhook_url, "allowed_updates": ["message"]}
     )
-    monkeypatch.setattr(settings, "public_app_url", "")
-    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
 
-    webhook_info_response = Mock()
-    webhook_info_response.raise_for_status = Mock()
-    webhook_info_response.json.return_value = {
-        "ok": True,
-        "result": {
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
+        await register_telegram_webhook()
+        monkeypatch.setattr(
+            settings,
+            "telegram_webhook_secret",
+            telegram_startup_config["next_secret"],
+        )
+        await register_telegram_webhook()
+
+    assert [
+        awaited.kwargs["json"]["secret_token"]
+        for awaited in client.post.await_args_list
+    ] == [
+        telegram_startup_config["current_secret"],
+        telegram_startup_config["next_secret"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_rejects_bot_api_ok_false(
+    telegram_startup_config,
+    caplog,
+):
+    client = _telegram_startup_client(
+        webhook_info={"url": "https://old.example/api/webhooks/bot"},
+        set_webhook_payload={
+            "ok": False,
+            "description": telegram_startup_config["provider_body"],
+        },
+    )
+
+    with (
+        caplog.at_level("WARNING", logger="app.services.telegram_webhook_service"),
+        patch(
+            "app.services.telegram_webhook_service.httpx.AsyncClient",
+            return_value=client,
+        ),
+        pytest.raises(
+            RuntimeError,
+            match="telegram_webhook_registration_failed",
+        ) as error,
+    ):
+        await register_telegram_webhook()
+
+    assert telegram_startup_config["provider_body"] not in str(error.value)
+    assert telegram_startup_config["bot_token"] not in caplog.text
+    assert telegram_startup_config["current_secret"] not in caplog.text
+    assert telegram_startup_config["provider_body"] not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_configured_secret_failure_aborts_startup(
+    telegram_startup_config,
+    caplog,
+):
+    client = _telegram_startup_client(
+        webhook_info={"url": "https://old.example/api/webhooks/bot"}
+    )
+    client.post.side_effect = RuntimeError(telegram_startup_config["provider_body"])
+
+    with (
+        caplog.at_level("WARNING", logger="app.services.telegram_webhook_service"),
+        patch(
+            "app.services.telegram_webhook_service.httpx.AsyncClient",
+            return_value=client,
+        ),
+        pytest.raises(
+            RuntimeError,
+            match="telegram_webhook_registration_failed",
+        ) as error,
+    ):
+        await register_telegram_webhook()
+
+    assert (
+        "telegram_webhook_registration_failed category=configured_secret"
+        in caplog.text
+    )
+    assert telegram_startup_config["bot_token"] not in caplog.text
+    assert telegram_startup_config["current_secret"] not in caplog.text
+    assert telegram_startup_config["provider_body"] not in caplog.text
+    assert telegram_startup_config["provider_body"] not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_register_telegram_webhook_sets_when_url_differs(
+    telegram_startup_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+    client = _telegram_startup_client(
+        webhook_info={
             "url": "https://old.example.com/api/webhooks/bot",
             "allowed_updates": ["message"],
-        },
-    }
+        }
+    )
 
-    set_webhook_response = Mock()
-    set_webhook_response.raise_for_status = Mock()
-
-    client = AsyncMock()
-    client.get = AsyncMock(return_value=webhook_info_response)
-    client.post = AsyncMock(return_value=set_webhook_response)
-    client.__aenter__.return_value = client
-    client.__aexit__.return_value = None
-
-    with patch("app.main.httpx.AsyncClient", return_value=client):
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
         await register_telegram_webhook()
 
     client.post.assert_awaited_once_with(
-        "https://api.telegram.org/botbot-token/setWebhook",
+        f"https://api.telegram.org/bot{telegram_startup_config['bot_token']}/setWebhook",
         json={
-            "url": "https://restaurant.labtutor.app/api/webhooks/bot",
+            "url": f"{telegram_startup_config['public_url']}/api/webhooks/bot",
             "allowed_updates": ["message"],
-            "secret_token": "secret",
         },
         timeout=10,
     )
 
 
 @pytest.mark.asyncio
-async def test_register_telegram_webhook_sets_when_allowed_updates_differ(monkeypatch):
-    monkeypatch.setattr(
-        settings, "public_backend_url", "https://restaurant.labtutor.app"
-    )
-    monkeypatch.setattr(settings, "public_app_url", "")
-    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
-    monkeypatch.setattr(settings, "telegram_webhook_secret", "secret")
-
-    webhook_info_response = Mock()
-    webhook_info_response.raise_for_status = Mock()
-    webhook_info_response.json.return_value = {
-        "ok": True,
-        "result": {
-            "url": "https://restaurant.labtutor.app/api/webhooks/bot",
+async def test_register_telegram_webhook_sets_when_allowed_updates_differ(
+    telegram_startup_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+    client = _telegram_startup_client(
+        webhook_info={
+            "url": f"{telegram_startup_config['public_url']}/api/webhooks/bot",
             "allowed_updates": ["message", "callback_query"],
-        },
-    }
+        }
+    )
 
-    set_webhook_response = Mock()
-    set_webhook_response.raise_for_status = Mock()
-
-    client = AsyncMock()
-    client.get = AsyncMock(return_value=webhook_info_response)
-    client.post = AsyncMock(return_value=set_webhook_response)
-    client.__aenter__.return_value = client
-    client.__aexit__.return_value = None
-
-    with patch("app.main.httpx.AsyncClient", return_value=client):
+    with patch(
+        "app.services.telegram_webhook_service.httpx.AsyncClient",
+        return_value=client,
+    ):
         await register_telegram_webhook()
 
     client.post.assert_awaited_once()

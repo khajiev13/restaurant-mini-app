@@ -4,6 +4,11 @@
 **Status:** Approved design
 **Scope:** Customer authentication, Telegram phone verification, order contact snapshots, and masked AliPOS comments
 
+**Pre-launch decision:** No customers have started using the Mini App yet. The
+release is therefore a coordinated clean cut: old browser payloads do not need
+a compatibility window, verified-phone enforcement is unconditional, and the
+masked AliPOS comment header is always composed for verified orders.
+
 ## Summary
 
 Every customer who opens the Mini App must authenticate through Telegram and
@@ -25,7 +30,7 @@ The original customer note remains unchanged in the local database.
 - Block all customer UI routes until the customer's own phone is verified.
 - Preserve a scanned QR/table context while authentication and verification
   complete.
-- Prevent a browser or old frontend from substituting an arbitrary phone.
+- Prevent a manipulated browser request from substituting an arbitrary phone.
 - Give AliPOS operators a masked, recognizable phone reference without
   printing the full number in the free-form comment.
 - Keep a full, immutable order contact snapshot for AliPOS's structured field
@@ -123,7 +128,7 @@ orders.contact_phone_verified BOOLEAN NOT NULL DEFAULT FALSE
 Semantics:
 
 - No phone or incomplete verification metadata: no verified phone is known.
-- A phone with no matching fingerprint: a legacy value or a value changed by
+- A phone with no matching fingerprint: a pre-launch value or a value changed by
   an older writer; the customer must share again.
 - A phone, UTC verification timestamp, matching fingerprint, and accepted
   Telegram message-time/update-ID pair: the current profile phone was received
@@ -135,20 +140,21 @@ the phone is secret. This binding prevents an older application version from
 changing `phone_number` while accidentally leaving the new release's verified
 state valid.
 
-The migration does not infer verification for existing values. No existing
-phone is deleted, but all existing customers without complete matching metadata
-must complete the gate once.
+The migration does not infer verification for any existing value. No existing
+phone is deleted, but any test, operator, or pre-launch row without complete
+matching metadata must complete the gate once.
 
 All four verification fields are refreshed whenever the customer successfully
 shares their current Telegram phone again. Historical orders remain unchanged.
 The timestamp and order snapshot immutability are application invariants; the
 database columns and JSON value are not inherently immutable.
 
-`orders.contact_phone_verified` records whether that order's existing
+`orders.contact_phone_verified` records whether that order's
 `delivery_info.phoneNumber` snapshot came from a profile that satisfied the
 full verification predicate. Keeping provenance outside `delivery_info`
 prevents an internal flag from leaking into the AliPOS `deliveryInfo` payload.
-Legacy and rollback-created orders receive the safe database default `false`.
+Pre-release and manually created rows receive the safe database default
+`false`.
 
 ## Authentication and Route Gating
 
@@ -291,17 +297,10 @@ Checkout no longer owns phone collection:
   frontend and `OrderCreate`; reject a longer note with `422` before pricing,
   payment, persistence, or AliPOS side effects.
 
-For compatibility with a cached or older frontend, the initial release keeps
-`phone_number` as an optional, deprecated order request field. With final
-enforcement enabled, the backend ignores it. The new frontend omits it. A
-focused test must prove that a supplied spoofed value is not persisted or sent
-to AliPOS.
-
-The only exception is the explicitly bounded deployment window described
-below: while `REQUIRE_VERIFIED_CUSTOMER_PHONE=false`, an unverified legacy
-client retains the old request-phone behavior so the backend primitives can be
-deployed before the gate without an outage. The code default is `true`, tests
-cover both settings, and final acceptance is always run with enforcement true.
+Remove `phone_number` from `OrderCreate` and reject it as an unexpected field
+with `422`. The new frontend omits it. A focused test must prove that a supplied
+spoofed value is rejected before persistence, pricing, payment, or AliPOS side
+effects.
 
 ## Order Enforcement and Contact Snapshot
 
@@ -339,18 +338,18 @@ not an AliPOS request field. The separately composed outbound AliPOS
 `deliveryInfo` contains `clientName` and the full `phoneNumber`, but never the
 local provenance column.
 
-The explicit order column distinguishes new Telegram-verified snapshots from
-legacy `delivery_info.phoneNumber` values that came from editable checkout
-input. A verified snapshot is authoritative for the order. A later profile
-phone change does not modify it. AliPOS payloads and authorized staff order
-details use a verified snapshot rather than the mutable current profile value.
+The explicit order column distinguishes Telegram-verified snapshots from any
+pre-release or manually created `delivery_info.phoneNumber` values. A verified
+snapshot is authoritative for the order. A later profile phone change does not
+modify it. AliPOS payloads and authorized staff order details use a verified
+snapshot rather than the mutable current profile value.
 
 The check occurs before creating local payment or external-order side effects.
 An idempotency match for an existing order is handled first and is governed by
 that order's original snapshot. If the existing order is still queued, any
 submission path treats the snapshot as verified only when
 `contact_phone_verified` is true; it does not consult the customer's current
-profile or add a verified-looking phone header to a legacy snapshot. Idempotent
+profile or add a verified-looking phone header to an unverified snapshot. Idempotent
 replay continues returning the original order.
 
 ## Phone Normalization and Masking
@@ -404,34 +403,28 @@ Rules:
 - The system-generated phone line never contains the full phone. A customer
   remains responsible for phone-like text they voluntarily type in their own
   note; the backend does not rewrite the locally stored note.
-- A legacy order with `contact_phone_verified=false` keeps its historical
+- An unverified pre-release row with `contact_phone_verified=false` keeps its historical
   comment behavior and does not gain a verified-looking masked phone line.
 
 Existing AliPOS rules remain unchanged: the phone also remains in
 `deliveryInfo.phoneNumber`, order creation is not automatically retried after an
 unknown outcome, and table orders continue supplying their resolved `tableId`.
-Automated tests prove only the outbound payload. Whether the masked line is
-accepted, visible, or printed in a particular AliPOS operator layout remains a
-separate provider-evidence gate and is not overstated as confirmed behavior.
-
-Ship the formatter behind `ALIPOS_MASKED_PHONE_COMMENT_ENABLED`, defaulting to
-`false`. While false, AliPOS receives the historical customer note and the full
-structured phone but no generated phone header. Set it to `true` only after the
-vendor confirms the accepted multiline/comment-length contract or a separately
-authorized controlled AliPOS order proves acceptance. Final feature acceptance
-requires the flag to be true; payload unit tests alone cannot authorize it.
+The formatter is unconditional for verified order snapshots. Automated tests
+prove the exact outbound payload. Whether AliPOS visibly prints the line in a
+particular operator layout remains an operational observation after deployment
+and is not overstated as confirmed by unit tests.
 
 ## Staff and Admin Data
 
 Where an authorized staff order response already exposes a customer phone, it
-reads a snapshot first only when `contact_phone_verified` is true. Legacy
-orders preserve their existing current-profile fallback and must not present
-their browser-supplied snapshot as Telegram-verified.
+reads the immutable order snapshot when `contact_phone_verified` is true.
+Unverified pre-release rows preserve the existing current-profile fallback and
+must not present their snapshot as Telegram-verified.
 
 This feature does not add customer identity or phone data to table-inspection
 summary endpoints that intentionally exclude PII. Admin user search continues
 under its existing authorization boundary and receives `phone_verified`; any
-legacy phone it displays is labeled unverified rather than being represented as
+pre-launch phone it displays is labeled unverified rather than being represented as
 a verified contact.
 
 ## Error Handling
@@ -453,9 +446,9 @@ a verified contact.
   effect.
 - **Old Telegram client:** show update/reopen instructions; do not offer manual
   entry.
-- **Order arrives from an old or manipulated frontend after final enforcement:**
-  ignore its phone and reject with `phone_verification_required` when the
-  profile is unverified.
+- **Order arrives from a manipulated frontend:** reject a request phone as an
+  unexpected field with `422`; reject an otherwise valid order with
+  `phone_verification_required` when the profile is unverified.
 - **QR resolution succeeds while verification is pending:** retain the table
   context and reveal it after verification.
 - **QR resolution fails while verification is pending:** retain the existing
@@ -479,17 +472,14 @@ a verified contact.
 - Order tests proving an unverified customer receives the stable `409` before
   side effects.
 - Order tests proving a client-supplied phone is ignored.
-- Compatibility-flag tests proving the old request-phone path exists only when
-  the explicit flag is false and disappears when final enforcement is true.
+- Request-schema tests proving browser-supplied phone fields receive `422`.
 - Snapshot tests proving later profile changes do not alter an order phone and
-  proving legacy snapshots do not gain verified provenance.
+  proving unverified snapshots do not gain verified provenance.
 - AliPOS payload tests for the structured full phone, exact Uzbek mask, generic
   fallback mask with at least three hidden digits, optional customer note,
-  200-character validation, unchanged stored comment, and legacy comment
+  200-character validation, unchanged stored comment, and unverified-row comment
   behavior.
-- Masked-comment flag tests proving the generated header is absent by default
-  and present only when the evidence-gated setting is enabled.
-- Staff response tests proving snapshot-first phone selection with a legacy
+- Staff response tests proving snapshot-first phone selection with an unverified
   fallback.
 
 ### Frontend
@@ -524,44 +514,23 @@ a verified contact.
   mutation is separately approved. Confirm the structured full phone and exact
   masked comment without exposing either value in logs or saved test output.
 
-## Deployment and Compatibility
+## Deployment
 
-Use a staged backend-first rollout with `REQUIRE_VERIFIED_CUSTOMER_PHONE`, whose
-code default is `true`, and the evidence-gated
-`ALIPOS_MASKED_PHONE_COMMENT_ENABLED`, whose code default is `false`:
+Use one coordinated pre-launch cutover:
 
-1. Confirm that the implementation base contains the QR formats represented by
-   the currently issued assets, including numeric `t2_...` links as well as
-   legacy `t_...` compatibility.
+1. Confirm the release base resolves the issued numeric `t2_...` links and
+   retains legacy `t_...` compatibility.
 2. Apply the additive migration.
-3. Deploy webhook hardening, verification persistence, profile response, and
-   order compatibility with verified-phone enforcement overridden to `false`
-   and masked-comment output left `false`. In this short compatibility window,
-   an unverified old client retains the prior request-phone behavior; verified
-   clients already use the profile snapshot.
-4. Deploy the frontend gate and remove editable checkout phone submission.
-5. Verify with a controlled customer that legacy profile phone data triggers
-   one-time re-verification and that each issued QR format survives the gate.
-6. Obtain a vendor-confirmed comment contract or separate authorization for one
-   controlled AliPOS order. Prove the composed multiline comment is accepted;
-   then set `ALIPOS_MASKED_PHONE_COMMENT_ENABLED=true`. If acceptance is not
-   proven, leave it false and do not claim the masked-comment portion complete.
-7. Set `REQUIRE_VERIFIED_CUSTOMER_PHONE=true` and restart the backend. From this
-   point, the server ignores the deprecated request phone and enforces
-   verification.
-8. Verify a manipulated or cached old request receives
-   `phone_verification_required` and creates no side effect.
-9. Remove the deprecated request field and verified-phone rollout flag in a
-   later cleanup only after cached old frontends are no longer relevant. Retain
-   the masked-comment evidence gate unless the provider contract becomes a
-   stable tested prerequisite.
+3. Deploy the enforcing backend and gated frontend together. There is no
+   request-phone compatibility mode and no feature activation flag.
+4. Verify with a controlled Telegram customer that both QR formats survive the
+   gate, a spoofed request phone is rejected, and the created AliPOS payload has
+   the full structured phone plus the exact masked comment header.
 
-The migration is additive and does not delete existing phone values. A rollback
-restores the prior frontend and backend as one coordinated release. If the old
-backend changes a phone during the rollback window, the retained fingerprint no
-longer matches, so a later roll-forward requires re-verification rather than
-trusting that value. The new columns may remain unused without preventing the
-prior backend from reading users or orders.
+The migration is additive and does not delete any pre-launch phone value. A
+rollback restores the previous frontend and backend together; a later
+roll-forward requires re-verification for any row whose fingerprint does not
+match.
 
 ## Acceptance Criteria
 
@@ -574,19 +543,17 @@ prior backend from reading users or orders.
 - Staff and admin role destinations remain unchanged and bypass the customer
   phone gate.
 - Only a protected, self-contact Telegram webhook can mark a phone verified.
-- Existing unverified phone values require one-time re-verification.
+- Existing pre-launch unverified phone values require one-time re-verification.
 - No browser-supplied phone can affect an order.
-- Every new order after final enforcement snapshots the verified profile phone
+- Every new order snapshots the verified profile phone
   with explicit verified provenance.
 - AliPOS receives the full verified snapshot in `deliveryInfo.phoneNumber`, and
   the system-generated comment header contains only the masked form.
 - The Uzbek masked format is exactly `+998 90 *** 4567` for the corresponding
   canonical number.
-- Provider confirmation or a separately authorized controlled order proves the
-  multiline masked comment is accepted before its production flag is enabled.
 - Customer notes of at most 200 characters remain unchanged in local
   persistence and follow the masked phone on a new AliPOS comment line.
-- Legacy order snapshots never gain verified provenance or a verified-looking
+- Unverified order snapshots never gain verified provenance or a verified-looking
   masked phone header.
 - Full phone values do not enter application logs or PII-free table summaries.
 - Focused and full backend/frontend tests pass.

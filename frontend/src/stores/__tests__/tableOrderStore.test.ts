@@ -33,9 +33,9 @@ describe('tableOrderStore', () => {
     });
     const useTableOrderStore = await loadStore();
 
-    await useTableOrderStore.getState().resolveCode('a7-k2 p9');
+    await useTableOrderStore.getState().resolveCode('00a1-2');
 
-    expect(apiMocks.resolveTable).toHaveBeenCalledWith({ code: 'A7K2P9' });
+    expect(apiMocks.resolveTable).toHaveBeenCalledWith({ code: '12' });
     expect(useTableOrderStore.getState().context).toEqual({
       tableTitle: 'Stol 12',
       hallTitle: 'Asosiy zal',

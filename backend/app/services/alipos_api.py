@@ -1,6 +1,10 @@
 import asyncio
+import datetime
 import logging
 import time
+import uuid
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -25,33 +29,46 @@ _AVAILABILITY_TTL = 30
 # Halls/tables cache (5 minute TTL)
 _tables_cache: dict | None = None
 _tables_cache_expires_at: float = 0
+_tables_cache_last_success_at: datetime.datetime | None = None
+_ORDER_CREATE_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 405, 422})
+
+
+@dataclass(frozen=True)
+class HallsTablesSnapshot:
+    payload: dict
+    stale: bool
+    last_success_at: datetime.datetime
+
+
+class HallsTablesUnavailable(RuntimeError):
+    pass
 
 
 class AliPOSRejected(RuntimeError):
     """AliPOS returned a definite HTTP error before accepting the order."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"AliPOS rejected the order (HTTP {status_code})")
+
+
+class AliPOSPreSubmitError(RuntimeError):
+    """A prerequisite failed before the order POST could be attempted."""
+
+    def __init__(self, status_code: int | None = None) -> None:
+        self.status_code = status_code
+        detail = "AliPOS order submission prerequisite failed"
+        if status_code is not None:
+            detail = f"{detail} (HTTP {status_code})"
+        super().__init__(detail)
 
 
 class AliPOSUnknownOutcome(RuntimeError):
     """The create request may have reached AliPOS, so it must not be retried."""
 
 
-def _format_alipos_error(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = response.text.strip()
-
-    if isinstance(payload, dict):
-        for key in ("message", "detail", "title", "error"):
-            value = payload.get(key)
-            if value:
-                return str(value)
-        return str(payload)
-
-    if isinstance(payload, list):
-        return str(payload)
-
-    return payload or response.reason_phrase
+class AliPOSCancellationUnknown(RuntimeError):
+    """The cancellation may have reached AliPOS, so DELETE must not be repeated."""
 
 
 async def _get_token() -> str:
@@ -80,12 +97,25 @@ async def _get_token() -> str:
     return _token
 
 
-async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
+async def _api_request(
+    method: str,
+    path: str,
+    *,
+    operation: str,
+    pre_submit: bool = False,
+    **kwargs,
+) -> httpx.Response:
     """Make an authenticated request to the AliPOS API with retry."""
-    token = await _get_token()
+    try:
+        token = await _get_token()
+    except Exception as exc:
+        status_code = (
+            exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        )
+        if pre_submit:
+            raise AliPOSPreSubmitError(status_code) from None
+        raise RuntimeError(f"AliPOS {operation} prerequisite failed") from None
     max_retries = 3
-    last_exc: BaseException | None = None
-
     for attempt in range(max_retries):
         async with httpx.AsyncClient() as client:
             try:
@@ -103,44 +133,57 @@ async def _api_request(method: str, path: str, **kwargs) -> httpx.Response:
                 resp.raise_for_status()
                 return resp
             except httpx.HTTPStatusError as exc:
-                detail = _format_alipos_error(exc.response)
+                if pre_submit:
+                    logger.warning(
+                        "AliPOS prerequisite request rejected operation=%s status=%s",
+                        operation,
+                        exc.response.status_code,
+                    )
+                    raise AliPOSPreSubmitError(exc.response.status_code) from None
                 logger.warning(
-                    "AliPOS API returned HTTP error: %s %s -> %s (%s)",
-                    method,
-                    path,
+                    "AliPOS request rejected operation=%s status=%s",
+                    operation,
                     exc.response.status_code,
-                    detail,
                 )
-                raise RuntimeError(
-                    f"AliPOS returned {exc.response.status_code}: {detail}"
-                ) from exc
-            except httpx.RequestError as exc:
-                last_exc = exc
-                logger.warning(
-                    "AliPOS request failed (attempt %d/%d): %s %s -> %s",
-                    attempt + 1,
-                    max_retries,
-                    method,
-                    path,
-                    exc,
-                )
+                raise RuntimeError(f"AliPOS {operation} request failed") from None
+            except httpx.RequestError:
+                if pre_submit:
+                    logger.warning(
+                        "AliPOS prerequisite transport failure operation=%s "
+                        "attempt=%d/%d",
+                        operation,
+                        attempt + 1,
+                        max_retries,
+                    )
+                else:
+                    logger.warning(
+                        "AliPOS transport failure operation=%s attempt=%d/%d",
+                        operation,
+                        attempt + 1,
+                        max_retries,
+                    )
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
 
-    raise RuntimeError(
-        f"AliPOS request failed after {max_retries} attempts: {last_exc}"
-    ) from last_exc
+    if pre_submit:
+        raise AliPOSPreSubmitError() from None
+    raise RuntimeError(f"AliPOS {operation} request failed") from None
 
 
-async def get_menu() -> dict:
+async def get_menu(*, use_cache: bool = True) -> dict:
     """Fetch the full menu for the configured restaurant, cached for 5 minutes."""
     global _menu_cache, _menu_cache_expires_at
-    if _menu_cache is not None and time.monotonic() < _menu_cache_expires_at:
+    if (
+        use_cache
+        and _menu_cache is not None
+        and time.monotonic() < _menu_cache_expires_at
+    ):
         return _menu_cache
     resp = await _api_request(
         "GET",
         f"/api/Integration/v1/menu/{settings.alipos_restaurant_id}/composition",
+        operation="menu_composition",
     )
     _menu_cache = resp.json()
     _menu_cache_expires_at = time.monotonic() + _MENU_TTL
@@ -158,29 +201,114 @@ async def get_menu_availability() -> dict:
     resp = await _api_request(
         "GET",
         f"/api/Integration/v1/menu/{settings.alipos_restaurant_id}/availability",
+        operation="menu_availability",
     )
     _availability_cache = resp.json()
     _availability_cache_expires_at = time.monotonic() + _AVAILABILITY_TTL
     return _availability_cache
 
 
-async def get_halls_and_tables() -> dict:
-    """Fetch the configured restaurant's hall/table directory, cached for 5 minutes."""
-    global _tables_cache, _tables_cache_expires_at
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC)
+
+
+def _decode_halls_tables(response) -> dict:
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("AliPOS table directory must be an object")
+    if not isinstance(payload.get("halls"), list):
+        raise ValueError("AliPOS table directory halls must be a list")
+    if not isinstance(payload.get("tables"), list):
+        raise ValueError("AliPOS table directory tables must be a list")
+    hall_ids: set[uuid.UUID] = set()
+    for index, hall in enumerate(payload["halls"]):
+        if not isinstance(hall, dict):
+            raise ValueError(f"AliPOS hall {index} must be an object")
+        if not isinstance(hall.get("title"), str):
+            raise ValueError(f"AliPOS hall {index} is malformed")
+        try:
+            hall_id = uuid.UUID(str(hall["id"]))
+            service_percent = Decimal(str(hall.get("servicePercent") or 0))
+        except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(f"AliPOS hall {index} is malformed") from exc
+        if not service_percent.is_finite() or hall_id in hall_ids:
+            raise ValueError(f"AliPOS hall {index} is malformed")
+        hall_ids.add(hall_id)
+    table_ids: set[uuid.UUID] = set()
+    for index, table in enumerate(payload["tables"]):
+        if not isinstance(table, dict):
+            raise ValueError(f"AliPOS table {index} must be an object")
+        if not isinstance(table.get("title"), str):
+            raise ValueError(f"AliPOS table {index} is malformed")
+        try:
+            table_id = uuid.UUID(str(table["id"]))
+            hall_id = uuid.UUID(str(table["hallId"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"AliPOS table {index} is malformed") from exc
+        if table_id in table_ids or hall_id not in hall_ids:
+            raise ValueError(f"AliPOS table {index} is malformed")
+        table_ids.add(table_id)
+    return payload
+
+
+async def get_halls_and_tables_snapshot() -> HallsTablesSnapshot:
+    global _tables_cache, _tables_cache_expires_at, _tables_cache_last_success_at
+
     if _tables_cache is not None and time.monotonic() < _tables_cache_expires_at:
-        return _tables_cache
-    resp = await _api_request(
-        "GET",
-        f"/api/Integration/v1/restaurant/{settings.alipos_restaurant_id}/halls-and-tables",
-    )
-    _tables_cache = resp.json()
+        if _tables_cache_last_success_at is None:
+            raise HallsTablesUnavailable("Table cache is missing freshness metadata")
+        return HallsTablesSnapshot(
+            _tables_cache,
+            False,
+            _tables_cache_last_success_at,
+        )
+
+    try:
+        response = await _api_request(
+            "GET",
+            f"/api/Integration/v1/restaurant/{settings.alipos_restaurant_id}/halls-and-tables",
+            operation="table_directory",
+        )
+        payload = _decode_halls_tables(response)
+    except Exception:
+        if _tables_cache is None or _tables_cache_last_success_at is None:
+            raise HallsTablesUnavailable("Table directory is unavailable") from None
+        return HallsTablesSnapshot(
+            _tables_cache,
+            True,
+            _tables_cache_last_success_at,
+        )
+
+    _tables_cache = payload
     _tables_cache_expires_at = time.monotonic() + _MENU_TTL
-    return _tables_cache
+    _tables_cache_last_success_at = _utcnow()
+    return HallsTablesSnapshot(
+        _tables_cache,
+        False,
+        _tables_cache_last_success_at,
+    )
+
+
+async def get_halls_and_tables() -> dict:
+    snapshot = await get_halls_and_tables_snapshot()
+    if snapshot.stale:
+        # Stale fallback is inspection-only. Customer resolution and token
+        # restoration must never accept a table removed from the live directory.
+        raise HallsTablesUnavailable("A fresh table directory is required")
+    return snapshot.payload
 
 
 async def create_order(order_payload: dict) -> dict:
     """Send one order create attempt; an unknown outcome is never retried."""
-    token = await _get_token()
+    try:
+        token = await _get_token()
+    except AliPOSPreSubmitError:
+        raise
+    except Exception as exc:
+        status_code = (
+            exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        )
+        raise AliPOSPreSubmitError(status_code) from None
     path = "/api/Integration/v1/order"
     try:
         async with httpx.AsyncClient() as client:
@@ -193,17 +321,33 @@ async def create_order(order_payload: dict) -> dict:
                 },
                 json=order_payload,
                 timeout=30,
-                follow_redirects=True,
+                follow_redirects=False,
             )
+            if 300 <= resp.status_code < 400:
+                raise AliPOSUnknownOutcome(
+                    "AliPOS order create outcome is unknown"
+                )
             resp.raise_for_status()
+    except AliPOSUnknownOutcome:
+        raise
     except httpx.HTTPStatusError as exc:
-        detail = _format_alipos_error(exc.response)
-        raise AliPOSRejected(
-            f"AliPOS returned {exc.response.status_code}: {detail}"
-        ) from exc
-    except httpx.RequestError as exc:
-        raise AliPOSUnknownOutcome("AliPOS order create outcome is unknown") from exc
-    return resp.json()
+        if exc.response.status_code in _ORDER_CREATE_REJECTION_STATUSES:
+            raise AliPOSRejected(exc.response.status_code) from None
+        raise AliPOSUnknownOutcome(
+            "AliPOS order create outcome is unknown"
+        ) from None
+    except httpx.RequestError:
+        raise AliPOSUnknownOutcome("AliPOS order create outcome is unknown") from None
+    try:
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise TypeError
+        uuid.UUID(str(payload["orderId"]))
+    except (KeyError, TypeError, ValueError):
+        raise AliPOSUnknownOutcome(
+            "AliPOS order create outcome is unknown"
+        ) from None
+    return payload
 
 
 async def get_order_status(alipos_order_id: str) -> dict:
@@ -211,13 +355,23 @@ async def get_order_status(alipos_order_id: str) -> dict:
     resp = await _api_request(
         "GET",
         f"/api/Integration/v1/order/{alipos_order_id}",
+        operation="order_read",
     )
-    return resp.json()
+    try:
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise TypeError
+    except (TypeError, ValueError):
+        raise RuntimeError("AliPOS order_read response invalid") from None
+    return payload
 
 
 async def cancel_order(alipos_order_id: str, comment: str) -> None:
     """Cancel an order once with AliPOS's required comment body."""
-    token = await _get_token()
+    try:
+        token = await _get_token()
+    except Exception:
+        raise RuntimeError("AliPOS cancellation prerequisite failed") from None
     try:
         async with httpx.AsyncClient() as client:
             response = await client.request(
@@ -229,16 +383,19 @@ async def cancel_order(alipos_order_id: str, comment: str) -> None:
                 },
                 json={"comment": comment},
                 timeout=30,
-                follow_redirects=True,
+                follow_redirects=False,
             )
+            if 300 <= response.status_code < 400:
+                raise AliPOSCancellationUnknown(
+                    "AliPOS cancellation outcome is unknown"
+                )
             response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail = _format_alipos_error(exc.response)
-        raise RuntimeError(
-            f"AliPOS returned {exc.response.status_code}: {detail}"
-        ) from exc
-    except httpx.RequestError as exc:
-        raise RuntimeError("AliPOS cancellation outcome is unknown") from exc
+    except AliPOSCancellationUnknown:
+        raise
+    except Exception:
+        raise AliPOSCancellationUnknown(
+            "AliPOS cancellation outcome is unknown"
+        ) from None
 
 
 async def get_payment_methods() -> list[dict]:
@@ -246,5 +403,7 @@ async def get_payment_methods() -> list[dict]:
     resp = await _api_request(
         "GET",
         "/api/Integration/v1/paymentMethod/all",
+        operation="payment_methods",
+        pre_submit=True,
     )
     return resp.json()

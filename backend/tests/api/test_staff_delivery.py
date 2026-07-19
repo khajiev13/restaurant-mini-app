@@ -1,11 +1,65 @@
+import asyncio
 import datetime
+import time
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from app.config import settings
+from app.database import get_db
+from app.main import app
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import Address, Order, User
+from app.services import staff_delivery_service
+
+TAKE_ORDER_TIMEOUT_DETAIL = "Could not refresh order status. Try again."
+
+
+@pytest_asyncio.fixture
+async def staff_delivery_sessions(db_session):
+    _ = db_session  # Ensure the shared test schema exists before opening connections.
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    sessions = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    created_user_ids: list[int] = []
+
+    async def override_get_db():
+        async with sessions() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as committing_client:
+            yield committing_client, sessions, created_user_ids
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        if created_user_ids:
+            async with sessions() as cleanup_db:
+                await cleanup_db.execute(
+                    delete(Order).where(Order.user_id.in_(created_user_ids))
+                )
+                await cleanup_db.execute(
+                    delete(Address).where(Address.user_id.in_(created_user_ids))
+                )
+                await cleanup_db.execute(
+                    delete(User).where(User.telegram_id.in_(created_user_ids))
+                )
+                await cleanup_db.commit()
+        await engine.dispose()
 
 
 def _auth_headers(telegram_id: int) -> dict[str, str]:
@@ -67,6 +121,71 @@ async def _create_delivery_order(db_session, user: User, **overrides) -> Order:
     return order
 
 
+async def _create_committed_take_order_case(
+    sessions,
+    created_user_ids: list[int],
+    *,
+    assigned_to_staff: bool = False,
+) -> tuple[User, Order]:
+    customer_id = 8_000_000_000 + uuid.uuid4().int % 400_000_000
+    staff_id = 8_500_000_000 + uuid.uuid4().int % 400_000_000
+    created_user_ids.extend([customer_id, staff_id])
+
+    async with sessions() as setup_db:
+        customer = await _create_user(setup_db, customer_id, "customer")
+        staff = await _create_user(setup_db, staff_id, "staff")
+        order = await _create_delivery_order(
+            setup_db,
+            customer,
+            alipos_order_id=uuid.uuid4(),
+            assigned_staff_id=staff_id if assigned_to_staff else None,
+            assigned_at=(
+                datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+                if assigned_to_staff
+                else None
+            ),
+            status_updated_at=(
+                datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+                - datetime.timedelta(minutes=1)
+            ),
+        )
+    return staff, order
+
+
+def _patch_take_order_deadlines(
+    monkeypatch,
+    *,
+    provider_seconds: float,
+    operation_seconds: float,
+) -> None:
+    monkeypatch.setattr(
+        staff_delivery_service,
+        "settings",
+        SimpleNamespace(
+            staff_take_order_provider_timeout_seconds=provider_seconds,
+            staff_take_order_operation_timeout_seconds=operation_seconds,
+        ),
+        raising=False,
+    )
+
+
+async def _post_take_with_test_bound(
+    client: AsyncClient,
+    order_id: uuid.UUID,
+    staff_id: int,
+):
+    try:
+        return await asyncio.wait_for(
+            client.post(
+                f"/api/staff/orders/{order_id}/take",
+                headers=_auth_headers(staff_id),
+            ),
+            timeout=0.5,
+        )
+    except TimeoutError:
+        pytest.fail("take-order request exceeded its configured operation deadline")
+
+
 @pytest.mark.asyncio
 async def test_customer_cannot_access_staff_available(client, db_session):
     customer = await _create_user(db_session, 701, "customer")
@@ -96,6 +215,57 @@ async def test_staff_can_list_available_orders(client, db_session):
     assert data[0]["customer"]["telegram_id"] == customer.telegram_id
     assert data[0]["address"]["full_address"] == "Yakkasaray District, Shota Rustaveli 45"
     assert data[0]["payment_method"] == "cash"
+
+
+@pytest.mark.asyncio
+async def test_staff_delivery_uses_verified_order_phone_snapshot(client, db_session):
+    customer = await _create_user(db_session, 732, "customer")
+    staff = await _create_user(db_session, 733, "staff")
+    order = await _create_delivery_order(
+        db_session,
+        customer,
+        delivery_info={
+            "clientName": "Original customer",
+            "phoneNumber": "+998901234567",
+        },
+        contact_phone_verified=True,
+    )
+    customer.phone_number = "+998907654321"
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/staff/orders/{order.id}",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["customer"]["phone_number"] == "+998901234567"
+
+
+@pytest.mark.asyncio
+async def test_staff_delivery_uses_profile_phone_for_unverified_legacy_order(
+    client,
+    db_session,
+):
+    customer = await _create_user(db_session, 734, "customer")
+    staff = await _create_user(db_session, 735, "staff")
+    order = await _create_delivery_order(
+        db_session,
+        customer,
+        delivery_info={
+            "clientName": "Legacy customer",
+            "phoneNumber": "+998901234567",
+        },
+        contact_phone_verified=False,
+    )
+
+    response = await client.get(
+        f"/api/staff/orders/{order.id}",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["customer"]["phone_number"] == customer.phone_number
 
 
 @pytest.mark.asyncio
@@ -162,6 +332,335 @@ async def test_staff_can_take_available_order(client, db_session):
     assert response.status_code == 200
     assert order.assigned_staff_id == staff.telegram_id
     assert order.assigned_at is not None
+
+
+@pytest.mark.asyncio
+async def test_take_order_provider_deadline_expires_without_assignment(
+    staff_delivery_sessions,
+    monkeypatch,
+):
+    client, sessions, created_user_ids = staff_delivery_sessions
+    staff, order = await _create_committed_take_order_case(
+        sessions,
+        created_user_ids,
+    )
+    _patch_take_order_deadlines(
+        monkeypatch,
+        provider_seconds=0.02,
+        operation_seconds=0.25,
+    )
+    provider_release = asyncio.Event()
+    rollback_observed = asyncio.Event()
+    original_rollback = AsyncSession.rollback
+
+    async def track_rollback(session):
+        rollback_observed.set()
+        await original_rollback(session)
+
+    async def never_complete(_order_id: str):
+        await provider_release.wait()
+        return {"status": "TAKEN_BY_COURIER"}
+
+    monkeypatch.setattr(AsyncSession, "rollback", track_rollback)
+    started_at = time.monotonic()
+    try:
+        with patch(
+            "app.services.alipos_api.get_order_status",
+            new=AsyncMock(side_effect=never_complete),
+        ):
+            response = await _post_take_with_test_bound(
+                client,
+                order.id,
+                staff.telegram_id,
+            )
+    finally:
+        provider_release.set()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == TAKE_ORDER_TIMEOUT_DETAIL
+    assert time.monotonic() - started_at < 0.3
+    assert rollback_observed.is_set()
+
+    async with sessions() as verify_db:
+        stored = await asyncio.wait_for(
+            verify_db.scalar(
+                select(Order).where(Order.id == order.id).with_for_update()
+            ),
+            timeout=0.2,
+        )
+        assert stored is not None
+        assert stored.assigned_staff_id is None
+        await verify_db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_take_order_provider_read_happens_without_row_lock(
+    staff_delivery_sessions,
+    monkeypatch,
+):
+    client, sessions, created_user_ids = staff_delivery_sessions
+    staff, order = await _create_committed_take_order_case(
+        sessions,
+        created_user_ids,
+    )
+    _patch_take_order_deadlines(
+        monkeypatch,
+        provider_seconds=0.5,
+        operation_seconds=0.8,
+    )
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+
+    async def wait_during_provider_read(_order_id: str):
+        provider_started.set()
+        await release_provider.wait()
+        return {"status": "TAKEN_BY_COURIER", "orderNumber": "A7-492"}
+
+    with patch(
+        "app.services.alipos_api.get_order_status",
+        new=AsyncMock(side_effect=wait_during_provider_read),
+    ):
+        take_task = asyncio.create_task(
+            client.post(
+                f"/api/staff/orders/{order.id}/take",
+                headers=_auth_headers(staff.telegram_id),
+            )
+        )
+        try:
+            await asyncio.wait_for(provider_started.wait(), timeout=0.2)
+            try:
+                async with sessions() as observer_db:
+                    observed = await asyncio.wait_for(
+                        observer_db.scalar(
+                            select(Order).where(Order.id == order.id).with_for_update()
+                        ),
+                        timeout=0.2,
+                    )
+                    assert observed is not None
+                    await observer_db.rollback()
+            except TimeoutError:
+                pytest.fail("provider status read held the order row lock")
+            release_provider.set()
+            response = await asyncio.wait_for(take_task, timeout=0.5)
+        finally:
+            release_provider.set()
+            if not take_task.done():
+                take_task.cancel()
+            await asyncio.gather(take_task, return_exceptions=True)
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_take_order_replay_by_same_staff_returns_active_order(
+    staff_delivery_sessions,
+    monkeypatch,
+):
+    client, sessions, created_user_ids = staff_delivery_sessions
+    staff, order = await _create_committed_take_order_case(
+        sessions,
+        created_user_ids,
+        assigned_to_staff=True,
+    )
+    _patch_take_order_deadlines(
+        monkeypatch,
+        provider_seconds=0.02,
+        operation_seconds=0.1,
+    )
+
+    with patch(
+        "app.services.alipos_api.get_order_status",
+        new_callable=AsyncMock,
+    ) as status_mock:
+        response = await _post_take_with_test_bound(
+            client,
+            order.id,
+            staff.telegram_id,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["id"] == str(order.id)
+    status_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_take_order_preserves_webhook_status_that_advances_between_provider_read_and_lock(
+    staff_delivery_sessions,
+    monkeypatch,
+):
+    client, sessions, created_user_ids = staff_delivery_sessions
+    staff, order = await _create_committed_take_order_case(
+        sessions,
+        created_user_ids,
+    )
+    _patch_take_order_deadlines(
+        monkeypatch,
+        provider_seconds=0.5,
+        operation_seconds=0.8,
+    )
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+
+    async def stale_provider_read(_order_id: str):
+        provider_started.set()
+        await release_provider.wait()
+        return {"status": "TAKEN_BY_COURIER", "orderNumber": "A7-492"}
+
+    with patch(
+        "app.services.alipos_api.get_order_status",
+        new=AsyncMock(side_effect=stale_provider_read),
+    ):
+        take_task = asyncio.create_task(
+            client.post(
+                f"/api/staff/orders/{order.id}/take",
+                headers=_auth_headers(staff.telegram_id),
+            )
+        )
+        try:
+            await asyncio.wait_for(provider_started.wait(), timeout=0.2)
+            try:
+                async with sessions() as webhook_db:
+                    await asyncio.wait_for(
+                        webhook_db.execute(
+                            update(Order)
+                            .where(Order.id == order.id)
+                            .values(
+                                status="DELIVERED",
+                                status_updated_at=datetime.datetime.now(datetime.UTC).replace(
+                                    tzinfo=None
+                                ),
+                            )
+                        ),
+                        timeout=0.2,
+                    )
+                    await webhook_db.commit()
+            except TimeoutError:
+                pytest.fail("provider status read prevented the webhook update")
+            release_provider.set()
+            response = await asyncio.wait_for(take_task, timeout=0.5)
+        finally:
+            release_provider.set()
+            if not take_task.done():
+                take_task.cancel()
+            await asyncio.gather(take_task, return_exceptions=True)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "This order is no longer available."
+    async with sessions() as verify_db:
+        stored = await verify_db.get(Order, order.id)
+        assert stored is not None
+        assert stored.status == "DELIVERED"
+        assert stored.assigned_staff_id is None
+
+
+@pytest.mark.asyncio
+async def test_take_order_operation_deadline_cancels_contended_lock_without_late_assignment(
+    staff_delivery_sessions,
+    monkeypatch,
+):
+    client, sessions, created_user_ids = staff_delivery_sessions
+    staff, order = await _create_committed_take_order_case(
+        sessions,
+        created_user_ids,
+    )
+    _patch_take_order_deadlines(
+        monkeypatch,
+        provider_seconds=0.05,
+        operation_seconds=0.15,
+    )
+    rollback_observed = asyncio.Event()
+    original_rollback = AsyncSession.rollback
+
+    async def track_rollback(session):
+        rollback_observed.set()
+        await original_rollback(session)
+
+    monkeypatch.setattr(AsyncSession, "rollback", track_rollback)
+    status_mock = AsyncMock(
+        return_value={"status": "TAKEN_BY_COURIER", "orderNumber": "A7-492"}
+    )
+
+    async with sessions() as blocker_db:
+        await blocker_db.execute(
+            select(Order).where(Order.id == order.id).with_for_update()
+        )
+        with patch(
+            "app.services.alipos_api.get_order_status",
+            new=status_mock,
+        ):
+            response = await _post_take_with_test_bound(
+                client,
+                order.id,
+                staff.telegram_id,
+            )
+        assert response.status_code == 503
+        assert response.json()["detail"] == TAKE_ORDER_TIMEOUT_DETAIL
+        assert rollback_observed.is_set()
+        await blocker_db.rollback()
+
+    await asyncio.sleep(0.05)
+    async with sessions() as verify_db:
+        stored = await asyncio.wait_for(
+            verify_db.scalar(
+                select(Order).where(Order.id == order.id).with_for_update()
+            ),
+            timeout=0.2,
+        )
+        assert stored is not None
+        assert stored.assigned_staff_id is None
+        await verify_db.rollback()
+
+
+@pytest.mark.asyncio
+async def test_take_order_has_no_post_commit_reload_inside_operation_deadline(
+    staff_delivery_sessions,
+    monkeypatch,
+):
+    client, sessions, created_user_ids = staff_delivery_sessions
+    staff, order = await _create_committed_take_order_case(
+        sessions,
+        created_user_ids,
+    )
+    _patch_take_order_deadlines(
+        monkeypatch,
+        provider_seconds=0.05,
+        operation_seconds=0.15,
+    )
+    original_require = staff_delivery_service._require_staff_order
+    require_calls = 0
+    never_finish = asyncio.Event()
+
+    async def fail_if_reloaded_after_commit(*args, **kwargs):
+        nonlocal require_calls
+        require_calls += 1
+        if require_calls == 3:
+            await never_finish.wait()
+        return await original_require(*args, **kwargs)
+
+    with (
+        patch(
+            "app.services.staff_delivery_service._require_staff_order",
+            new=fail_if_reloaded_after_commit,
+        ),
+        patch(
+            "app.services.alipos_api.get_order_status",
+            new=AsyncMock(
+                return_value={"status": "TAKEN_BY_COURIER", "orderNumber": "A7-492"}
+            ),
+        ),
+    ):
+        response = await _post_take_with_test_bound(
+            client,
+            order.id,
+            staff.telegram_id,
+        )
+
+    assert response.status_code == 200
+    assert require_calls == 2
+    async with sessions() as verify_db:
+        stored = await verify_db.get(Order, order.id)
+        assert stored is not None
+        assert stored.assigned_staff_id == staff.telegram_id
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,8 @@
-from pydantic import BaseModel, field_validator
+import datetime
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.services.phone_verification_service import is_phone_verified
 
 
 class TelegramAuthRequest(BaseModel):
@@ -18,13 +22,28 @@ class UserResponse(BaseModel):
     phone_number: str | None = None
     language: str = "uz"
     role: str = "customer"
+    phone_verified: bool = False
+    phone_verified_at: datetime.datetime | None = Field(default=None, exclude=True)
+    phone_verified_fingerprint: str | None = Field(default=None, exclude=True)
+    phone_verified_message_at: datetime.datetime | None = Field(default=None, exclude=True)
+    phone_verified_update_id: int | None = Field(default=None, exclude=True)
 
     model_config = {"from_attributes": True}
 
+    @model_validator(mode="after")
+    def set_phone_verified(self) -> "UserResponse":
+        self.phone_verified = is_phone_verified(self)
+        return self
+
+
+class SelfProfileResponse(UserResponse):
+    inplace_online_payment_enabled: bool = False
+
 
 class UserUpdate(BaseModel):
-    phone_number: str | None = None
     language: str | None = None
+
+    model_config = {"extra": "forbid"}
 
 
 class UserRoleUpdate(BaseModel):

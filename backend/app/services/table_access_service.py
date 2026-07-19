@@ -6,17 +6,36 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from app.services import alipos_api
 
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-_MANUAL_CODE_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{6}$")
-_START_PARAM_RE = re.compile(r"^t_([0-9A-HJKMNP-TV-Z]{6})_([A-Za-z0-9_-]{12})$")
+_SUBMITTED_NUMERIC_CODE_RE = re.compile(r"^[0-9]{1,6}$")
+_NUMERIC_START_PARAM_RE = re.compile(
+    r"^t2_((?:0|[1-9][0-9]{0,5}))_([A-Za-z0-9_-]{12})$"
+)
+_LEGACY_START_PARAM_RE = re.compile(
+    r"^t_([0-9A-HJKMNP-TV-Z]{6})_([A-Za-z0-9_-]{12})$"
+)
+_TABLE_NUMBER_RE = re.compile(r"([0-9]+)\s*$")
 
 
 class InvalidTableEntry(ValueError):
     pass
+
+
+class InvalidTableDirectory(RuntimeError):
+    pass
+
+
+def manual_code_from_title(title: str) -> str:
+    match = _TABLE_NUMBER_RE.search(title.strip())
+    if match is None or len(match.group(1)) > 6:
+        raise InvalidTableDirectory(
+            f"Table title has no one-to-six digit trailing number: {title!r}"
+        )
+    return str(int(match.group(1)))
 
 
 @dataclass(frozen=True)
@@ -26,6 +45,13 @@ class TableDirectoryEntry:
     hall_id: uuid.UUID
     hall_title: str
     service_percent: Decimal
+    manual_code: str = ""
+
+
+@dataclass(frozen=True)
+class ParsedTableEntry:
+    code: str
+    legacy: bool
 
 
 @dataclass(frozen=True)
@@ -52,18 +78,18 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + padding)
 
 
-async def get_table_directory() -> list[TableDirectoryEntry]:
-    payload = await alipos_api.get_halls_and_tables()
+def parse_table_directory(payload: dict) -> list[TableDirectoryEntry]:
     halls: dict[uuid.UUID, tuple[str, Decimal]] = {}
     for hall in payload.get("halls", []):
         try:
             hall_id = uuid.UUID(str(hall["id"]))
         except (KeyError, TypeError, ValueError):
             continue
-        halls[hall_id] = (
-            str(hall.get("title") or ""),
-            Decimal(str(hall.get("servicePercent") or 0)),
-        )
+        try:
+            service_percent = Decimal(str(hall.get("servicePercent") or 0))
+        except InvalidOperation:
+            continue
+        halls[hall_id] = (str(hall.get("title") or ""), service_percent)
 
     entries: list[TableDirectoryEntry] = []
     for table in payload.get("tables", []):
@@ -75,14 +101,89 @@ async def get_table_directory() -> list[TableDirectoryEntry]:
         hall = halls.get(hall_id)
         if hall is None:
             continue
+        table_title = str(table.get("title") or "")
+        try:
+            manual_code = manual_code_from_title(table_title)
+        except InvalidTableDirectory:
+            manual_code = ""
         hall_title, service_percent = hall
         entries.append(
             TableDirectoryEntry(
                 table_id=table_id,
-                table_title=str(table.get("title") or ""),
+                table_title=table_title,
                 hall_id=hall_id,
                 hall_title=hall_title,
                 service_percent=service_percent,
+                manual_code=manual_code,
+            )
+        )
+    return entries
+
+
+def _normalize_submitted_code(value: str) -> str:
+    digits = value.strip()
+    if _SUBMITTED_NUMERIC_CODE_RE.fullmatch(digits) is None:
+        raise InvalidTableEntry("Table code was not found")
+    return str(int(digits))
+
+
+async def get_table_directory() -> list[TableDirectoryEntry]:
+    payload = await alipos_api.get_halls_and_tables()
+    if not isinstance(payload, dict):
+        raise InvalidTableDirectory("Table directory payload is not an object")
+    raw_halls = payload.get("halls")
+    raw_tables = payload.get("tables")
+    if not isinstance(raw_halls, list) or not isinstance(raw_tables, list):
+        raise InvalidTableDirectory("Table directory arrays are missing")
+
+    halls: dict[uuid.UUID, tuple[str, Decimal]] = {}
+    for raw_hall in raw_halls:
+        if not isinstance(raw_hall, dict):
+            raise InvalidTableDirectory("Hall directory entry is invalid")
+        try:
+            hall_id = uuid.UUID(str(raw_hall["id"]))
+            hall_title = str(raw_hall.get("title") or "")
+            service_percent = Decimal(str(raw_hall.get("servicePercent") or 0))
+            if not service_percent.is_finite():
+                raise InvalidTableDirectory("Hall directory entry is invalid")
+        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+            raise InvalidTableDirectory("Hall directory entry is invalid") from exc
+        if hall_id in halls:
+            raise InvalidTableDirectory("Duplicate hall identifier")
+        halls[hall_id] = (hall_title, service_percent)
+
+    entries: list[TableDirectoryEntry] = []
+    table_ids: set[uuid.UUID] = set()
+    manual_codes: set[str] = set()
+    for raw_table in raw_tables:
+        if not isinstance(raw_table, dict):
+            raise InvalidTableDirectory("Table directory entry is invalid")
+        try:
+            table_id = uuid.UUID(str(raw_table["id"]))
+            hall_id = uuid.UUID(str(raw_table["hallId"]))
+            table_title = str(raw_table.get("title") or "")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InvalidTableDirectory("Table directory entry is invalid") from exc
+        if table_id in table_ids:
+            raise InvalidTableDirectory("Duplicate table identifier")
+        hall = halls.get(hall_id)
+        if hall is None:
+            raise InvalidTableDirectory(f"Table has unknown hall: {table_title!r}")
+        manual_code = manual_code_from_title(table_title)
+        if manual_code in manual_codes:
+            raise InvalidTableDirectory(f"Duplicate table number {manual_code}")
+
+        table_ids.add(table_id)
+        manual_codes.add(manual_code)
+        hall_title, service_percent = hall
+        entries.append(
+            TableDirectoryEntry(
+                table_id=table_id,
+                table_title=table_title,
+                hall_id=hall_id,
+                hall_title=hall_title,
+                service_percent=service_percent,
+                manual_code=manual_code,
             )
         )
     return entries
@@ -105,7 +206,7 @@ class TableAccessService:
         message = f"{purpose}:{value}".encode()
         return hmac.new(self._secret, message, hashlib.sha256).digest()
 
-    def build_manual_code(self, table_id: uuid.UUID) -> str:
+    def build_legacy_manual_code(self, table_id: uuid.UUID) -> str:
         number = int.from_bytes(self._digest("manual", table_id.hex)[:4], "big") >> 2
         chars: list[str] = []
         for _ in range(6):
@@ -113,20 +214,33 @@ class TableAccessService:
             chars.append(_CROCKFORD_ALPHABET[remainder])
         return "".join(reversed(chars))
 
-    def build_start_param(self, table_id: uuid.UUID) -> str:
-        code = self.build_manual_code(table_id)
+    def build_start_param(self, entry: TableDirectoryEntry) -> str:
+        signature = _b64encode(self._digest("qr2", entry.manual_code)[:9])
+        return f"t2_{entry.manual_code}_{signature}"
+
+    def build_legacy_start_param(self, table_id: uuid.UUID) -> str:
+        code = self.build_legacy_manual_code(table_id)
         signature = _b64encode(self._digest("qr", code)[:9])
         return f"t_{code}_{signature}"
 
-    def parse_start_param(self, value: str) -> str:
-        match = _START_PARAM_RE.fullmatch(value.strip())
-        if match is None:
+    def parse_start_param(self, value: str) -> ParsedTableEntry:
+        normalized = value.strip()
+        numeric_match = _NUMERIC_START_PARAM_RE.fullmatch(normalized)
+        if numeric_match is not None:
+            code, received_signature = numeric_match.groups()
+            expected_signature = _b64encode(self._digest("qr2", code)[:9])
+            if hmac.compare_digest(received_signature, expected_signature):
+                return ParsedTableEntry(code=code, legacy=False)
             raise InvalidTableEntry("Invalid table QR")
-        code, received_signature = match.groups()
+
+        legacy_match = _LEGACY_START_PARAM_RE.fullmatch(normalized)
+        if legacy_match is None:
+            raise InvalidTableEntry("Invalid table QR")
+        code, received_signature = legacy_match.groups()
         expected_signature = _b64encode(self._digest("qr", code)[:9])
         if not hmac.compare_digest(received_signature, expected_signature):
             raise InvalidTableEntry("Invalid table QR")
-        return code
+        return ParsedTableEntry(code=code, legacy=True)
 
     def issue_access_token(
         self,
@@ -182,31 +296,65 @@ class TableAccessService:
             raise InvalidTableEntry("Table access token expired")
         return TableTokenClaims(table_id=table_id, expires_at=expires_at)
 
-    def resolve_code(
+    def _resolution_for(
         self,
-        code: str,
-        directory: list[TableDirectoryEntry],
+        entry: TableDirectoryEntry,
+        *,
+        expires_at: datetime.datetime | None = None,
     ) -> TableResolution:
-        normalized = code.strip().upper().replace("-", "").replace(" ", "")
-        if _MANUAL_CODE_RE.fullmatch(normalized) is None:
-            raise InvalidTableEntry("Table code was not found")
-        entry = next(
-            (item for item in directory if self.build_manual_code(item.table_id) == normalized),
-            None,
-        )
-        if entry is None:
-            raise InvalidTableEntry("Table code was not found")
         return TableResolution(
             table_title=entry.table_title,
             hall_title=entry.hall_title,
             service_percent=entry.service_percent,
-            manual_code=normalized,
-            access_token=self.issue_access_token(entry),
+            manual_code=entry.manual_code,
+            access_token=self.issue_access_token(entry, expires_at=expires_at),
         )
 
+    def resolve_manual_code(
+        self,
+        code: str,
+        directory: list[TableDirectoryEntry],
+    ) -> TableResolution:
+        normalized = _normalize_submitted_code(code)
+        entry = next((item for item in directory if item.manual_code == normalized), None)
+        if entry is None:
+            raise InvalidTableEntry("Table code was not found")
+        return self._resolution_for(entry)
+
+    def resolve_start_param(
+        self,
+        value: str,
+        directory: list[TableDirectoryEntry],
+    ) -> TableResolution:
+        parsed = self.parse_start_param(value)
+        return self._resolve_parsed_start_param(parsed, directory)
+
+    def _resolve_parsed_start_param(
+        self,
+        parsed: ParsedTableEntry,
+        directory: list[TableDirectoryEntry],
+    ) -> TableResolution:
+        if parsed.legacy:
+            matches = [
+                item
+                for item in directory
+                if self.build_legacy_manual_code(item.table_id) == parsed.code
+            ]
+            if len(matches) > 1:
+                raise InvalidTableDirectory("Duplicate legacy table code")
+        else:
+            matches = [item for item in directory if item.manual_code == parsed.code]
+        if len(matches) != 1:
+            raise InvalidTableEntry("Table code was not found")
+        return self._resolution_for(matches[0])
+
     async def resolve(self, entry: str | None, code: str | None) -> TableResolution:
-        resolved_code = self.parse_start_param(entry) if entry is not None else (code or "")
-        return self.resolve_code(resolved_code, await get_table_directory())
+        if entry is not None:
+            parsed = self.parse_start_param(entry)
+            directory = await get_table_directory()
+            return self._resolve_parsed_start_param(parsed, directory)
+        directory = await get_table_directory()
+        return self.resolve_manual_code(code or "", directory)
 
     async def resolve_access_token(self, token: str) -> TableDirectoryEntry:
         claims = self.verify_access_token(token)
@@ -226,24 +374,19 @@ class TableAccessService:
         entry = next((item for item in directory if item.table_id == table_id), None)
         if entry is None:
             raise InvalidTableEntry("Table is no longer available")
-        return TableResolution(
-            table_title=entry.table_title,
-            hall_title=entry.hall_title,
-            service_percent=entry.service_percent,
-            manual_code=self.build_manual_code(entry.table_id),
-            access_token=self.issue_access_token(entry, expires_at=expires_at),
-        )
+        return self._resolution_for(entry, expires_at=expires_at)
 
     async def manifest(self) -> list[dict]:
         result: list[dict] = []
-        for entry in await get_table_directory():
-            start_param = self.build_start_param(entry.table_id)
+        directory = await get_table_directory()
+        for entry in sorted(directory, key=lambda item: int(item.manual_code)):
+            start_param = self.build_start_param(entry)
             result.append(
                 {
                     "table_title": entry.table_title,
                     "hall_title": entry.hall_title,
                     "service_percent": float(entry.service_percent),
-                    "manual_code": self.build_manual_code(entry.table_id),
+                    "manual_code": entry.manual_code,
                     "start_param": start_param,
                     "deep_link": f"https://t.me/{self._bot_username}?startapp={start_param}",
                 }

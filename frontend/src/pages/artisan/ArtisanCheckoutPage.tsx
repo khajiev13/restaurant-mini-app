@@ -3,12 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ArtisanLayout, { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import MapPickerOverlay from '../../components/artisan/MapPickerOverlay';
-import { createAddress, createOrder, getAddresses, getMe } from '../../services/api';
+import { createAddress, createOrder, getAddresses } from '../../services/api';
+import { usePhoneVerification } from '../../hooks/usePhoneVerification';
 import { useAuthStore } from '../../stores/authStore';
 import { useCartStore } from '../../stores/cartStore';
 import { useMenuStore } from '../../stores/menuStore';
 import { useTableOrderStore } from '../../stores/tableOrderStore';
 import { formatPrice } from '../../utils/format';
+import { maskPhoneNumber } from '../../utils/phone';
 import type { Address, CreateOrderPayload } from '../../types/api';
 
 const tg = window.Telegram?.WebApp;
@@ -19,12 +21,24 @@ const PAYMENT_METHODS = [
   { key: 'rahmat', icon: 'credit_card', color: '#0369a1' },
 ] as const;
 
+const MAX_COMMENT_CODE_POINTS = 200;
+
 type PaymentMethodKey = typeof PAYMENT_METHODS[number]['key'];
 
 interface AddressFormState {
   label: string; address: string; entrance: string; apartment: string;
   floor: string; doorCode: string; instructions: string; lat: number | null; lng: number | null;
 }
+
+interface PhoneGateCheckoutDraft {
+  ownerTelegramId: number;
+  clientRequestId: string;
+  selectedAddressId: string | null;
+  comment: string;
+  paymentMethod: PaymentMethodKey;
+}
+
+let phoneGateCheckoutDraft: PhoneGateCheckoutDraft | null = null;
 
 const EMPTY_FORM: AddressFormState = {
   label: '', address: '', entrance: '', apartment: '',
@@ -38,6 +52,10 @@ function createClientRequestId(): string {
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+function truncateCodePoints(value: string, max: number): string {
+  return Array.from(value).slice(0, max).join('');
 }
 
 
@@ -78,26 +96,56 @@ export default function ArtisanCheckoutPage() {
   const grandTotal = total + serviceCharge;
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authenticate = useAuthStore((s) => s.authenticate);
+  const authUser = useAuthStore((s) => s.user);
+  const refreshMe = useAuthStore((s) => s.refreshMe);
+  const { requestPhone } = usePhoneVerification({ autoRequest: false });
+  const inplaceOnlinePaymentEnabled = authUser?.inplace_online_payment_enabled === true;
+  const maskedPhone = authUser?.phone_verified && authUser.phone_number
+    ? maskPhoneNumber(authUser.phone_number)
+    : t('phone_verification.unavailable');
+  const canPayOnline = !isTableOrder || inplaceOnlinePaymentEnabled;
+  const paymentMethods = canPayOnline
+    ? PAYMENT_METHODS
+    : PAYMENT_METHODS.filter((method) => method.key === 'cash');
   const navigate = useNavigate();
+  const checkoutOwnerTelegramId = useRef(
+    authUser?.phone_verified ? authUser.telegram_id : null,
+  );
+  const restoredDraft = useRef(
+    phoneGateCheckoutDraft?.ownerTelegramId === checkoutOwnerTelegramId.current
+      ? phoneGateCheckoutDraft
+      : null,
+  );
+  const preserveDraftOnUnmount = useRef(false);
+  const pendingGateDraft = useRef<PhoneGateCheckoutDraft | null>(null);
+  const mounted = useRef(false);
 
-  const [phone, setPhone] = useState('');
   const [addresses, setAddresses] = useState<Address[]>([]);
-  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
-  const [comment, setComment] = useState('');
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(
+    restoredDraft.current?.selectedAddressId ?? null,
+  );
+  const [comment, setComment] = useState(restoredDraft.current?.comment ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showMapPicker, setShowMapPicker] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<AddressFormState>(EMPTY_FORM);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>(
+    restoredDraft.current?.paymentMethod ?? 'cash',
+  );
   const [toast, setToast] = useState('');
-  const clientRequestId = useRef(createClientRequestId());
+  const clientRequestId = useRef(
+    restoredDraft.current?.clientRequestId ?? createClientRequestId(),
+  );
   const showToast = (msg: string): void => { setToast(msg); haptic?.notificationOccurred('error'); };
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
+  useEffect(() => {
+    if (!canPayOnline && paymentMethod === 'rahmat') setPaymentMethod('cash');
+  }, [canPayOnline, paymentMethod]);
 
-  const stateRef = useRef({ phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability });
-  stateRef.current = { phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability };
+  const stateRef = useRef({ selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability, refreshMe });
+  stateRef.current = { selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability, refreshMe };
 
   useEffect(() => {
     const bb = tg?.BackButton;
@@ -110,6 +158,37 @@ export default function ArtisanCheckoutPage() {
   useEffect(() => { if (items.length === 0) navigate('/', { replace: true }); }, [items.length, navigate]);
 
   useEffect(() => {
+    mounted.current = true;
+    if (
+      phoneGateCheckoutDraft
+      && phoneGateCheckoutDraft.ownerTelegramId !== checkoutOwnerTelegramId.current
+    ) {
+      phoneGateCheckoutDraft = null;
+    }
+    return () => {
+      mounted.current = false;
+      const authState = useAuthStore.getState();
+      const authRefreshFailed = (
+        authState.user === null
+        && authState.authError !== null
+        && !authState.hasHydratedUser
+        && authState.hasResolvedInitialAuth
+      );
+      if (
+        pendingGateDraft.current
+        && (authState.user?.phone_verified === false || authRefreshFailed)
+      ) {
+        phoneGateCheckoutDraft = pendingGateDraft.current;
+        preserveDraftOnUnmount.current = true;
+      }
+      pendingGateDraft.current = null;
+      if (!preserveDraftOnUnmount.current) {
+        phoneGateCheckoutDraft = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     if (!isAuthenticated) {
@@ -119,15 +198,23 @@ export default function ArtisanCheckoutPage() {
 
     setLoading(true);
 
-    const addressesRequest = isTableOrder ? Promise.resolve(null) : getAddresses();
-    void Promise.all([getMe(), addressesRequest])
-      .then(([meRes, addrRes]) => {
+    if (isTableOrder) {
+      setAddresses([]);
+      setSelectedAddressId(null);
+      setLoading(false);
+      return;
+    }
+
+    void getAddresses()
+      .then((addrRes) => {
         if (cancelled) return;
-        const p = meRes.data.data?.phone_number;
-        if (p) setPhone(p);
-        const addrs = addrRes?.data.data || [];
+        const addrs = addrRes.data.data || [];
         setAddresses(addrs);
-        if (addrs.length > 0) setSelectedAddressId(addrs[0].id);
+        setSelectedAddressId((current) => (
+          current && addrs.some((address) => address.id === current)
+            ? current
+            : addrs[0]?.id ?? null
+        ));
       })
       .catch(console.error)
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -137,7 +224,6 @@ export default function ArtisanCheckoutPage() {
   const handlePlaceOrder = async () => {
     const s = stateRef.current;
     if (s.submitting) return;
-    if (!s.phone) { showToast(t('checkout.error_phone')); return; }
     const addr = s.tableContext
       ? null
       : s.addresses.find((a) => a.id === s.selectedAddressId);
@@ -154,7 +240,6 @@ export default function ArtisanCheckoutPage() {
           price: i.price,
           modifications: [],
         })),
-        phone_number: s.phone,
         comment: s.comment || undefined,
         payment_method: s.paymentMethod,
         discriminator: s.tableContext ? 'inplace' : 'delivery',
@@ -168,9 +253,17 @@ export default function ArtisanCheckoutPage() {
             }),
       };
       const res = await createOrder(payload);
-      haptic?.notificationOccurred('success');
-
       const orderData = res.data.data;
+      if (
+        orderData.status === 'SUBMISSION_FAILED'
+        || orderData.alipos_sync_status === 'failed'
+      ) {
+        throw new Error('Order submission failed');
+      }
+      pendingGateDraft.current = null;
+      phoneGateCheckoutDraft = null;
+      preserveDraftOnUnmount.current = false;
+      haptic?.notificationOccurred('success');
 
       if (s.paymentMethod === 'rahmat' && orderData.multicard_checkout_url) {
         // Open payment URL first — before navigation so the openLink call is not lost on re-render
@@ -185,7 +278,36 @@ export default function ArtisanCheckoutPage() {
     } catch (err) {
       console.error('Order failed:', err);
       const detail = (err as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response;
-      if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
+      if (detail?.status === 409 && detail.data?.detail?.code === 'phone_verification_required') {
+        if (checkoutOwnerTelegramId.current === null) {
+          pendingGateDraft.current = null;
+          phoneGateCheckoutDraft = null;
+          preserveDraftOnUnmount.current = false;
+          showToast(t('checkout.phone_verification_required'));
+          return;
+        }
+        const gateDraft = {
+          ownerTelegramId: checkoutOwnerTelegramId.current,
+          clientRequestId: clientRequestId.current,
+          selectedAddressId: s.selectedAddressId,
+          comment: s.comment,
+          paymentMethod: s.paymentMethod,
+        };
+        pendingGateDraft.current = gateDraft;
+        showToast(t('checkout.phone_verification_required'));
+        const refreshedProfile = await s.refreshMe();
+        if (!mounted.current) {
+          return;
+        }
+        pendingGateDraft.current = null;
+        if (refreshedProfile?.phone_verified === false) {
+          phoneGateCheckoutDraft = gateDraft;
+          preserveDraftOnUnmount.current = true;
+        }
+      } else if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
+        pendingGateDraft.current = null;
+        phoneGateCheckoutDraft = null;
+        preserveDraftOnUnmount.current = false;
         clientRequestId.current = createClientRequestId();
         await s.refreshMenu();
         const refreshed = useMenuStore.getState().menu;
@@ -288,18 +410,16 @@ export default function ArtisanCheckoutPage() {
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%' }}>
                 <Icon name="phone_iphone" style={{ color: COLORS.primaryContainer }} />
-                <input
-                  type="tel"
-                  aria-label={t('checkout.phone_label')}
-                  value={phone}
-                  onChange={(event) => setPhone(event.target.value)}
-                  placeholder={t('checkout.phone_placeholder')}
-                  autoComplete="tel"
-                  style={{
-                    flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent',
-                    fontWeight: 600, color: COLORS.onSurface, fontFamily: FONTS.body, fontSize: 16,
-                  }}
-                />
+                <span style={{ flex: 1, minWidth: 0, fontWeight: 600, color: COLORS.onSurface, fontFamily: FONTS.body, fontSize: 16 }}>
+                  {maskedPhone}
+                </span>
+                <button
+                  type="button"
+                  onClick={requestPhone}
+                  style={{ border: 'none', background: 'transparent', color: COLORS.primary, fontWeight: 700, cursor: 'pointer', fontFamily: FONTS.body }}
+                >
+                  {t('phone_verification.update')}
+                </button>
               </div>
             </div>
           </section>
@@ -480,7 +600,7 @@ export default function ArtisanCheckoutPage() {
               {t('checkout.payment_method_label', '💳 Payment Method')}
             </h2>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
-              {PAYMENT_METHODS.map((pm) => {
+              {paymentMethods.map((pm) => {
                 const active = paymentMethod === pm.key;
                 return (
                   <button
@@ -581,7 +701,8 @@ export default function ArtisanCheckoutPage() {
             }}>
               <textarea
                 placeholder={t('checkout.comment_placeholder')}
-                value={comment} onChange={(e) => setComment(e.target.value)}
+                value={comment}
+                onChange={(e) => setComment(truncateCodePoints(e.target.value, MAX_COMMENT_CODE_POINTS))}
                 rows={3}
                 style={{
                   width: '100%', backgroundColor: 'transparent', border: 'none', fontSize: 14, padding: 12,
@@ -589,6 +710,12 @@ export default function ArtisanCheckoutPage() {
                   boxSizing: 'border-box',
                 }}
               />
+              <div style={{ padding: '0 12px 8px', textAlign: 'right', color: COLORS.secondary, fontSize: 12 }}>
+                {t('checkout.comment_count', {
+                  count: Array.from(comment).length,
+                  max: MAX_COMMENT_CODE_POINTS,
+                })}
+              </div>
             </div>
           </section>
         </div>

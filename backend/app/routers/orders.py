@@ -14,20 +14,31 @@ from app.services.order_service import (
     CancellationError,
     CustomerOrderError,
     CustomerOrderNotFound,
+    OrderSubmissionInProgress,
     OrderSubmissionRejected,
     PaymentCheckoutError,
     PaymentRetryConflict,
     PaymentSwitchConflict,
     PaymentSwitchError,
+    PhoneVerificationRequired,
     cancel_customer_order,
     create_customer_order,
     retry_customer_order_payment,
     switch_customer_order_to_cash,
 )
-from app.services.order_status_service import apply_alipos_status_update_for_order
-from app.services.table_access_service import InvalidTableEntry
+from app.services.order_status_service import (
+    apply_alipos_status_update_for_order,
+    parse_alipos_updated_at,
+)
+from app.services.table_access_service import InvalidTableDirectory, InvalidTableEntry
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+ORDER_SUBMISSION_ERROR_DETAIL = "Could not submit the order to the restaurant"
+TABLE_DIRECTORY_UNAVAILABLE = "Table directory is temporarily unavailable"
+PHONE_VERIFICATION_REQUIRED_DETAIL = {
+    "code": "phone_verification_required",
+    "message": "Share your phone through Telegram before placing an order.",
+}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -39,17 +50,40 @@ async def create_order(
     """Create a server-priced delivery or table order."""
     try:
         order = await create_customer_order(db, current_user, body)
+    except PhoneVerificationRequired as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=PHONE_VERIFICATION_REQUIRED_DETAIL,
+        ) from exc
     except CartConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "cart_conflict", "changes": exc.changes},
+        ) from exc
+    except InvalidTableDirectory as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=TABLE_DIRECTORY_UNAVAILABLE,
         ) from exc
     except (CustomerOrderError, InvalidTableEntry) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-    except (OrderSubmissionRejected, PaymentCheckoutError) as exc:
+    except OrderSubmissionInProgress as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "order_id": str(exc.order_id),
+                "status": exc.sync_status,
+            },
+        ) from exc
+    except OrderSubmissionRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=ORDER_SUBMISSION_ERROR_DETAIL,
+        ) from exc
+    except PaymentCheckoutError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
@@ -154,7 +188,13 @@ async def get_order_status(
             new_status = alipos_data.get("status", order.status)
             order_number = alipos_data.get("orderNumber")
             if await apply_alipos_status_update_for_order(
-                db, order, new_status, order_number
+                db,
+                order,
+                new_status,
+                order_number,
+                provider_updated_at=parse_alipos_updated_at(
+                    alipos_data.get("updatedAt")
+                ),
             ):
                 await db.commit()
         except Exception:
@@ -202,7 +242,7 @@ async def switch_order_to_cash(
     except OrderSubmissionRejected as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
+            detail=ORDER_SUBMISSION_ERROR_DETAIL,
         ) from exc
     return ApiResponse(
         success=True,

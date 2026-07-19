@@ -7,7 +7,7 @@ export interface AuthResponse {
   access_token: string;
 }
 
-export interface User {
+export interface BaseUser {
   telegram_id: number;
   first_name: string;
   last_name: string | null;
@@ -16,6 +16,15 @@ export interface User {
   phone_number: string | null;
   language: string;
   role: 'customer' | 'staff' | 'admin';
+}
+
+export interface AdminUser extends BaseUser {
+  phone_verified: boolean;
+}
+
+export interface User extends BaseUser {
+  phone_verified: boolean;
+  inplace_online_payment_enabled: boolean;
 }
 
 export interface Address {
@@ -151,7 +160,6 @@ export interface CreateOrderPayload {
     price: number;
     modifications: unknown[];
   }>;
-  phone_number: string;
   delivery_address?: string;
   latitude?: string | null;
   longitude?: string | null;

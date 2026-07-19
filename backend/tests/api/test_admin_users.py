@@ -2,6 +2,7 @@ import pytest
 
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import User
+from app.services.phone_verification_service import phone_verification_fingerprint
 
 
 def _auth_headers(telegram_id: int) -> dict[str, str]:
@@ -58,6 +59,36 @@ async def test_admin_can_search_users_by_phone(client, db_session):
     data = response.json()["data"]
     assert len(data) == 1
     assert data[0]["telegram_id"] == target.telegram_id
+    assert "inplace_online_payment_enabled" not in data[0]
+
+
+@pytest.mark.asyncio
+async def test_admin_user_responses_expose_verified_phone_without_metadata(client, db_session):
+    admin = await _create_user(db_session, 817, "admin")
+    target = await _create_user(db_session, 818, "customer", phone_number="+998901112233")
+    target.phone_verified_at = target.created_at
+    target.phone_verified_message_at = target.created_at
+    target.phone_verified_update_id = 818
+    target.phone_verified_fingerprint = phone_verification_fingerprint(
+        target.telegram_id,
+        target.phone_number,
+    )
+    await db_session.commit()
+
+    response = await client.get(
+        "/api/admin/users?query=1112233",
+        headers=_auth_headers(admin.telegram_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"][0]
+    assert data["phone_verified"] is True
+    assert {
+        "phone_verified_at",
+        "phone_verified_fingerprint",
+        "phone_verified_message_at",
+        "phone_verified_update_id",
+    }.isdisjoint(data)
 
 
 @pytest.mark.asyncio
@@ -75,6 +106,7 @@ async def test_admin_can_assign_staff_role(client, db_session):
     assert response.status_code == 200
     assert target.role == "staff"
     assert response.json()["data"]["role"] == "staff"
+    assert "inplace_online_payment_enabled" not in response.json()["data"]
 
 
 @pytest.mark.asyncio

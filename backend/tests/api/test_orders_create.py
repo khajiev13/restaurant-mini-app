@@ -1,22 +1,340 @@
+import asyncio
+import datetime
 import uuid
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.middleware.telegram_auth import create_jwt
 from app.models.models import Address, Order, User
+from app.routers.orders import create_order as create_order_endpoint
+from app.schemas.order import OrderCreate
+from app.services import alipos_api
 from app.services.menu_catalog_service import PricedCart
+from app.services.order_service import table_access as order_table_access
+from app.services.phone_verification_service import phone_verification_fingerprint
+from app.services.table_access_service import TableDirectoryEntry
+
+CASH_PAYMENT_ID = "59FFAC8D-ACE5-4758-8FB7-6C1F69713C37"
+TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+HALL_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
+PRICED_CART = PricedCart(
+    items=[
+        {
+            "id": "menu-item-1",
+            "name": "Classic Somsa",
+            "quantity": 2.0,
+            "price": 18000.0,
+            "modifications": [],
+        }
+    ],
+    items_cost=Decimal("36000"),
+)
+
+
+def _table_directory_payload() -> dict:
+    return {
+        "halls": [
+            {"id": str(HALL_ID), "title": "Asosiy zal", "servicePercent": 10},
+        ],
+        "tables": [
+            {"id": str(TABLE_ID), "title": "Stol 12", "hallId": str(HALL_ID)},
+        ],
+    }
+
+
+def _mark_phone_verified(user: User) -> User:
+    verified_at = datetime.datetime.now(datetime.UTC)
+    assert user.phone_number is not None
+    user.phone_verified_at = verified_at
+    user.phone_verified_fingerprint = phone_verification_fingerprint(
+        user.telegram_id,
+        user.phone_number,
+    )
+    user.phone_verified_message_at = verified_at
+    user.phone_verified_update_id = 1
+    return user
+
+
+async def _delivery_order_request(
+    db_session,
+    *,
+    telegram_id: int,
+    client_request_id: uuid.UUID,
+) -> tuple[User, dict]:
+    user = _mark_phone_verified(
+        User(
+            telegram_id=telegram_id,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
+    )
+    db_session.add(user)
+    await db_session.flush()
+    address = Address(
+        user_id=user.telegram_id,
+        label="Home",
+        full_address="Yakkasaray District, Shota Rustaveli 45",
+        latitude="41.2995",
+        longitude="69.2401",
+    )
+    db_session.add(address)
+    await db_session.commit()
+    return user, {
+        "client_request_id": str(client_request_id),
+        "address_id": str(address.id),
+        "items": [
+            {
+                "id": "menu-item-1",
+                "name": "Classic Somsa",
+                "quantity": 2,
+                "price": 18000,
+                "modifications": [],
+            }
+        ],
+        "payment_method": "cash",
+        "discriminator": "delivery",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discriminator", ["delivery", "inplace"])
+async def test_unverified_order_returns_stable_409_before_side_effects(
+    client,
+    db_session,
+    discriminator,
+):
+    user = User(
+        telegram_id=6190 if discriminator == "delivery" else 6191,
+        first_name="Unverified",
+        last_name=None,
+        username=None,
+        phone_number="+998901112233",
+    )
+    db_session.add(user)
+    await db_session.commit()
+    entry = TableDirectoryEntry(
+        table_id=TABLE_ID,
+        table_title="Stol 12",
+        hall_id=HALL_ID,
+        hall_title="Asosiy zal",
+        service_percent=Decimal("10"),
+        manual_code="12",
+    )
+    body = {
+        "items": [
+            {
+                "id": "menu-item-1",
+                "name": "Classic Somsa",
+                "quantity": 2,
+                "price": 18000,
+                "modifications": [],
+            }
+        ],
+        "payment_method": "rahmat" if discriminator == "delivery" else "cash",
+        "discriminator": discriminator,
+    }
+    if discriminator == "delivery":
+        body.update(
+            delivery_address="Yakkasaray District, Shota Rustaveli 45",
+            latitude="41.2995",
+            longitude="69.2401",
+        )
+    else:
+        body["table_access_token"] = order_table_access.issue_access_token(entry)
+    price = AsyncMock(return_value=PRICED_CART)
+    alipos_create = AsyncMock(return_value={"orderId": str(uuid.uuid4())})
+    multicard_invoice = AsyncMock(
+        return_value={
+            "uuid": str(uuid.uuid4()),
+            "checkout_url": "https://pay.example/checkout",
+        }
+    )
+
+    with (
+        patch("app.services.order_service.price_cart", new=price),
+        patch("app.services.order_service.alipos_api.create_order", new=alipos_create),
+        patch(
+            "app.services.order_service.multicard_api.create_invoice",
+            new=multicard_invoice,
+        ),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json=body,
+        )
+
+    result = await db_session.execute(select(Order).where(Order.user_id == user.telegram_id))
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "phone_verification_required",
+            "message": "Share your phone through Telegram before placing an order.",
+        }
+    }
+    assert result.scalar_one_or_none() is None
+    price.assert_not_awaited()
+    alipos_create.assert_not_awaited()
+    multicard_invoice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_order_create_rejects_browser_phone_before_service(client, db_session):
+    user = User(
+        telegram_id=6192,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    create_order = AsyncMock(
+        side_effect=HTTPException(status_code=418, detail="service called")
+    )
+
+    with patch("app.routers.orders.create_customer_order", new=create_order):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "items": [],
+                "phone_number": "+998909999999",
+                "payment_method": "cash",
+                "discriminator": "delivery",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "phone_number"]
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
+    create_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_order_create_rejects_note_over_200_characters_before_service(
+    client,
+    db_session,
+):
+    user = User(
+        telegram_id=6193,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    create_order = AsyncMock(
+        side_effect=HTTPException(status_code=418, detail="service called")
+    )
+
+    with patch("app.routers.orders.create_customer_order", new=create_order):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "items": [],
+                "comment": "🍜" * 201,
+                "payment_method": "cash",
+                "discriminator": "delivery",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "comment"]
+    assert response.json()["detail"][0]["type"] == "string_too_long"
+    create_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("directory_kind", ["duplicate", "malformed"])
+async def test_create_table_order_returns_generic_503_for_invalid_live_directory(
+    client,
+    db_session,
+    directory_kind,
+):
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6200,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
+    )
+    db_session.add(user)
+    await db_session.commit()
+    entry = TableDirectoryEntry(
+        table_id=TABLE_ID,
+        table_title="Stol 12",
+        hall_id=HALL_ID,
+        hall_title="Asosiy zal",
+        service_percent=Decimal("10"),
+        manual_code="12",
+    )
+    access_token = order_table_access.issue_access_token(entry)
+    directory = _table_directory_payload()
+    leaked_detail = "Duplicate table number 12"
+    if directory_kind == "duplicate":
+        directory["tables"].append(
+            {
+                "id": "33333333-3333-4333-8333-333333333333",
+                "title": "Stol 012",
+                "hallId": str(HALL_ID),
+            }
+        )
+    else:
+        directory["halls"][0]["id"] = "not-a-uuid"
+        leaked_detail = "Hall directory entry is invalid"
+
+    with patch(
+        "app.services.table_access_service.alipos_api.get_halls_and_tables",
+        new=AsyncMock(return_value=directory),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "items": [
+                    {
+                        "id": "menu-item-1",
+                        "name": "Classic Somsa",
+                        "quantity": 2,
+                        "price": 18000,
+                        "modifications": [],
+                    }
+                ],
+                "payment_method": "cash",
+                "discriminator": "inplace",
+                "table_access_token": access_token,
+            },
+        )
+
+    result = await db_session.execute(select(Order).where(Order.user_id == user.telegram_id))
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Table directory is temporarily unavailable"
+    assert result.scalar_one_or_none() is None
+    assert leaked_detail not in response.text
+    assert str(TABLE_ID) not in response.text
 
 
 @pytest.mark.asyncio
 async def test_create_order_preserves_item_display_name(client, db_session):
-    user = User(
-        telegram_id=6201,
-        first_name="Customer",
-        last_name=None,
-        username=None,
-        phone_number="+998901112233",
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6201,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
     )
     db_session.add(user)
     await db_session.flush()
@@ -77,7 +395,6 @@ async def test_create_order_preserves_item_display_name(client, db_session):
                         "modifications": [],
                     }
                 ],
-                "phone_number": "+998901112233",
                 "payment_method": "cash",
                 "discriminator": "delivery",
             },
@@ -89,3 +406,451 @@ async def test_create_order_preserves_item_display_name(client, db_session):
     order = await db_session.get(Order, uuid.UUID(response.json()["data"]["id"]))
     assert order is not None
     assert order.items[0]["name"] == "Classic Somsa"
+
+
+@pytest.mark.asyncio
+async def test_create_order_rejected_response_does_not_expose_alipos_body(
+    client,
+    db_session,
+):
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6202,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
+    )
+    db_session.add(user)
+    await db_session.flush()
+    address = Address(
+        user_id=user.telegram_id,
+        label="Home",
+        full_address="Yakkasaray District, Shota Rustaveli 45",
+        latitude="41.2995",
+        longitude="69.2401",
+    )
+    db_session.add(address)
+    await db_session.commit()
+
+    rejected_response = httpx.Response(
+        400,
+        json={"detail": "customer-secret"},
+        request=httpx.Request("POST", "https://alipos.example/order"),
+    )
+    alipos_client = Mock()
+    alipos_client.request = AsyncMock(return_value=rejected_response)
+    alipos_client.__aenter__ = AsyncMock(return_value=alipos_client)
+    alipos_client.__aexit__ = AsyncMock(return_value=None)
+
+    token = create_jwt(user.telegram_id)
+    with (
+        patch(
+            "app.routers.orders.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "id": "59FFAC8D-ACE5-4758-8FB7-6C1F69713C37",
+                        "title": "Наличные",
+                    }
+                ]
+            ),
+        ),
+        patch(
+            "app.services.order_service.price_cart",
+            new=AsyncMock(
+                return_value=PricedCart(
+                    items=[
+                        {
+                            "id": "menu-item-1",
+                            "name": "Classic Somsa",
+                            "quantity": 2.0,
+                            "price": 18000.0,
+                            "modifications": [],
+                        }
+                    ],
+                    items_cost=Decimal("36000"),
+                )
+            ),
+        ),
+        patch(
+            "app.services.alipos_api._get_token",
+            new=AsyncMock(return_value="token"),
+        ),
+        patch(
+            "app.services.alipos_api.httpx.AsyncClient",
+            return_value=alipos_client,
+        ),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "address_id": str(address.id),
+                "items": [
+                    {
+                        "id": "menu-item-1",
+                        "name": "Classic Somsa",
+                        "quantity": 2,
+                        "price": 18000,
+                        "modifications": [],
+                    }
+                ],
+                "payment_method": "cash",
+                "discriminator": "delivery",
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Could not submit the order to the restaurant"
+    assert "AliPOS" not in response.text
+    assert "400" not in response.text
+    assert "customer-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_create_order_payload_build_error_is_bounded_in_state_logs_and_api(
+    client,
+    db_session,
+    caplog,
+):
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6203,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
+    )
+    db_session.add(user)
+    await db_session.flush()
+    address = Address(
+        user_id=user.telegram_id,
+        label="Home",
+        full_address="Yakkasaray District, Shota Rustaveli 45",
+        latitude="41.2995",
+        longitude="69.2401",
+    )
+    db_session.add(address)
+    await db_session.commit()
+    arbitrary_error = "payload-secret-" + "x" * 200
+
+    with (
+        patch(
+            "app.services.order_service.price_cart",
+            new=AsyncMock(
+                return_value=PricedCart(
+                    items=[
+                        {
+                            "id": "menu-item-1",
+                            "name": "Classic Somsa",
+                            "quantity": 2.0,
+                            "price": 18000.0,
+                            "modifications": [],
+                        }
+                    ],
+                    items_cost=Decimal("36000"),
+                )
+            ),
+        ),
+        patch(
+            "app.services.order_service._build_alipos_payload",
+            new=AsyncMock(side_effect=RuntimeError(arbitrary_error)),
+        ),
+        caplog.at_level("INFO", logger="app.services.order_service"),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "address_id": str(address.id),
+                "items": [
+                    {
+                        "id": "menu-item-1",
+                        "name": "Classic Somsa",
+                        "quantity": 2,
+                        "price": 18000,
+                        "modifications": [],
+                    }
+                ],
+                "payment_method": "cash",
+                "discriminator": "delivery",
+            },
+        )
+
+    result = await db_session.execute(
+        select(Order).where(Order.user_id == user.telegram_id)
+    )
+    order = result.scalar_one()
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Could not submit the order to the restaurant"
+    assert order.alipos_sync_error == "AliPOS order payload could not be prepared"
+    assert arbitrary_error not in response.text
+    assert arbitrary_error not in caplog.text
+    assert arbitrary_error not in order.alipos_sync_error
+
+
+@pytest.mark.asyncio
+async def test_same_client_request_id_replays_cash_submission_failure_without_provider_retry(
+    client,
+    db_session,
+):
+    request_id = uuid.uuid4()
+    user, body = await _delivery_order_request(
+        db_session,
+        telegram_id=6204,
+        client_request_id=request_id,
+    )
+    create = AsyncMock(side_effect=alipos_api.AliPOSRejected(400))
+    refund = AsyncMock()
+
+    with (
+        patch(
+            "app.services.order_service.price_cart",
+            new=AsyncMock(return_value=PRICED_CART),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": CASH_PAYMENT_ID, "title": "Наличные"}]
+            ),
+        ),
+        patch("app.services.order_service.alipos_api.create_order", new=create),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        headers = {"Authorization": f"Bearer {create_jwt(user.telegram_id)}"}
+        first = await client.post("/api/orders", headers=headers, json=body)
+        replay = await client.post("/api/orders", headers=headers, json=body)
+
+    result = await db_session.execute(
+        select(Order).where(Order.client_request_id == request_id)
+    )
+    orders = list(result.scalars())
+    assert first.status_code == 502
+    assert replay.status_code == 502
+    assert first.json() == replay.json()
+    assert len(orders) == 1
+    assert orders[0].alipos_sync_status == "failed"
+    assert orders[0].status == "SUBMISSION_FAILED"
+    assert orders[0].payment_status is None
+    assert orders[0].refund_sync_status is None
+    create.assert_awaited_once()
+    refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_client_request_id_integrity_race_winner_replays_failed_result(
+    client,
+    db_session,
+):
+    request_id = uuid.uuid4()
+    user, body = await _delivery_order_request(
+        db_session,
+        telegram_id=6205,
+        client_request_id=request_id,
+    )
+    create = AsyncMock(side_effect=alipos_api.AliPOSRejected(400))
+    refund = AsyncMock()
+
+    with (
+        patch(
+            "app.services.order_service.price_cart",
+            new=AsyncMock(return_value=PRICED_CART),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": CASH_PAYMENT_ID, "title": "Наличные"}]
+            ),
+        ),
+        patch("app.services.order_service.alipos_api.create_order", new=create),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        headers = {"Authorization": f"Bearer {create_jwt(user.telegram_id)}"}
+        first = await client.post("/api/orders", headers=headers, json=body)
+
+        winner_result = await db_session.execute(
+            select(Order).where(Order.client_request_id == request_id)
+        )
+        winner = winner_result.scalar_one()
+        address = await db_session.get(Address, uuid.UUID(body["address_id"]))
+        no_early_winner = Mock()
+        no_early_winner.scalar_one_or_none.return_value = None
+        selected_address = Mock()
+        selected_address.scalar_one_or_none.return_value = address
+        integrity_winner = Mock()
+        integrity_winner.scalar_one_or_none.return_value = winner
+        loser_db = AsyncMock()
+        loser_db.add = Mock()
+        loser_db.execute.side_effect = [
+            no_early_winner,
+            selected_address,
+            integrity_winner,
+        ]
+        loser_db.commit.side_effect = IntegrityError(
+            "insert",
+            {},
+            RuntimeError("duplicate"),
+        )
+
+        with pytest.raises(HTTPException) as replay:
+            await create_order_endpoint(OrderCreate.model_validate(body), user, loser_db)
+
+    assert first.status_code == 502
+    assert replay.value.status_code == 502
+    assert first.json()["detail"] == replay.value.detail
+    loser_db.rollback.assert_awaited_once()
+    assert winner.alipos_sync_status == "failed"
+    assert winner.status == "SUBMISSION_FAILED"
+    create.assert_awaited_once()
+    refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_client_request_id_replay_while_submission_sending_is_not_reported_as_created(
+    client,
+    db_session,
+):
+    request_id = uuid.uuid4()
+    user, body = await _delivery_order_request(
+        db_session,
+        telegram_id=6206,
+        client_request_id=request_id,
+    )
+    provider_started = asyncio.Event()
+    release_provider = asyncio.Event()
+
+    async def create_after_release(_payload):
+        provider_started.set()
+        await release_provider.wait()
+        return {"orderId": str(uuid.uuid4())}
+
+    create = AsyncMock(side_effect=create_after_release)
+    refund = AsyncMock()
+    headers = {"Authorization": f"Bearer {create_jwt(user.telegram_id)}"}
+
+    with (
+        patch(
+            "app.services.order_service.price_cart",
+            new=AsyncMock(return_value=PRICED_CART),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": CASH_PAYMENT_ID, "title": "Наличные"}]
+            ),
+        ),
+        patch("app.services.order_service.alipos_api.create_order", new=create),
+        patch(
+            "app.services.order_service.multicard_api.refund_payment",
+            new=refund,
+        ),
+    ):
+        first_request = asyncio.create_task(
+            client.post("/api/orders", headers=headers, json=body)
+        )
+        await asyncio.wait_for(provider_started.wait(), timeout=5)
+        try:
+            replay = await client.post("/api/orders", headers=headers, json=body)
+        finally:
+            release_provider.set()
+        first = await first_request
+
+    result = await db_session.execute(
+        select(Order).where(Order.client_request_id == request_id)
+    )
+    orders = list(result.scalars())
+    assert first.status_code == 201
+    assert replay.status_code == 409
+    assert replay.json() == {
+        "detail": {
+            "order_id": str(orders[0].id),
+            "status": "sending",
+        }
+    }
+    assert len(orders) == 1
+    create.assert_awaited_once()
+    refund.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payment_method", ["cash", "rahmat"])
+async def test_repriced_cart_has_no_order_or_provider_side_effects(
+    client,
+    db_session,
+    payment_method,
+):
+    request_id = uuid.uuid4()
+    user, body = await _delivery_order_request(
+        db_session,
+        telegram_id=6207,
+        client_request_id=request_id,
+    )
+    body["payment_method"] = payment_method
+    body["items"][0]["price"] = 17000
+    current_menu = {
+        "categories": [],
+        "items": [{
+            "id": "menu-item-1",
+            "name": "Classic Somsa",
+            "price": 18000,
+            "modifierGroups": [],
+        }],
+    }
+    alipos_create = AsyncMock(return_value={"orderId": str(uuid.uuid4())})
+    multicard_invoice = AsyncMock(return_value={
+        "uuid": str(uuid.uuid4()),
+        "checkout_url": "https://pay.example/checkout",
+    })
+
+    with (
+        patch(
+            "app.services.menu_catalog_service.alipos_api.get_menu",
+            new=AsyncMock(return_value=current_menu),
+        ),
+        patch(
+            "app.services.menu_catalog_service.alipos_api.get_menu_availability",
+            new=AsyncMock(return_value={"items": [], "modifiers": []}),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(
+                return_value=[{"id": CASH_PAYMENT_ID, "title": "Наличные"}]
+            ),
+        ),
+        patch(
+            "app.services.order_service.alipos_api.create_order",
+            new=alipos_create,
+        ),
+        patch(
+            "app.services.order_service.multicard_api.create_invoice",
+            new=multicard_invoice,
+        ),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json=body,
+        )
+
+    result = await db_session.execute(
+        select(Order).where(Order.client_request_id == request_id)
+    )
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "cart_conflict",
+            "changes": [{"id": "menu-item-1", "reason": "price_changed"}],
+        }
+    }
+    assert result.scalar_one_or_none() is None
+    alipos_create.assert_not_awaited()
+    multicard_invoice.assert_not_awaited()

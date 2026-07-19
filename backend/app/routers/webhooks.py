@@ -1,5 +1,6 @@
 import datetime
 import hmac
+import json
 import logging
 import time
 import uuid
@@ -13,7 +14,16 @@ from app.database import async_session
 from app.models.models import Order, Stoplist, User
 from app.services import multicard_api
 from app.services.order_service import dispatch_queued_alipos_order
-from app.services.order_status_service import apply_alipos_status_update_for_order
+from app.services.order_status_service import (
+    apply_alipos_status_update_for_order,
+    parse_alipos_updated_at,
+)
+from app.services.phone_verification_service import (
+    InvalidPhoneNumber,
+    is_newer_contact_update,
+    normalize_phone_number,
+    phone_verification_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +35,21 @@ def _mask_telegram_id(telegram_id: Any) -> str:
     if len(value) <= 4:
         return value
     return f"***{value[-4:]}"
+
+
+def _log_telegram_webhook_outcome(
+    outcome: str,
+    update_id: object,
+    started_at: float,
+    telegram_id: int | None = None,
+) -> None:
+    logger.info(
+        "Telegram bot webhook outcome=%s update_id=%s telegram_user_id=%s duration_ms=%s",
+        outcome,
+        update_id if type(update_id) is int else "unknown",
+        _mask_telegram_id(telegram_id) if telegram_id is not None else "unknown",
+        round((time.perf_counter() - started_at) * 1000),
+    )
 
 
 def _verify_webhook_credentials(
@@ -53,71 +78,90 @@ async def telegram_bot_webhook(
 ) -> dict:
     """Receive Telegram bot updates (contact messages)."""
     started_at = time.perf_counter()
-    body = await request.json()
-    update_id = body.get("update_id")
-    message = body.get("message", {})
-    contact = message.get("contact")
-
-    logger.info(
-        "Telegram bot webhook received | update_id=%s has_contact=%s",
-        update_id,
-        bool(contact),
-    )
-
-    if settings.telegram_webhook_secret:
-        if not x_telegram_bot_api_secret_token or not hmac.compare_digest(
-            x_telegram_bot_api_secret_token, settings.telegram_webhook_secret
-        ):
-            logger.warning(
-                "Telegram bot webhook rejected | update_id=%s secret_valid=false duration_ms=%s",
-                update_id,
-                round((time.perf_counter() - started_at) * 1000),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret"
-            )
-
-        logger.info("Telegram bot webhook secret accepted | update_id=%s", update_id)
-
-    if not contact:
-        logger.info(
-            "Telegram bot webhook ignored | update_id=%s result=no_contact duration_ms=%s",
-            update_id,
-            round((time.perf_counter() - started_at) * 1000),
+    webhook_secret = settings.telegram_webhook_secret
+    if not webhook_secret:
+        _log_telegram_webhook_outcome("secret_not_configured", None, started_at)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram webhook secret is not configured",
         )
+    try:
+        secret_is_valid = bool(x_telegram_bot_api_secret_token) and hmac.compare_digest(
+            x_telegram_bot_api_secret_token, webhook_secret
+        )
+    except TypeError:
+        secret_is_valid = False
+    if not secret_is_valid:
+        _log_telegram_webhook_outcome("invalid_secret", None, started_at)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret"
+        )
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        _log_telegram_webhook_outcome("invalid_json", None, started_at)
+        return {"result": "OK"}
+    if not isinstance(body, dict):
+        _log_telegram_webhook_outcome("invalid_structure", None, started_at)
+        return {"result": "OK"}
+    update_id = body.get("update_id")
+    message = body.get("message")
+    if type(update_id) is not int or not isinstance(message, dict):
+        _log_telegram_webhook_outcome("invalid_structure", update_id, started_at)
         return {"result": "OK"}
 
-    telegram_id = contact.get("user_id") or (message.get("from") or {}).get("id")
-    phone_number = contact.get("phone_number")
+    message_date = message.get("date")
+    sender = message.get("from")
+    contact = message.get("contact")
+    if not isinstance(contact, dict):
+        _log_telegram_webhook_outcome("no_contact", update_id, started_at)
+        return {"result": "OK"}
+    if (
+        type(message_date) is not int
+        or not isinstance(sender, dict)
+    ):
+        _log_telegram_webhook_outcome("invalid_structure", update_id, started_at)
+        return {"result": "OK"}
 
-    if not telegram_id or not phone_number:
-        logger.info(
-            "Telegram bot webhook ignored | update_id=%s result=incomplete_contact telegram_user_id=%s duration_ms=%s",
-            update_id,
-            _mask_telegram_id(telegram_id or "unknown"),
-            round((time.perf_counter() - started_at) * 1000),
-        )
+    sender_id = sender.get("id")
+    contact_user_id = contact.get("user_id")
+    if type(sender_id) is not int or type(contact_user_id) is not int:
+        _log_telegram_webhook_outcome("invalid_structure", update_id, started_at)
+        return {"result": "OK"}
+    if sender_id != contact_user_id:
+        _log_telegram_webhook_outcome("sender_contact_mismatch", update_id, started_at, sender_id)
+        return {"result": "OK"}
+
+    try:
+        message_at = datetime.datetime.fromtimestamp(message_date, tz=datetime.UTC)
+        canonical_phone = normalize_phone_number(contact.get("phone_number"))
+    except (InvalidPhoneNumber, OverflowError, OSError, ValueError):
+        _log_telegram_webhook_outcome("invalid_contact", update_id, started_at, sender_id)
         return {"result": "OK"}
 
     async with async_session() as db:
-        result = await db.execute(select(User).where(User.telegram_id == telegram_id))
+        result = await db.execute(
+            select(User).where(User.telegram_id == sender_id).with_for_update()
+        )
         user = result.scalar_one_or_none()
-        if user:
-            user.phone_number = phone_number
-            await db.commit()
-            logger.info(
-                "Telegram bot webhook processed | update_id=%s result=phone_saved telegram_user_id=%s duration_ms=%s",
-                update_id,
-                _mask_telegram_id(telegram_id),
-                round((time.perf_counter() - started_at) * 1000),
-            )
-        else:
-            logger.info(
-                "Telegram bot webhook ignored | update_id=%s result=user_not_found telegram_user_id=%s duration_ms=%s",
-                update_id,
-                _mask_telegram_id(telegram_id),
-                round((time.perf_counter() - started_at) * 1000),
-            )
+        if user is None:
+            _log_telegram_webhook_outcome("user_not_found", update_id, started_at, sender_id)
+            return {"result": "OK"}
+        if not is_newer_contact_update(user, message_at, update_id):
+            _log_telegram_webhook_outcome("stale_or_replay", update_id, started_at, sender_id)
+            return {"result": "OK"}
+
+        user.phone_number = canonical_phone
+        user.phone_verified_at = datetime.datetime.now(datetime.UTC)
+        user.phone_verified_fingerprint = phone_verification_fingerprint(
+            sender_id, canonical_phone
+        )
+        user.phone_verified_message_at = message_at
+        user.phone_verified_update_id = update_id
+        await db.commit()
+
+    _log_telegram_webhook_outcome("phone_saved", update_id, started_at, sender_id)
 
     return {"result": "OK"}
 
@@ -135,6 +179,7 @@ async def order_status_webhook(
     eats_id = body.get("eatsId")
     new_status = body.get("status")
     order_number = body.get("orderNumber")
+    provider_updated_at = parse_alipos_updated_at(body.get("updatedAt"))
 
     if not eats_id or not new_status:
         raise HTTPException(
@@ -149,6 +194,7 @@ async def order_status_webhook(
             order,
             new_status,
             order_number,
+            provider_updated_at=provider_updated_at,
         ):
             await db.commit()
 
@@ -252,13 +298,6 @@ async def multicard_callback(
                 detail="Order not found",
             )
 
-        # Idempotency: already processed
-        if order.payment_status == "paid":
-            logger.info(
-                "Multicard callback: order %s already paid, skipping", order_uuid
-            )
-            return {}
-
         if not payment_uuid:
             logger.warning(
                 "Multicard callback missing payment UUID for order=%s", order_uuid
@@ -278,12 +317,73 @@ async def multicard_callback(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Payment amount does not match order",
             )
+
+        processed_payment_states = {
+            "paid",
+            "refund_pending",
+            "refunded",
+            "refund_failed",
+        }
+        if order.payment_status in processed_payment_states:
+            if order.multicard_payment_uuid != str(payment_uuid):
+                logger.warning(
+                    "Multicard callback payment mismatch for processed order=%s",
+                    order_uuid,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Payment identifier does not match order",
+                )
+            logger.info(
+                "Multicard callback: order %s already processed, skipping",
+                order_uuid,
+            )
+            return {}
+
+        known_provider_references = {
+            str(reference)
+            for reference in (
+                order.multicard_invoice_uuid,
+                order.multicard_payment_uuid,
+            )
+            if reference
+        }
+        if known_provider_references and str(payment_uuid) not in known_provider_references:
+            logger.warning(
+                "Multicard callback payment mismatch for order=%s",
+                order_uuid,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Payment identifier does not match order",
+            )
+
+        legacy_paid_delivery = (
+            order.discriminator == "delivery"
+            and order.payment_method == "rahmat"
+            and order.payment_provider == "multicard"
+            and order.payment_status == "pending"
+            and order.alipos_order_id is not None
+            and order.multicard_invoice_uuid is not None
+            and order.alipos_sync_status in {None, "synced"}
+        )
         valid_payment_state = (
             order.payment_method == "rahmat"
-            and order.status in {"AWAITING_PAYMENT", "PAYMENT_REVIEW"}
-            and order.payment_status in {"pending", "invoice_unknown"}
+            and order.payment_provider == "multicard"
+            and order.alipos_order_id is None
+            and (
+                (
+                    order.status == "AWAITING_PAYMENT"
+                    and order.payment_status == "pending"
+                )
+                or (
+                    order.status == "PAYMENT_REVIEW"
+                    and order.payment_status
+                    in {"invoice_queued", "invoice_sending", "invoice_unknown"}
+                )
+            )
         )
-        if not valid_payment_state:
+        if not valid_payment_state and not legacy_paid_delivery:
             logger.warning(
                 "Multicard callback order is not awaiting online payment: order=%s",
                 order_uuid,
@@ -295,19 +395,25 @@ async def multicard_callback(
 
         order.payment_provider = "multicard"
         order.payment_status = "paid"
+        order.invoice_cancel_status = "paid"
         order.payment_paid_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         order.multicard_payment_uuid = str(payment_uuid)
         order.multicard_receipt_url = str(receipt_url) if receipt_url else None
         order.payment_card_pan = str(card_pan) if card_pan else None
         order.payment_ps = str(ps) if ps else None
         order.payment_error = None
-        order.alipos_sync_status = "queued"
-        order.alipos_sync_error = None
-        order.status = "PAID_AWAITING_RESTAURANT"
+        if legacy_paid_delivery:
+            order.alipos_sync_status = "synced"
+            order.alipos_sync_error = None
+        else:
+            order.alipos_sync_status = "queued"
+            order.alipos_sync_error = None
+            order.status = "PAID_AWAITING_RESTAURANT"
 
         await db.commit()
 
-    background_tasks.add_task(dispatch_queued_alipos_order, order_uuid)
+    if not legacy_paid_delivery:
+        background_tasks.add_task(dispatch_queued_alipos_order, order_uuid)
 
     logger.info(
         "Multicard payment confirmed: order=%s amount=%s ps=%s",

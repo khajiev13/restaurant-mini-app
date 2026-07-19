@@ -3,7 +3,11 @@ import { useTranslation } from 'react-i18next';
 import { COLORS, FONTS, Icon } from './ArtisanLayout';
 
 function normalizeCode(value: string): string {
-  return value.toUpperCase().replace(/[^0-9A-HJKMNP-TV-Z]/g, '').slice(0, 6);
+  return value.replace(/\D/g, '').slice(0, 6);
+}
+
+function canonicalizeCode(value: string): string {
+  return value.replace(/^0+(?=\d)/, '');
 }
 
 export default function TableCodeSheet({
@@ -39,9 +43,9 @@ export default function TableCodeSheet({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (code.length !== 6 || resolving) return;
+    if (code.length === 0 || resolving) return;
     try {
-      await onResolve(code);
+      await onResolve(canonicalizeCode(code));
       onClose();
     } catch {
       // The parent provides the user-facing error from the store.
@@ -83,10 +87,10 @@ export default function TableCodeSheet({
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
           <div>
             <h2 id="table-code-title" style={{ margin: 0, fontFamily: FONTS.headline, fontSize: 21, color: COLORS.onSurface }}>
-              {t('table.code_title', 'Stol kodini kiriting')}
+              {t('table.code_title', 'Stol raqamini kiriting')}
             </h2>
             <p style={{ margin: '6px 0 0', color: COLORS.secondary, fontSize: 13, lineHeight: 1.5 }}>
-              {t('table.code_description', 'QR yonidagi 6 belgili kodni kiriting.')}
+              {t('table.code_description', "QR yonida ko'rsatilgan stol raqamini kiriting.")}
             </p>
           </div>
           <button
@@ -102,17 +106,18 @@ export default function TableCodeSheet({
 
         <form onSubmit={(event) => { void submit(event); }} style={{ marginTop: 20 }}>
           <label htmlFor="table-code" style={{ display: 'block', fontSize: 12, fontWeight: 800, color: COLORS.secondary, marginBottom: 7 }}>
-            {t('table.code_label', 'Stol kodi')}
+            {t('table.code_label', 'Stol raqami')}
           </label>
           <input
             id="table-code"
             autoFocus
-            autoCapitalize="characters"
             autoComplete="off"
-            inputMode="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            enterKeyHint="done"
             value={code}
             onChange={(event) => setCode(normalizeCode(event.target.value))}
-            placeholder="A7K2P9"
+            placeholder="12"
             style={{
               width: '100%',
               height: 58,
@@ -137,19 +142,19 @@ export default function TableCodeSheet({
           )}
           <button
             type="submit"
-            disabled={code.length !== 6 || resolving}
+            disabled={code.length === 0 || resolving}
             style={{
               width: '100%',
               height: 52,
               marginTop: 18,
               border: 'none',
               borderRadius: 15,
-              background: code.length === 6 && !resolving ? COLORS.primary : COLORS.surfaceContainerHigh,
-              color: code.length === 6 && !resolving ? COLORS.onPrimary : COLORS.secondary,
+              background: code.length > 0 && !resolving ? COLORS.primary : COLORS.surfaceContainerHigh,
+              color: code.length > 0 && !resolving ? COLORS.onPrimary : COLORS.secondary,
               fontFamily: FONTS.headline,
               fontSize: 16,
               fontWeight: 800,
-              cursor: code.length === 6 && !resolving ? 'pointer' : 'default',
+              cursor: code.length > 0 && !resolving ? 'pointer' : 'default',
             }}
           >
             {resolving ? t('table.checking', 'Tekshirilmoqda…') : t('table.confirm', 'Tasdiqlash')}

@@ -1,4 +1,5 @@
-import { render } from '@testing-library/react';
+import { cleanup, render } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ArtisanProfilePage from './ArtisanProfilePage';
@@ -6,7 +7,24 @@ import ArtisanProfilePage from './ArtisanProfilePage';
 const authState = vi.hoisted(() => ({
   isAuthenticated: true,
   authenticate: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-  logout: vi.fn(),
+  user: {
+    telegram_id: 1,
+    first_name: 'Jane',
+    last_name: 'Doe',
+    username: 'janedoe',
+    photo_url: null,
+    phone_number: '+998901234567',
+    phone_verified: true,
+    language: 'en',
+    role: 'customer' as const,
+    inplace_online_payment_enabled: false,
+  },
+}));
+
+const phoneVerification = vi.hoisted(() => ({
+  status: 'ready' as const,
+  requestPhone: vi.fn(),
+  checkAgain: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
 }));
 
 const apiMocks = vi.hoisted(() => ({
@@ -34,13 +52,18 @@ vi.mock('react-i18next', async () => {
 vi.mock('../../stores/authStore', () => ({
   useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
 }));
+vi.mock('../../hooks/usePhoneVerification', () => ({
+  usePhoneVerification: () => phoneVerification,
+}));
 
 vi.mock('../../services/api', () => apiMocks);
 
 describe('ArtisanProfilePage', () => {
   beforeEach(() => {
-    authState.logout.mockClear();
+    cleanup();
     authState.authenticate.mockClear();
+    authState.user.phone_number = '+998901234567';
+    phoneVerification.requestPhone.mockClear();
     apiMocks.getMe.mockResolvedValue({
       data: {
         data: {
@@ -77,8 +100,32 @@ describe('ArtisanProfilePage', () => {
 
     expect(await view.findByText('Jane Doe')).toBeInTheDocument();
 
-    expect(apiMocks.getMe).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getMe).not.toHaveBeenCalled();
     expect(view.queryByText('Design Theme')).not.toBeInTheDocument();
     expect(view.getByText('profile.language')).toBeInTheDocument();
+  });
+
+  it('masks the verified phone, updates it through the shared hook, and has no customer logout', async () => {
+    const user = userEvent.setup();
+    const view = render(
+      <MemoryRouter>
+        <ArtisanProfilePage />
+      </MemoryRouter>,
+    );
+
+    expect(await view.findByText('+998 90 *** 4567')).toBeVisible();
+    expect(view.queryByText('+998901234567')).not.toBeInTheDocument();
+    expect(view.queryByRole('button', { name: /log out|logout/i })).not.toBeInTheDocument();
+
+    await user.click(view.getByRole('button', { name: /phone_verification\.update|telegram/i }));
+    expect(phoneVerification.requestPhone).toHaveBeenCalledTimes(1);
+
+    authState.user.phone_number = '+998935559999';
+    view.rerender(
+      <MemoryRouter>
+        <ArtisanProfilePage />
+      </MemoryRouter>,
+    );
+    expect(view.getByText('+998 93 *** 9999')).toBeVisible();
   });
 });

@@ -94,7 +94,7 @@ interface TelegramWebApp {
   disableVerticalSwipes(): void;
   showAlert(message: string, callback?: () => void): void;
   showConfirm(message: string, callback: (confirmed: boolean) => void): void;
-  requestContact(callback: (shared: boolean) => void): void;
+  requestContact?(callback: (shared: boolean) => void): void;
   BackButton: TelegramBackButton;
   MainButton: TelegramMainButton;
   HapticFeedback: TelegramHapticFeedback;

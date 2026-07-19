@@ -2,6 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import i18n from '../../i18n';
 import AdminUsersPage from './AdminUsersPage';
 
 const apiMocks = vi.hoisted(() => ({
@@ -34,14 +35,16 @@ const userRecord = {
   last_name: 'Khajiev',
   username: 'khajiev13',
   phone_number: '8613269797807',
+  phone_verified: false,
   language: 'en',
   role: 'customer' as const,
 };
 
 describe('AdminUsersPage', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     cleanup();
     vi.clearAllMocks();
+    await i18n.changeLanguage('en');
     authStoreState.user = {
       telegram_id: 4001,
       role: 'admin',
@@ -66,7 +69,25 @@ describe('AdminUsersPage', () => {
     expect(apiMocks.searchAdminUsers).toHaveBeenCalledWith('8613269797807');
     expect(await screen.findByText('Rakhmonberdi Khajiev')).toBeInTheDocument();
     expect(screen.getByText('@khajiev13')).toBeInTheDocument();
+    expect(screen.getByText(/8613269797807.*Unverified/)).toBeInTheDocument();
     expect(screen.getByDisplayValue('customer')).toBeInTheDocument();
+  });
+
+  it('labels a verified phone explicitly', async () => {
+    const user = userEvent.setup();
+    apiMocks.searchAdminUsers.mockResolvedValue({
+      data: { data: [{ ...userRecord, phone_verified: true }] },
+    });
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <AdminUsersPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByText(/8613269797807.*Verified/)).toBeInTheDocument();
+    expect(screen.queryByText(/Unverified/)).not.toBeInTheDocument();
   });
 
   it('updates a user role and refreshes that row locally', async () => {

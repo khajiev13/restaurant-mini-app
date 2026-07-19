@@ -60,3 +60,33 @@ def test_order_metadata_declares_customer_request_idempotency_index():
 
     assert index.unique is True
     assert [column.name for column in index.columns] == ["user_id", "client_request_id"]
+
+
+def test_order_metadata_declares_staff_table_refresh_fields_and_index():
+    assert {
+        "invoice_cancel_status",
+        "alipos_status_updated_at",
+        "alipos_status_check_attempted_at",
+        "alipos_status_checked_at",
+    } <= set(Order.__table__.columns.keys())
+
+    index = next(
+        idx for idx in Order.__table__.indexes
+        if idx.name == "idx_orders_inplace_workspace"
+    )
+    assert [column.name for column in index.columns] == [
+        "table_id",
+        "alipos_sync_status",
+        "status",
+        "alipos_status_check_attempted_at",
+    ]
+    assert "discriminator = 'inplace'" in str(
+        index.dialect_options["postgresql"]["where"]
+    )
+
+
+def test_order_contact_phone_provenance_defaults_to_false():
+    column = Order.__table__.columns["contact_phone_verified"]
+
+    assert column.default.arg is False
+    assert str(column.server_default.arg).lower() == "false"
