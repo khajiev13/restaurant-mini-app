@@ -474,6 +474,7 @@ def _draw_somsa_panel(
             photo_height,
             cache_dir,
             caption=False,
+            source_override=_generated_food_asset(items[0]),
         )
         if not drew_photo:
             pdf.setFillColor(PANEL_DARK)

@@ -115,6 +115,25 @@ def test_generated_food_assets_include_olot_somsa_and_mastava():
     )
 
 
+def test_somsa_panel_prepares_the_generated_photo(tmp_path: Path):
+    output = tmp_path / "somsa-panel.pdf"
+    cache_dir = tmp_path / "images"
+    pdf = renderer.canvas.Canvas(str(output))
+
+    renderer._draw_somsa_panel(
+        pdf,
+        [{"id": "somsa", "name": "Olot somsa", "price": 10000, "images": []}],
+        20,
+        20,
+        300,
+        400,
+        cache_dir,
+    )
+    pdf.save()
+
+    assert list(cache_dir.glob("olot-somsa-generated-*.png"))
+
+
 def test_four_named_color_variants_are_available():
     assert list(renderer.PALETTES) == [
         "teal-gold",
