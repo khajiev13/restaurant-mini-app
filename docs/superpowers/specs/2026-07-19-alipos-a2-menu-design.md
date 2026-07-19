@@ -12,8 +12,8 @@ layout while the source item names and prices remain accurate.
 - Availability: live AliPOS `GET /api/Integration/v1/menu/{restaurantId}/availability`
 - Brand artwork: `frontend/src/assets/logo.png`
 - Existing category artwork: `frontend/src/assets/categories/`
-- Product photography: current image URLs returned by AliPOS, plus the approved
-  generated Qovurma lagmon and Lag'mon photographs
+- Product photography: the approved generated photographs for Qovirma lagmon,
+  Lag'mon, Olot somsa, and Mastava, plus the current AliPOS image for `1 kg Osh`
 
 The live read on 2026-07-19 returned four categories and 54 items. The
 availability response contained no item or modifier restrictions. Item IDs and
@@ -35,11 +35,19 @@ warm orange for accents, and gold for headings and price emphasis. The design
 should feel like a professionally printed Uzbek restaurant menu, not a mobile
 screen or app mockup.
 
-The logo anchors the header. Real AliPOS photos for `1 kg Osh` and `Mastava`
-appear inside the Ovqatlar section as featured main-dish cards. The user also
-approved photorealistic generated photographs for `Qovirma lagmon` and
-`Lag'mon`. Choy, kofe, suvlar, souslar, and small side items remain
-typography-only rows.
+The logo anchors the header. The user approved a consistent generated-photo
+style for `Qovirma lagmon`, `Lag'mon`, `Olot somsa`, and `Mastava`: traditional
+Uzbek ceramic servingware on a dark wooden table, warm natural restaurant
+lighting, realistic food texture, and a close three-quarter food-photography
+composition. The `1 kg Osh` card retains its current AliPOS photograph. Choy,
+kofe, suvlar, souslar, and small side items remain typography-only rows.
+
+The generated OLOT somsa image must preserve the triangular folded pastry shape
+shown by the restaurant's source photo, with appetizing golden blistering and
+one opened piece showing the meat-and-onion filling. The generated Mastava image
+must be a recognizable Uzbek tomato-toned rice soup with small beef pieces,
+carrot, potato, and fresh herbs. Both assets are square, contain no text or
+watermark, and leave enough margin for the existing rounded menu crop.
 
 Produce these four palettes:
 
@@ -72,18 +80,20 @@ items. Somsa, Choy va kofe, and Ichimliklar use the remaining columns and lower
 continuations as needed. Section headings, spacing, and thin ornamental rules
 must make the reading order unambiguous.
 
-Images are supporting cards for four named main dishes: two with verified
-AliPOS photos and two with approved generated photos. They are not repeated for
-small items. This keeps all 54 entries legible at normal A2 viewing distance
-and avoids implying that a generic image belongs to a specific dish.
+Images are supporting cards for four named main dishes: three with approved
+generated photos and one with a verified AliPOS photo. The Somsa section uses a
+fourth generated photo for `Olot somsa`. Images are not repeated for small
+items. This keeps all 54 entries legible at normal A2 viewing distance and
+avoids implying that a generic image belongs to a specific dish.
 
 ## Accuracy and fallback rules
 
 - Preserve every live AliPOS price.
 - Do not infer ingredients or serving sizes from item names.
 - Do not mark items unavailable because the live availability arrays were empty.
-- If a remote product image cannot be downloaded, omit it and retain the
-  typography-only layout.
+- If the remote `1 kg Osh` product image cannot be downloaded, omit it and
+  retain the typography-only layout. Generated project assets are local and
+  must not fall back to the older AliPOS Somsa or Mastava photos.
 - If a displayed source name is ambiguous or misspelled, only capitalization
   and punctuation may be cleaned up; no semantic correction is allowed.
 
