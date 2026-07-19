@@ -406,4 +406,3 @@ backend/.venv/bin/python -m pytest tests/scripts/test_download_table_manifest.py
 5. Search changed source and captured test reports for accidental complete phone values, provider credentials, or payload logging; test fixtures may contain synthetic phone values but application logs must not.
 6. Generate one whole-branch review package from base `5c9b684` through final HEAD and dispatch the strongest available final reviewer.
 7. Fix every Critical or Important finding through a dedicated subagent, rerun affected/full checks, regenerate the package, and obtain a clean re-review before finishing the branch.
-
