@@ -20,6 +20,7 @@ from app.services.order_service import (
     PaymentRetryConflict,
     PaymentSwitchConflict,
     PaymentSwitchError,
+    PhoneVerificationRequired,
     cancel_customer_order,
     create_customer_order,
     retry_customer_order_payment,
@@ -34,6 +35,10 @@ from app.services.table_access_service import InvalidTableDirectory, InvalidTabl
 router = APIRouter(prefix="/orders", tags=["orders"])
 ORDER_SUBMISSION_ERROR_DETAIL = "Could not submit the order to the restaurant"
 TABLE_DIRECTORY_UNAVAILABLE = "Table directory is temporarily unavailable"
+PHONE_VERIFICATION_REQUIRED_DETAIL = {
+    "code": "phone_verification_required",
+    "message": "Share your phone through Telegram before placing an order.",
+}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -45,6 +50,11 @@ async def create_order(
     """Create a server-priced delivery or table order."""
     try:
         order = await create_customer_order(db, current_user, body)
+    except PhoneVerificationRequired as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=PHONE_VERIFICATION_REQUIRED_DETAIL,
+        ) from exc
     except CartConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

@@ -218,6 +218,57 @@ async def test_staff_can_list_available_orders(client, db_session):
 
 
 @pytest.mark.asyncio
+async def test_staff_delivery_uses_verified_order_phone_snapshot(client, db_session):
+    customer = await _create_user(db_session, 732, "customer")
+    staff = await _create_user(db_session, 733, "staff")
+    order = await _create_delivery_order(
+        db_session,
+        customer,
+        delivery_info={
+            "clientName": "Original customer",
+            "phoneNumber": "+998901234567",
+        },
+        contact_phone_verified=True,
+    )
+    customer.phone_number = "+998907654321"
+    await db_session.commit()
+
+    response = await client.get(
+        f"/api/staff/orders/{order.id}",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["customer"]["phone_number"] == "+998901234567"
+
+
+@pytest.mark.asyncio
+async def test_staff_delivery_uses_profile_phone_for_unverified_legacy_order(
+    client,
+    db_session,
+):
+    customer = await _create_user(db_session, 734, "customer")
+    staff = await _create_user(db_session, 735, "staff")
+    order = await _create_delivery_order(
+        db_session,
+        customer,
+        delivery_info={
+            "clientName": "Legacy customer",
+            "phoneNumber": "+998901234567",
+        },
+        contact_phone_verified=False,
+    )
+
+    response = await client.get(
+        f"/api/staff/orders/{order.id}",
+        headers=_auth_headers(staff.telegram_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["customer"]["phone_number"] == customer.phone_number
+
+
+@pytest.mark.asyncio
 async def test_staff_detail_hides_unassigned_orders_before_courier_stage(client, db_session):
     customer = await _create_user(db_session, 723, "customer")
     staff = await _create_user(db_session, 724, "staff")

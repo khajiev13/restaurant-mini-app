@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock, patch
@@ -16,6 +17,7 @@ from app.schemas.order import OrderCreate
 from app.services import alipos_api
 from app.services.menu_catalog_service import PricedCart
 from app.services.order_service import table_access as order_table_access
+from app.services.phone_verification_service import phone_verification_fingerprint
 from app.services.table_access_service import TableDirectoryEntry
 
 CASH_PAYMENT_ID = "59FFAC8D-ACE5-4758-8FB7-6C1F69713C37"
@@ -46,18 +48,33 @@ def _table_directory_payload() -> dict:
     }
 
 
+def _mark_phone_verified(user: User) -> User:
+    verified_at = datetime.datetime.now(datetime.UTC)
+    assert user.phone_number is not None
+    user.phone_verified_at = verified_at
+    user.phone_verified_fingerprint = phone_verification_fingerprint(
+        user.telegram_id,
+        user.phone_number,
+    )
+    user.phone_verified_message_at = verified_at
+    user.phone_verified_update_id = 1
+    return user
+
+
 async def _delivery_order_request(
     db_session,
     *,
     telegram_id: int,
     client_request_id: uuid.UUID,
 ) -> tuple[User, dict]:
-    user = User(
-        telegram_id=telegram_id,
-        first_name="Customer",
-        last_name=None,
-        username=None,
-        phone_number="+998901112233",
+    user = _mark_phone_verified(
+        User(
+            telegram_id=telegram_id,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
     )
     db_session.add(user)
     await db_session.flush()
@@ -82,10 +99,158 @@ async def _delivery_order_request(
                 "modifications": [],
             }
         ],
-        "phone_number": "+998901112233",
         "payment_method": "cash",
         "discriminator": "delivery",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discriminator", ["delivery", "inplace"])
+async def test_unverified_order_returns_stable_409_before_side_effects(
+    client,
+    db_session,
+    discriminator,
+):
+    user = User(
+        telegram_id=6190 if discriminator == "delivery" else 6191,
+        first_name="Unverified",
+        last_name=None,
+        username=None,
+        phone_number="+998901112233",
+    )
+    db_session.add(user)
+    await db_session.commit()
+    entry = TableDirectoryEntry(
+        table_id=TABLE_ID,
+        table_title="Stol 12",
+        hall_id=HALL_ID,
+        hall_title="Asosiy zal",
+        service_percent=Decimal("10"),
+        manual_code="12",
+    )
+    body = {
+        "items": [
+            {
+                "id": "menu-item-1",
+                "name": "Classic Somsa",
+                "quantity": 2,
+                "price": 18000,
+                "modifications": [],
+            }
+        ],
+        "payment_method": "rahmat" if discriminator == "delivery" else "cash",
+        "discriminator": discriminator,
+    }
+    if discriminator == "delivery":
+        body.update(
+            delivery_address="Yakkasaray District, Shota Rustaveli 45",
+            latitude="41.2995",
+            longitude="69.2401",
+        )
+    else:
+        body["table_access_token"] = order_table_access.issue_access_token(entry)
+    price = AsyncMock(return_value=PRICED_CART)
+    alipos_create = AsyncMock(return_value={"orderId": str(uuid.uuid4())})
+    multicard_invoice = AsyncMock(
+        return_value={
+            "uuid": str(uuid.uuid4()),
+            "checkout_url": "https://pay.example/checkout",
+        }
+    )
+
+    with (
+        patch("app.services.order_service.price_cart", new=price),
+        patch("app.services.order_service.alipos_api.create_order", new=alipos_create),
+        patch(
+            "app.services.order_service.multicard_api.create_invoice",
+            new=multicard_invoice,
+        ),
+    ):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json=body,
+        )
+
+    result = await db_session.execute(select(Order).where(Order.user_id == user.telegram_id))
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "phone_verification_required",
+            "message": "Share your phone through Telegram before placing an order.",
+        }
+    }
+    assert result.scalar_one_or_none() is None
+    price.assert_not_awaited()
+    alipos_create.assert_not_awaited()
+    multicard_invoice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_order_create_rejects_browser_phone_before_service(client, db_session):
+    user = User(
+        telegram_id=6192,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    create_order = AsyncMock(
+        side_effect=HTTPException(status_code=418, detail="service called")
+    )
+
+    with patch("app.routers.orders.create_customer_order", new=create_order):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "items": [],
+                "phone_number": "+998909999999",
+                "payment_method": "cash",
+                "discriminator": "delivery",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "phone_number"]
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
+    create_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_order_create_rejects_note_over_200_characters_before_service(
+    client,
+    db_session,
+):
+    user = User(
+        telegram_id=6193,
+        first_name="Customer",
+        last_name=None,
+        username=None,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    create_order = AsyncMock(
+        side_effect=HTTPException(status_code=418, detail="service called")
+    )
+
+    with patch("app.routers.orders.create_customer_order", new=create_order):
+        response = await client.post(
+            "/api/orders",
+            headers={"Authorization": f"Bearer {create_jwt(user.telegram_id)}"},
+            json={
+                "items": [],
+                "comment": "🍜" * 201,
+                "payment_method": "cash",
+                "discriminator": "delivery",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "comment"]
+    assert response.json()["detail"][0]["type"] == "string_too_long"
+    create_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -95,12 +260,14 @@ async def test_create_table_order_returns_generic_503_for_invalid_live_directory
     db_session,
     directory_kind,
 ):
-    user = User(
-        telegram_id=6200,
-        first_name="Customer",
-        last_name=None,
-        username=None,
-        phone_number="+998901112233",
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6200,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
     )
     db_session.add(user)
     await db_session.commit()
@@ -144,7 +311,6 @@ async def test_create_table_order_returns_generic_503_for_invalid_live_directory
                         "modifications": [],
                     }
                 ],
-                "phone_number": "+998901112233",
                 "payment_method": "cash",
                 "discriminator": "inplace",
                 "table_access_token": access_token,
@@ -161,12 +327,14 @@ async def test_create_table_order_returns_generic_503_for_invalid_live_directory
 
 @pytest.mark.asyncio
 async def test_create_order_preserves_item_display_name(client, db_session):
-    user = User(
-        telegram_id=6201,
-        first_name="Customer",
-        last_name=None,
-        username=None,
-        phone_number="+998901112233",
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6201,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
     )
     db_session.add(user)
     await db_session.flush()
@@ -227,7 +395,6 @@ async def test_create_order_preserves_item_display_name(client, db_session):
                         "modifications": [],
                     }
                 ],
-                "phone_number": "+998901112233",
                 "payment_method": "cash",
                 "discriminator": "delivery",
             },
@@ -246,12 +413,14 @@ async def test_create_order_rejected_response_does_not_expose_alipos_body(
     client,
     db_session,
 ):
-    user = User(
-        telegram_id=6202,
-        first_name="Customer",
-        last_name=None,
-        username=None,
-        phone_number="+998901112233",
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6202,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
     )
     db_session.add(user)
     await db_session.flush()
@@ -328,7 +497,6 @@ async def test_create_order_rejected_response_does_not_expose_alipos_body(
                         "modifications": [],
                     }
                 ],
-                "phone_number": "+998901112233",
                 "payment_method": "cash",
                 "discriminator": "delivery",
             },
@@ -347,12 +515,14 @@ async def test_create_order_payload_build_error_is_bounded_in_state_logs_and_api
     db_session,
     caplog,
 ):
-    user = User(
-        telegram_id=6203,
-        first_name="Customer",
-        last_name=None,
-        username=None,
-        phone_number="+998901112233",
+    user = _mark_phone_verified(
+        User(
+            telegram_id=6203,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
     )
     db_session.add(user)
     await db_session.flush()
@@ -405,7 +575,6 @@ async def test_create_order_payload_build_error_is_bounded_in_state_logs_and_api
                         "modifications": [],
                     }
                 ],
-                "phone_number": "+998901112233",
                 "payment_method": "cash",
                 "discriminator": "delivery",
             },

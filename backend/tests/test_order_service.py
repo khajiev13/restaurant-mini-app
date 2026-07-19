@@ -24,6 +24,7 @@ from app.services.menu_catalog_service import PricedCart
 from app.services.order_service import (
     CustomerOrderError,
     OrderSubmissionRejected,
+    PhoneVerificationRequired,
     _dispatch_queued_refund,
     _submit_queued_alipos_order,
     create_customer_order,
@@ -33,6 +34,10 @@ from app.services.order_service import (
     list_recoverable_refund_order_ids,
     reconcile_unknown_refunds,
     submit_order_to_alipos,
+)
+from app.services.phone_verification_service import (
+    InvalidPhoneNumber,
+    phone_verification_fingerprint,
 )
 from app.services.table_access_service import TableDirectoryEntry
 
@@ -112,7 +117,6 @@ def _body(
                 "modifications": [],
             }
         ],
-        phone_number="+998901112233",
         payment_method=payment_method,
         discriminator="inplace",
         table_access_token="signed-table-token",
@@ -132,7 +136,6 @@ def _delivery_body(payment_method: str = "rahmat") -> OrderCreate:
                 "modifications": [],
             }
         ],
-        phone_number="+998901112233",
         payment_method=payment_method,
         discriminator="delivery",
         delivery_address="Yakkasaray District, Shota Rustaveli 45",
@@ -141,17 +144,144 @@ def _delivery_body(payment_method: str = "rahmat") -> OrderCreate:
     )
 
 
+def _mark_phone_verified(user: User, phone_number: str | None = None) -> User:
+    canonical_phone = phone_number or user.phone_number or "+998901112233"
+    verified_at = datetime.datetime.now(datetime.UTC)
+    user.phone_number = canonical_phone
+    user.phone_verified_at = verified_at
+    user.phone_verified_fingerprint = phone_verification_fingerprint(
+        user.telegram_id,
+        canonical_phone,
+    )
+    user.phone_verified_message_at = verified_at
+    user.phone_verified_update_id = 1
+    return user
+
+
 async def _customer(db_session) -> User:
+    user = _mark_phone_verified(
+        User(
+            telegram_id=7301,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+            phone_number="+998901112233",
+        )
+    )
+    db_session.add(user)
+    await db_session.commit()
+    return user
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("discriminator", "payment_method"),
+    [("delivery", "rahmat"), ("inplace", "rahmat")],
+)
+async def test_unverified_new_order_is_rejected_before_any_side_effect(
+    db_session,
+    discriminator,
+    payment_method,
+):
     user = User(
-        telegram_id=7301,
-        first_name="Customer",
+        telegram_id=7390 if discriminator == "delivery" else 7391,
+        first_name="Unverified",
         last_name=None,
         username=None,
         phone_number="+998901112233",
     )
     db_session.add(user)
     await db_session.commit()
-    return user
+    body = (
+        _delivery_body(payment_method)
+        if discriminator == "delivery"
+        else _body(payment_method)
+    )
+    price = AsyncMock(return_value=PRICED_CART)
+    resolve_table = AsyncMock(return_value=TABLE)
+    create_order = AsyncMock(return_value={"orderId": str(uuid.uuid4())})
+    create_invoice = AsyncMock(
+        return_value={
+            "uuid": str(uuid.uuid4()),
+            "checkout_url": "https://pay.example/checkout",
+        }
+    )
+    payment_capability = Mock(return_value=True)
+
+    with (
+        patch("app.services.order_service.price_cart", new=price),
+        patch(
+            "app.services.order_service.can_use_inplace_online_payment",
+            new=payment_capability,
+        ),
+        patch(
+            "app.services.order_service.table_access.resolve_access_token",
+            new=resolve_table,
+        ),
+        patch(
+            "app.services.order_service.alipos_api.get_payment_methods",
+            new=AsyncMock(return_value=[{"id": CASH_PAYMENT_ID, "title": "cash"}]),
+        ),
+        patch("app.services.order_service.alipos_api.create_order", new=create_order),
+        patch(
+            "app.services.order_service.multicard_api.create_invoice",
+            new=create_invoice,
+        ),
+    ):
+        with pytest.raises(PhoneVerificationRequired):
+            await create_customer_order(db_session, user, body)
+
+    price.assert_not_awaited()
+    payment_capability.assert_not_called()
+    resolve_table.assert_not_awaited()
+    create_order.assert_not_awaited()
+    create_invoice.assert_not_awaited()
+    result = await db_session.execute(
+        select(Order).where(Order.user_id == user.telegram_id)
+    )
+    assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_idempotent_replay_precedes_current_phone_verification(db_session):
+    user = User(
+        telegram_id=7392,
+        first_name="Changed profile",
+        last_name=None,
+        username=None,
+        phone_number="+998901112233",
+    )
+    request_id = uuid.uuid4()
+    existing = Order(
+        user_id=user.telegram_id,
+        client_request_id=request_id,
+        items=[],
+        delivery_info={"clientName": "Original", "phoneNumber": "+998901112233"},
+        items_cost=10000,
+        total_amount=10000,
+        delivery_fee=0,
+        comment="Original note",
+        payment_method="cash",
+        discriminator="inplace",
+        table_id=TABLE_ID,
+        alipos_eats_id=f"replay-{uuid.uuid4().hex}",
+        alipos_sync_status="synced",
+        status="NEW",
+    )
+    db_session.add_all([user, existing])
+    await db_session.commit()
+    price = AsyncMock(return_value=PRICED_CART)
+
+    with patch("app.services.order_service.price_cart", new=price):
+        replayed = await create_customer_order(
+            db_session,
+            user,
+            _body(client_request_id=request_id),
+        )
+
+    assert replayed.id == existing.id
+    assert replayed.delivery_info == existing.delivery_info
+    price.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -199,6 +329,127 @@ async def test_cash_inplace_order_submits_verified_table_and_service_total(db_se
     assert order.items == PRICED_CART.items
     assert float(order.total_amount) == 39600
     assert order.alipos_sync_status == "synced"
+    assert order.delivery_info == {
+        "clientName": "Customer",
+        "phoneNumber": "+998901112233",
+    }
+    assert order.contact_phone_verified is True
+    assert order.comment == "Iltimos, piyozsiz"
+    assert payload["deliveryInfo"] == order.delivery_info
+    assert "contact_phone_verified" not in payload["deliveryInfo"]
+    assert payload["comment"] == "Tel: +998 90 *** 2233\nIltimos, piyozsiz"
+
+    _mark_phone_verified(user, "+998907654321")
+    await db_session.commit()
+    await db_session.refresh(order)
+    with patch(
+        "app.services.order_service.resolve_payment_method_id",
+        new=AsyncMock(return_value=CASH_PAYMENT_ID),
+    ):
+        rebuilt_payload = await order_service._build_alipos_payload(order)
+
+    assert order.delivery_info["phoneNumber"] == "+998901112233"
+    assert rebuilt_payload["deliveryInfo"]["phoneNumber"] == "+998901112233"
+    assert rebuilt_payload["comment"] == "Tel: +998 90 *** 2233\nIltimos, piyozsiz"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phone_number", "note", "expected_comment"),
+    [
+        ("+998901234567", None, "Tel: +998 90 *** 4567"),
+        ("+998901234567", "", "Tel: +998 90 *** 4567"),
+        (
+            "+15551234567",
+            "  Keep exact spacing  ",
+            "Tel: +155 **** 4567\n  Keep exact spacing  ",
+        ),
+    ],
+)
+async def test_verified_snapshot_composes_masked_alipos_comment_without_mutation(
+    phone_number,
+    note,
+    expected_comment,
+):
+    order = Order(
+        items=PRICED_CART.items,
+        delivery_info={"clientName": "Customer", "phoneNumber": phone_number},
+        items_cost=36000,
+        total_amount=36000,
+        delivery_fee=0,
+        comment=note,
+        contact_phone_verified=True,
+        payment_method="cash",
+        discriminator="delivery",
+        alipos_eats_id="stable-eats-id",
+    )
+
+    with patch(
+        "app.services.order_service.resolve_payment_method_id",
+        new=AsyncMock(return_value=CASH_PAYMENT_ID),
+    ):
+        payload = await order_service._build_alipos_payload(order)
+
+    assert payload["deliveryInfo"] == {
+        "clientName": "Customer",
+        "phoneNumber": phone_number,
+    }
+    assert "contact_phone_verified" not in payload["deliveryInfo"]
+    assert payload["comment"] == expected_comment
+    assert order.comment == note
+
+
+@pytest.mark.asyncio
+async def test_unverified_legacy_snapshot_keeps_historical_alipos_comment():
+    order = Order(
+        items=PRICED_CART.items,
+        delivery_info={
+            "clientName": "Legacy customer",
+            "phoneNumber": "+998901234567",
+        },
+        items_cost=36000,
+        total_amount=36000,
+        delivery_fee=0,
+        comment="Legacy note",
+        contact_phone_verified=False,
+        payment_method="cash",
+        discriminator="delivery",
+        alipos_eats_id="legacy-eats-id",
+    )
+
+    with patch(
+        "app.services.order_service.resolve_payment_method_id",
+        new=AsyncMock(return_value=CASH_PAYMENT_ID),
+    ):
+        payload = await order_service._build_alipos_payload(order)
+
+    assert payload["comment"] == "Legacy note"
+    assert order.comment == "Legacy note"
+
+
+@pytest.mark.asyncio
+async def test_corrupt_verified_snapshot_fails_alipos_payload_build_closed():
+    order = Order(
+        items=PRICED_CART.items,
+        delivery_info={"clientName": "Customer", "phoneNumber": "not-canonical"},
+        items_cost=36000,
+        total_amount=36000,
+        delivery_fee=0,
+        comment="Customer note",
+        contact_phone_verified=True,
+        payment_method="cash",
+        discriminator="delivery",
+        alipos_eats_id="corrupt-eats-id",
+    )
+
+    with (
+        patch(
+            "app.services.order_service.resolve_payment_method_id",
+            new=AsyncMock(return_value=CASH_PAYMENT_ID),
+        ),
+        pytest.raises(InvalidPhoneNumber),
+    ):
+        await order_service._build_alipos_payload(order)
 
 
 def test_alipos_integration_total_preserves_delivery_total():
@@ -407,11 +658,13 @@ async def test_repeated_customer_request_id_returns_one_cash_order(db_session):
 
 @pytest.mark.asyncio
 async def test_idempotency_race_dispatches_the_winning_queued_cash_order():
-    user = User(
-        telegram_id=7302,
-        first_name="Customer",
-        last_name=None,
-        username=None,
+    user = _mark_phone_verified(
+        User(
+            telegram_id=7302,
+            first_name="Customer",
+            last_name=None,
+            username=None,
+        )
     )
     request_id = uuid.uuid4()
     winner = Mock(

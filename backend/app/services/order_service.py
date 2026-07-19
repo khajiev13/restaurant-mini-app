@@ -20,6 +20,12 @@ from app.services.order_status_service import (
     TERMINAL_LOCAL_STATUSES,
     normalize_order_status,
 )
+from app.services.phone_verification_service import (
+    InvalidPhoneNumber,
+    is_phone_verified,
+    mask_phone_number,
+    normalize_phone_number,
+)
 from app.services.table_access_service import TableAccessService
 
 logger = logging.getLogger(__name__)
@@ -43,6 +49,10 @@ table_access = TableAccessService(
 
 
 class CustomerOrderError(ValueError):
+    pass
+
+
+class PhoneVerificationRequired(RuntimeError):
     pass
 
 
@@ -187,6 +197,20 @@ def _alipos_items(items: list[dict]) -> list[dict]:
     ]
 
 
+def _compose_alipos_comment(order: Order) -> str:
+    if not order.contact_phone_verified:
+        return order.comment or ""
+
+    delivery_info = order.delivery_info if isinstance(order.delivery_info, dict) else {}
+    snapshot_phone = delivery_info.get("phoneNumber")
+    canonical_phone = normalize_phone_number(snapshot_phone)
+    if canonical_phone != snapshot_phone:
+        raise InvalidPhoneNumber("Verified order phone snapshot is not canonical")
+
+    header = f"Tel: {mask_phone_number(canonical_phone)}"
+    return f"{header}\n{order.comment}" if order.comment else header
+
+
 async def _build_alipos_payload(order: Order) -> dict:
     payment_kind: Literal["cash", "online"] = (
         "cash" if order.payment_method == "cash" else "online"
@@ -197,7 +221,7 @@ async def _build_alipos_payload(order: Order) -> dict:
         "platform": "MrPubBot",
         "eatsId": order.alipos_eats_id,
         "restaurantId": settings.alipos_restaurant_id,
-        "comment": order.comment or "",
+        "comment": _compose_alipos_comment(order),
         "deliveryInfo": order.delivery_info or {},
         "paymentInfo": {
             "paymentId": payment_id,
@@ -1822,6 +1846,10 @@ async def create_customer_order(
         if existing is not None:
             return await _classify_customer_order_replay(db, existing)
 
+    if not is_phone_verified(current_user):
+        raise PhoneVerificationRequired
+    verified_phone = current_user.phone_number
+
     if (
         body.discriminator == "inplace"
         and body.payment_method == "rahmat"
@@ -1851,7 +1879,7 @@ async def create_customer_order(
     client_name = f"{current_user.first_name} {current_user.last_name or ''}".strip()
     delivery_info = {
         "clientName": client_name,
-        "phoneNumber": body.phone_number,
+        "phoneNumber": verified_phone,
     }
     if delivery_address:
         delivery_info["deliveryAddress"] = delivery_address
@@ -1868,6 +1896,7 @@ async def create_customer_order(
         total_amount=total,
         delivery_fee=delivery_fee,
         comment=body.comment,
+        contact_phone_verified=True,
         payment_method=body.payment_method,
         payment_provider="multicard" if online else None,
         payment_status="invoice_queued" if online else None,

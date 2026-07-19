@@ -21,15 +21,15 @@ class OrderItem(BaseModel):
 
 
 class OrderCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     client_request_id: uuid.UUID | None = None
     address_id: uuid.UUID | None = None
     items: list[OrderItem]
-    comment: str | None = None
+    comment: str | None = Field(default=None, max_length=200)
     payment_method: Literal["cash", "rahmat"] = "cash"
     discriminator: Literal["delivery", "inplace"] = "delivery"
     table_access_token: str | None = None
-    # For delivery — client info
-    phone_number: str
     delivery_address: str | None = None
     latitude: str | None = None
     longitude: str | None = None
@@ -123,6 +123,13 @@ class StaffOrderResponse(BaseModel):
 def build_staff_order_response(order) -> StaffOrderResponse:
     address = order.address
     assigned_staff = order.assigned_staff
+    customer_phone = order.user.phone_number
+    if order.contact_phone_verified:
+        delivery_info = (
+            order.delivery_info if isinstance(order.delivery_info, dict) else {}
+        )
+        snapshot_phone = delivery_info.get("phoneNumber")
+        customer_phone = snapshot_phone if isinstance(snapshot_phone, str) else None
 
     return StaffOrderResponse(
         id=order.id,
@@ -136,7 +143,7 @@ def build_staff_order_response(order) -> StaffOrderResponse:
             telegram_id=order.user.telegram_id,
             first_name=order.user.first_name,
             last_name=order.user.last_name,
-            phone_number=order.user.phone_number,
+            phone_number=customer_phone,
         ),
         address=StaffAddressResponse(
             full_address=address.full_address if address else "",
