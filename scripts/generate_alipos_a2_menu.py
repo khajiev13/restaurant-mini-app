@@ -79,6 +79,8 @@ LOGO_PATH = ROOT / "frontend/src/assets/logo.png"
 GENERATED_FOOD_ASSETS = {
     "qovirma lagmon": ROOT / "frontend/src/assets/menu/qovurma-lagmon-generated.png",
     "lag'mon": ROOT / "frontend/src/assets/menu/lagmon-generated.png",
+    "olot somsa": ROOT / "frontend/src/assets/menu/olot-somsa-generated.png",
+    "mastava": ROOT / "frontend/src/assets/menu/mastava-generated.png",
 }
 
 

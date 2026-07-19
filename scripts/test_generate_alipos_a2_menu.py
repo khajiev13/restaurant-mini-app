@@ -106,6 +106,15 @@ def test_featured_food_photos_exclude_sauces_and_small_items():
     ]
 
 
+def test_generated_food_assets_include_olot_somsa_and_mastava():
+    assert renderer._generated_food_asset({"name": "Olot somsa"}) == (
+        renderer.ROOT / "frontend/src/assets/menu/olot-somsa-generated.png"
+    )
+    assert renderer._generated_food_asset({"name": "Mastava"}) == (
+        renderer.ROOT / "frontend/src/assets/menu/mastava-generated.png"
+    )
+
+
 def test_four_named_color_variants_are_available():
     assert list(renderer.PALETTES) == [
         "teal-gold",
