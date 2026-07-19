@@ -5,6 +5,7 @@ import hmac
 import json
 import re
 import uuid
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
@@ -14,6 +15,9 @@ _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _SUBMITTED_NUMERIC_CODE_RE = re.compile(r"^[0-9]{1,6}$")
 _NUMERIC_START_PARAM_RE = re.compile(
     r"^t2_((?:0|[1-9][0-9]{0,5}))_([A-Za-z0-9_-]{12})$"
+)
+_NUMERIC_QR_COMPAT_PAIR_RE = re.compile(
+    r"^((?:0|[1-9][0-9]{0,5})):([A-Za-z0-9_-]{12})$"
 )
 _LEGACY_START_PARAM_RE = re.compile(
     r"^t_([0-9A-HJKMNP-TV-Z]{6})_([A-Za-z0-9_-]{12})$"
@@ -27,6 +31,29 @@ class InvalidTableEntry(ValueError):
 
 class InvalidTableDirectory(RuntimeError):
     pass
+
+
+def parse_numeric_qr_compat_signatures(value: str) -> dict[str, frozenset[str]]:
+    if value == "":
+        return {}
+
+    signatures_by_code: dict[str, set[str]] = {}
+    seen: set[tuple[str, str]] = set()
+    for raw_pair in value.split(","):
+        match = _NUMERIC_QR_COMPAT_PAIR_RE.fullmatch(raw_pair.strip())
+        if match is None:
+            raise ValueError("Invalid TABLE_QR_COMPAT_SIGNATURES entry")
+        code, signature = match.groups()
+        pair = (code, signature)
+        if pair in seen:
+            raise ValueError("Duplicate TABLE_QR_COMPAT_SIGNATURES entry")
+        seen.add(pair)
+        signatures_by_code.setdefault(code, set()).add(signature)
+
+    return {
+        code: frozenset(signatures)
+        for code, signatures in signatures_by_code.items()
+    }
 
 
 def manual_code_from_title(title: str) -> str:
@@ -195,12 +222,17 @@ class TableAccessService:
         secret: str,
         bot_username: str,
         access_ttl_seconds: int = 8 * 60 * 60,
+        numeric_qr_compat_signatures: Mapping[str, Collection[str]] | None = None,
     ) -> None:
         if not secret:
             raise ValueError("Table access secret is required")
         self._secret = secret.encode()
         self._bot_username = bot_username
         self._access_ttl_seconds = access_ttl_seconds
+        self._numeric_qr_compat_signatures = {
+            code: tuple(sorted(signatures))
+            for code, signatures in (numeric_qr_compat_signatures or {}).items()
+        }
 
     def _digest(self, purpose: str, value: str) -> bytes:
         message = f"{purpose}:{value}".encode()
@@ -230,6 +262,12 @@ class TableAccessService:
             code, received_signature = numeric_match.groups()
             expected_signature = _b64encode(self._digest("qr2", code)[:9])
             if hmac.compare_digest(received_signature, expected_signature):
+                return ParsedTableEntry(code=code, legacy=False)
+            compatible_signatures = self._numeric_qr_compat_signatures.get(code, ())
+            if any(
+                hmac.compare_digest(received_signature, signature)
+                for signature in compatible_signatures
+            ):
                 return ParsedTableEntry(code=code, legacy=False)
             raise InvalidTableEntry("Invalid table QR")
 

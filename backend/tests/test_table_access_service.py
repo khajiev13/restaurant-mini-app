@@ -9,10 +9,12 @@ import pytest
 from app.services.table_access_service import (
     InvalidTableDirectory,
     InvalidTableEntry,
+    ParsedTableEntry,
     TableAccessService,
     TableDirectoryEntry,
     get_table_directory,
     manual_code_from_title,
+    parse_numeric_qr_compat_signatures,
 )
 
 TABLE_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -213,6 +215,72 @@ def test_numeric_start_parameter_round_trips_with_qr2_signature():
     assert start_param.startswith("t2_12_")
     assert parsed.code == "12"
     assert parsed.legacy is False
+
+
+def test_numeric_qr_compat_config_parses_exact_pairs():
+    assert parse_numeric_qr_compat_signatures(
+        "1:ABCDEFGHIJKL,10:MNOPQRSTUVWX,10:abcdefghijkl"
+    ) == {
+        "1": frozenset({"ABCDEFGHIJKL"}),
+        "10": frozenset({"MNOPQRSTUVWX", "abcdefghijkl"}),
+    }
+
+
+def test_empty_numeric_qr_compat_config_disables_compatibility():
+    assert parse_numeric_qr_compat_signatures("") == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "1:ABCDEFGHIJKL,",
+        ",1:ABCDEFGHIJKL",
+        "1:ABCDEFGHIJKL,,2:MNOPQRSTUVWX",
+        "01:ABCDEFGHIJKL",
+        "1234567:ABCDEFGHIJKL",
+        "1ABCDEFGHIJKL",
+        "1:ABCDEFGHIJK",
+        "1:ABCDEFGHIJK!",
+        "1:ABCDEFGHIJKL,1:ABCDEFGHIJKL",
+    ],
+    ids=[
+        "trailing-empty-entry",
+        "leading-empty-entry",
+        "middle-empty-entry",
+        "leading-zero-code",
+        "oversized-code",
+        "missing-separator",
+        "short-signature",
+        "invalid-signature-character",
+        "duplicate-exact-pair",
+    ],
+)
+def test_numeric_qr_compat_config_rejects_malformed_or_duplicate_pairs(value):
+    with pytest.raises(ValueError, match="TABLE_QR_COMPAT_SIGNATURES"):
+        parse_numeric_qr_compat_signatures(value)
+
+
+def test_printed_numeric_qr_signature_is_accepted_for_its_exact_code():
+    service = TableAccessService(
+        secret="current-secret",
+        bot_username="olotsomsa_zakaz_bot",
+        numeric_qr_compat_signatures={"12": frozenset({"ABCDEFGHIJKL"})},
+    )
+
+    assert service.parse_start_param(
+        "t2_12_ABCDEFGHIJKL"
+    ) == ParsedTableEntry(code="12", legacy=False)
+
+
+def test_printed_numeric_qr_signature_cannot_select_another_code():
+    service = TableAccessService(
+        secret="current-secret",
+        bot_username="olotsomsa_zakaz_bot",
+        numeric_qr_compat_signatures={"12": frozenset({"ABCDEFGHIJKL"})},
+    )
+
+    with pytest.raises(InvalidTableEntry, match="Invalid table QR"):
+        service.parse_start_param("t2_13_ABCDEFGHIJKL")
 
 
 def test_tampered_numeric_start_parameter_is_rejected():

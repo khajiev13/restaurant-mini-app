@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     telegram_bot_username: str = "olotsomsa_zakaz_bot"
     table_access_secret: str = ""
     table_access_ttl_seconds: int = 28800
+    table_qr_compat_signatures: str = ""
     bootstrap_admin_telegram_ids: str = ""
     public_app_url: str = ""
     public_backend_url: str = ""
