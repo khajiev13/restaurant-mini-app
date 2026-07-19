@@ -109,12 +109,13 @@ the already-resolved table menu rather than having to scan again.
 
 ## Data Model
 
-Add three nullable verification columns to `users` and one provenance column to
+Add four nullable verification columns to `users` and one provenance column to
 `orders`:
 
 ```text
 users.phone_verified_at TIMESTAMPTZ NULL
 users.phone_verified_fingerprint VARCHAR(64) NULL
+users.phone_verified_message_at TIMESTAMPTZ NULL
 users.phone_verified_update_id BIGINT NULL
 orders.contact_phone_verified BOOLEAN NOT NULL DEFAULT FALSE
 ```
@@ -125,8 +126,8 @@ Semantics:
 - A phone with no matching fingerprint: a legacy value or a value changed by
   an older writer; the customer must share again.
 - A phone, UTC verification timestamp, matching fingerprint, and accepted
-  Telegram update ID: the current profile phone was received from the protected
-  Telegram contact webhook.
+  Telegram message-time/update-ID pair: the current profile phone was received
+  from the protected Telegram contact webhook.
 
 The fingerprint is SHA-256 over the stable Telegram user ID, a separator, and
 the canonical phone. It is an integrity binding, not a password or a claim that
@@ -138,7 +139,7 @@ The migration does not infer verification for existing values. No existing
 phone is deleted, but all existing customers without complete matching metadata
 must complete the gate once.
 
-All three verification fields are refreshed whenever the customer successfully
+All four verification fields are refreshed whenever the customer successfully
 shares their current Telegram phone again. Historical orders remain unchanged.
 The timestamp and order snapshot immutability are application invariants; the
 database columns and JSON value are not inherently immutable.
@@ -218,27 +219,32 @@ A contact update is accepted only when all of the following are true:
 
 - `TELEGRAM_WEBHOOK_SECRET` is configured.
 - The request contains the matching Telegram webhook secret header.
-- The update contains an integer `update_id`, a contact, and a sender.
+- The update contains an integer `update_id`, an integer `message.date`, a
+  contact, and a sender.
 - `message.from.id` equals `contact.user_id`.
 - The authenticated Telegram user already exists.
 - The phone can be normalized to `+` followed by 8–15 digits.
-- The update ID is greater than the last accepted contact update ID for that
-  user.
+- The `(message.date, update_id)` pair sorts after the last accepted contact
+  pair for that user.
 
 The sender/contact equality check prevents a user from sharing another person's
 contact card and assigning that phone to another profile. Lock the user row
-while comparing and updating `phone_verified_update_id`; this makes retries
-idempotent and prevents an older or concurrently processed update from
-overwriting a newer phone. The authentication flow creates the user before the
-phone gate requests contact, avoiding the normal first-run race in which an
-unknown user's contact would be discarded.
+while comparing the message-time/update-ID pair; this makes retries idempotent
+and prevents an older or concurrently processed contact from overwriting a
+newer phone. Message time is the primary ordering key because Telegram may
+choose a random next `update_id` after at least one week without updates, as
+documented in the official [Update contract](https://core.telegram.org/bots/api#update).
+The update ID is only the same-second tie-breaker and replay identifier. The
+authentication flow creates the user before the phone gate requests contact,
+avoiding the normal first-run race in which an unknown user's contact would be
+discarded.
 
-Accepted updates set `phone_number`, the UTC timestamp, the matching
-fingerprint, and the update ID in one transaction. Replayed or stale update IDs
-return `200` without changing data. Rejected or incomplete updates do not alter
-user data. Logs include only the update outcome and a masked internal user
-identifier needed for diagnosis, never the full phone or the complete Telegram
-update.
+Accepted updates set `phone_number`, the server receipt timestamp, the matching
+fingerprint, the Telegram message timestamp, and the update ID in one
+transaction. Replayed or older ordering pairs return `200` without changing
+data. Rejected or incomplete updates do not alter user data. Logs include only
+the update outcome and a masked internal user identifier needed for diagnosis,
+never the full phone or the complete Telegram update.
 
 If the server-side webhook secret is missing, the route returns `503` and does
 not mark any phone verified. An invalid request secret returns `401`.
@@ -259,7 +265,7 @@ The authenticated user response adds:
 ```
 
 The verification metadata does not need to be exposed to the browser. The
-boolean is true only when the phone, timestamp, update ID, and recomputed
+boolean is true only when the phone, timestamps, update ID, and recomputed
 fingerprint all agree, so an inconsistent or older-writer row cannot unlock the
 UI.
 
@@ -318,18 +324,20 @@ code:
 }
 ```
 
-On success, the backend copies the verified profile value into the existing
-order snapshot:
+On success, the backend persists these separate local order fields:
 
-```json
-{
-  "deliveryInfo": {
-    "clientName": "Customer Name",
-    "phoneNumber": "+998901234567"
-  },
-  "contact_phone_verified": true
+```text
+Order.delivery_info = {
+  "clientName": "Customer Name",
+  "phoneNumber": "+998901234567"
 }
+Order.contact_phone_verified = true
 ```
+
+`contact_phone_verified` is an `orders` column, not part of the JSON object and
+not an AliPOS request field. The separately composed outbound AliPOS
+`deliveryInfo` contains `clientName` and the full `phoneNumber`, but never the
+local provenance column.
 
 The explicit order column distinguishes new Telegram-verified snapshots from
 legacy `delivery_info.phoneNumber` values that came from editable checkout
@@ -403,8 +411,15 @@ Existing AliPOS rules remain unchanged: the phone also remains in
 `deliveryInfo.phoneNumber`, order creation is not automatically retried after an
 unknown outcome, and table orders continue supplying their resolved `tableId`.
 Automated tests prove only the outbound payload. Whether the masked line is
-visible or printed in a particular AliPOS operator layout remains a separate
-authorized live verification item and is not overstated as confirmed behavior.
+accepted, visible, or printed in a particular AliPOS operator layout remains a
+separate provider-evidence gate and is not overstated as confirmed behavior.
+
+Ship the formatter behind `ALIPOS_MASKED_PHONE_COMMENT_ENABLED`, defaulting to
+`false`. While false, AliPOS receives the historical customer note and the full
+structured phone but no generated phone header. Set it to `true` only after the
+vendor confirms the accepted multiline/comment-length contract or a separately
+authorized controlled AliPOS order proves acceptance. Final feature acceptance
+requires the flag to be true; payload unit tests alone cannot authorize it.
 
 ## Staff and Admin Data
 
@@ -432,8 +447,8 @@ a verified contact.
   user.
 - **Phone normalization fails:** leave the customer unverified and permit a new
   Telegram share attempt.
-- **Webhook update is replayed or older than the accepted update:** return `200`
-  without changing the current phone or verification metadata.
+- **Webhook ordering pair is replayed or older than the accepted pair:** return
+  `200` without changing the current phone or verification metadata.
 - **Customer note exceeds 200 characters:** return `422` before any order side
   effect.
 - **Old Telegram client:** show update/reopen instructions; do not offer manual
@@ -450,15 +465,17 @@ a verified contact.
 
 ### Backend
 
-- Migration and model tests for the nullable user verification metadata and the
-  order provenance column's safe `false` default.
+- Migration and model tests for the nullable user verification metadata,
+  including Telegram message time, and the order provenance column's safe
+  `false` default.
 - User response tests for `phone_verified`, including fingerprint mismatch
   after an older writer changes the phone.
 - Profile-update tests proving a browser cannot set a verified phone.
 - Webhook tests for valid secret, missing secret, invalid secret, missing
   contact, missing sender, sender/contact mismatch, unknown user, normalization,
-  successful verification, replayed/stale update IDs, concurrent updates, and
-  verified phone replacement.
+  successful verification, replayed/older ordering pairs, same-second tie
+  breaking, a lower update ID after a newer message date, concurrent updates,
+  and verified phone replacement.
 - Order tests proving an unverified customer receives the stable `409` before
   side effects.
 - Order tests proving a client-supplied phone is ignored.
@@ -470,6 +487,8 @@ a verified contact.
   fallback mask with at least three hidden digits, optional customer note,
   200-character validation, unchanged stored comment, and legacy comment
   behavior.
+- Masked-comment flag tests proving the generated header is absent by default
+  and present only when the evidence-gated setting is enabled.
 - Staff response tests proving snapshot-first phone selection with a legacy
   fallback.
 
@@ -507,26 +526,35 @@ a verified contact.
 
 ## Deployment and Compatibility
 
-Use a staged backend-first rollout with a temporary server flag,
-`REQUIRE_VERIFIED_CUSTOMER_PHONE`, whose code default is `true`:
+Use a staged backend-first rollout with `REQUIRE_VERIFIED_CUSTOMER_PHONE`, whose
+code default is `true`, and the evidence-gated
+`ALIPOS_MASKED_PHONE_COMMENT_ENABLED`, whose code default is `false`:
 
 1. Confirm that the implementation base contains the QR formats represented by
    the currently issued assets, including numeric `t2_...` links as well as
    legacy `t_...` compatibility.
 2. Apply the additive migration.
 3. Deploy webhook hardening, verification persistence, profile response, and
-   order compatibility with the production override set to `false`. In this
-   short compatibility window, an unverified old client retains the prior
-   request-phone behavior; verified clients already use the profile snapshot.
+   order compatibility with verified-phone enforcement overridden to `false`
+   and masked-comment output left `false`. In this short compatibility window,
+   an unverified old client retains the prior request-phone behavior; verified
+   clients already use the profile snapshot.
 4. Deploy the frontend gate and remove editable checkout phone submission.
 5. Verify with a controlled customer that legacy profile phone data triggers
    one-time re-verification and that each issued QR format survives the gate.
-6. Set the production flag to `true` and restart the backend. From this point,
-   the server ignores the deprecated request phone and enforces verification.
-7. Verify a manipulated or cached old request receives
+6. Obtain a vendor-confirmed comment contract or separate authorization for one
+   controlled AliPOS order. Prove the composed multiline comment is accepted;
+   then set `ALIPOS_MASKED_PHONE_COMMENT_ENABLED=true`. If acceptance is not
+   proven, leave it false and do not claim the masked-comment portion complete.
+7. Set `REQUIRE_VERIFIED_CUSTOMER_PHONE=true` and restart the backend. From this
+   point, the server ignores the deprecated request phone and enforces
+   verification.
+8. Verify a manipulated or cached old request receives
    `phone_verification_required` and creates no side effect.
-8. Remove the deprecated request field and temporary flag in a later cleanup
-   only after cached old frontends are no longer relevant.
+9. Remove the deprecated request field and verified-phone rollout flag in a
+   later cleanup only after cached old frontends are no longer relevant. Retain
+   the masked-comment evidence gate unless the provider contract becomes a
+   stable tested prerequisite.
 
 The migration is additive and does not delete existing phone values. A rollback
 restores the prior frontend and backend as one coordinated release. If the old
@@ -554,6 +582,8 @@ prior backend from reading users or orders.
   the system-generated comment header contains only the masked form.
 - The Uzbek masked format is exactly `+998 90 *** 4567` for the corresponding
   canonical number.
+- Provider confirmation or a separately authorized controlled order proves the
+  multiline masked comment is accepted before its production flag is enabled.
 - Customer notes of at most 200 characters remain unchanged in local
   persistence and follow the masked phone on a new AliPOS comment line.
 - Legacy order snapshots never gain verified provenance or a verified-looking
