@@ -17,6 +17,12 @@ from app.services.order_status_service import (
     apply_alipos_status_update_for_order,
     parse_alipos_updated_at,
 )
+from app.services.phone_verification_service import (
+    InvalidPhoneNumber,
+    is_newer_contact_update,
+    normalize_phone_number,
+    phone_verification_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,21 @@ def _mask_telegram_id(telegram_id: Any) -> str:
     if len(value) <= 4:
         return value
     return f"***{value[-4:]}"
+
+
+def _log_telegram_webhook_outcome(
+    outcome: str,
+    update_id: object,
+    started_at: float,
+    telegram_id: int | None = None,
+) -> None:
+    logger.info(
+        "Telegram bot webhook outcome=%s update_id=%s telegram_user_id=%s duration_ms=%s",
+        outcome,
+        update_id if type(update_id) is int else "unknown",
+        _mask_telegram_id(telegram_id) if telegram_id is not None else "unknown",
+        round((time.perf_counter() - started_at) * 1000),
+    )
 
 
 def _verify_webhook_credentials(
@@ -56,71 +77,82 @@ async def telegram_bot_webhook(
 ) -> dict:
     """Receive Telegram bot updates (contact messages)."""
     started_at = time.perf_counter()
-    body = await request.json()
-    update_id = body.get("update_id")
-    message = body.get("message", {})
-    contact = message.get("contact")
-
-    logger.info(
-        "Telegram bot webhook received | update_id=%s has_contact=%s",
-        update_id,
-        bool(contact),
-    )
-
-    if settings.telegram_webhook_secret:
-        if not x_telegram_bot_api_secret_token or not hmac.compare_digest(
-            x_telegram_bot_api_secret_token, settings.telegram_webhook_secret
-        ):
-            logger.warning(
-                "Telegram bot webhook rejected | update_id=%s secret_valid=false duration_ms=%s",
-                update_id,
-                round((time.perf_counter() - started_at) * 1000),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret"
-            )
-
-        logger.info("Telegram bot webhook secret accepted | update_id=%s", update_id)
-
-    if not contact:
-        logger.info(
-            "Telegram bot webhook ignored | update_id=%s result=no_contact duration_ms=%s",
-            update_id,
-            round((time.perf_counter() - started_at) * 1000),
+    webhook_secret = settings.telegram_webhook_secret
+    if not webhook_secret:
+        _log_telegram_webhook_outcome("secret_not_configured", None, started_at)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram webhook secret is not configured",
         )
+    if not x_telegram_bot_api_secret_token or not hmac.compare_digest(
+        x_telegram_bot_api_secret_token, webhook_secret
+    ):
+        _log_telegram_webhook_outcome("invalid_secret", None, started_at)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid secret"
+        )
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        _log_telegram_webhook_outcome("invalid_structure", None, started_at)
+        return {"result": "OK"}
+    update_id = body.get("update_id")
+    message = body.get("message")
+    if type(update_id) is not int or not isinstance(message, dict):
+        _log_telegram_webhook_outcome("invalid_structure", update_id, started_at)
         return {"result": "OK"}
 
-    telegram_id = contact.get("user_id") or (message.get("from") or {}).get("id")
-    phone_number = contact.get("phone_number")
+    message_date = message.get("date")
+    sender = message.get("from")
+    contact = message.get("contact")
+    if not isinstance(contact, dict):
+        _log_telegram_webhook_outcome("no_contact", update_id, started_at)
+        return {"result": "OK"}
+    if (
+        type(message_date) is not int
+        or not isinstance(sender, dict)
+    ):
+        _log_telegram_webhook_outcome("invalid_structure", update_id, started_at)
+        return {"result": "OK"}
 
-    if not telegram_id or not phone_number:
-        logger.info(
-            "Telegram bot webhook ignored | update_id=%s result=incomplete_contact telegram_user_id=%s duration_ms=%s",
-            update_id,
-            _mask_telegram_id(telegram_id or "unknown"),
-            round((time.perf_counter() - started_at) * 1000),
-        )
+    sender_id = sender.get("id")
+    contact_user_id = contact.get("user_id")
+    if type(sender_id) is not int or type(contact_user_id) is not int:
+        _log_telegram_webhook_outcome("invalid_structure", update_id, started_at)
+        return {"result": "OK"}
+    if sender_id != contact_user_id:
+        _log_telegram_webhook_outcome("sender_contact_mismatch", update_id, started_at, sender_id)
+        return {"result": "OK"}
+
+    try:
+        message_at = datetime.datetime.fromtimestamp(message_date, tz=datetime.UTC)
+        canonical_phone = normalize_phone_number(contact.get("phone_number"))
+    except (InvalidPhoneNumber, OverflowError, OSError, ValueError):
+        _log_telegram_webhook_outcome("invalid_contact", update_id, started_at, sender_id)
         return {"result": "OK"}
 
     async with async_session() as db:
-        result = await db.execute(select(User).where(User.telegram_id == telegram_id))
+        result = await db.execute(
+            select(User).where(User.telegram_id == sender_id).with_for_update()
+        )
         user = result.scalar_one_or_none()
-        if user:
-            user.phone_number = phone_number
-            await db.commit()
-            logger.info(
-                "Telegram bot webhook processed | update_id=%s result=phone_saved telegram_user_id=%s duration_ms=%s",
-                update_id,
-                _mask_telegram_id(telegram_id),
-                round((time.perf_counter() - started_at) * 1000),
-            )
-        else:
-            logger.info(
-                "Telegram bot webhook ignored | update_id=%s result=user_not_found telegram_user_id=%s duration_ms=%s",
-                update_id,
-                _mask_telegram_id(telegram_id),
-                round((time.perf_counter() - started_at) * 1000),
-            )
+        if user is None:
+            _log_telegram_webhook_outcome("user_not_found", update_id, started_at, sender_id)
+            return {"result": "OK"}
+        if not is_newer_contact_update(user, message_at, update_id):
+            _log_telegram_webhook_outcome("stale_or_replay", update_id, started_at, sender_id)
+            return {"result": "OK"}
+
+        user.phone_number = canonical_phone
+        user.phone_verified_at = datetime.datetime.now(datetime.UTC)
+        user.phone_verified_fingerprint = phone_verification_fingerprint(
+            sender_id, canonical_phone
+        )
+        user.phone_verified_message_at = message_at
+        user.phone_verified_update_id = update_id
+        await db.commit()
+
+    _log_telegram_webhook_outcome("phone_saved", update_id, started_at, sender_id)
 
     return {"result": "OK"}
 

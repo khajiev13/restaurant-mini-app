@@ -16,6 +16,7 @@ from app.config import settings
 from app.models.models import Order, User
 from app.routers import webhooks as webhooks_router
 from app.services import alipos_api, order_service
+from app.services.phone_verification_service import phone_verification_fingerprint
 from app.services.telegram_webhook_service import register_telegram_webhook
 
 
@@ -84,6 +85,7 @@ async def test_telegram_bot_webhook_updates_phone_number(
     payload = {
         "update_id": 101,
         "message": {
+            "date": 1_784_833_200,
             "from": {"id": 12345678},
             "contact": {"user_id": 12345678, "phone_number": "+998901234567"},
         },
@@ -100,7 +102,15 @@ async def test_telegram_bot_webhook_updates_phone_number(
 
     assert response.status_code == 200
     assert user.phone_number == "+998901234567"
-    assert "result=phone_saved" in caplog.text
+    assert user.phone_verified_at is not None
+    assert user.phone_verified_message_at == datetime.datetime(
+        2026, 7, 23, 19, tzinfo=datetime.UTC
+    )
+    assert user.phone_verified_update_id == 101
+    assert user.phone_verified_fingerprint == phone_verification_fingerprint(
+        user.telegram_id, user.phone_number
+    )
+    assert "outcome=phone_saved" in caplog.text
     assert "+998901234567" not in caplog.text
 
 
@@ -118,7 +128,7 @@ async def test_telegram_bot_webhook_ignores_messages_without_contact(
         )
 
     assert response.status_code == 200
-    assert "result=no_contact" in caplog.text
+    assert "outcome=no_contact" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -130,10 +140,10 @@ async def test_telegram_bot_webhook_rejects_invalid_secret(client, monkeypatch, 
             "/api/webhooks/bot",
             json={"update_id": 103, "message": {}},
             headers={"x-telegram-bot-api-secret-token": "wrong-secret"},
-        )
+    )
 
     assert response.status_code == 401
-    assert "secret_valid=false" in caplog.text
+    assert "outcome=invalid_secret" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -145,6 +155,7 @@ async def test_telegram_bot_webhook_ignores_unknown_user(
     payload = {
         "update_id": 104,
         "message": {
+            "date": 1_784_833_200,
             "from": {"id": 87654321},
             "contact": {"user_id": 87654321, "phone_number": "+998998887766"},
         },
@@ -158,8 +169,324 @@ async def test_telegram_bot_webhook_ignores_unknown_user(
         )
 
     assert response.status_code == 200
-    assert "result=user_not_found" in caplog.text
+    assert "outcome=user_not_found" in caplog.text
     assert "+998998887766" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_returns_503_before_parsing_when_secret_missing(
+    client, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "")
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        content=b"not-json",
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_rejects_missing_secret_header(client, monkeypatch):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    response = await client.post("/api/webhooks/bot", json={"update_id": 1})
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"update_id": True, "message": {}},
+        {"update_id": 110, "message": {"date": True, "contact": {}}},
+        {
+            "update_id": 111,
+            "message": {"date": 1_784_833_200, "from": {"id": True}, "contact": {}},
+        },
+        {
+            "update_id": 112,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": 12345678},
+                "contact": {"user_id": True},
+            },
+        },
+        {
+            "update_id": "113",
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": 12345678},
+                "contact": {"user_id": 12345678},
+            },
+        },
+    ],
+)
+async def test_telegram_bot_webhook_ignores_non_exact_integer_structure(
+    client, monkeypatch, payload
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json=payload,
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_ignores_another_users_contact(
+    client, webhook_db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=12345679,
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": 114,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": user.telegram_id},
+                "contact": {"user_id": user.telegram_id + 1, "phone_number": "+998901234567"},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    await webhook_db_session.refresh(user)
+    assert response.status_code == 200
+    assert user.phone_number is None
+    assert user.phone_verified_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phone_number",
+    [
+        "998 90 (123)-4567",
+        "+998 90 (123)-4567",
+        "+44 (20) 1234-5678",
+    ],
+)
+async def test_telegram_bot_webhook_persists_canonical_phone_number(
+    client, webhook_db_session, monkeypatch, phone_number
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=20_000_000 + len(phone_number),
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": 115,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": user.telegram_id},
+                "contact": {"user_id": user.telegram_id, "phone_number": phone_number},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    await webhook_db_session.refresh(user)
+    assert response.status_code == 200
+    assert user.phone_number == "+" + "".join(character for character in phone_number if character.isdigit())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phone_number",
+    ["+99890abc4567", "+99890.1234567", "1234567", "1234567890123456", "++998901234567"],
+)
+async def test_telegram_bot_webhook_ignores_invalid_phone_boundaries(
+    client, webhook_db_session, monkeypatch, phone_number
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=30_000_000 + len(phone_number),
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    response = await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": 116,
+            "message": {
+                "date": 1_784_833_200,
+                "from": {"id": user.telegram_id},
+                "contact": {"user_id": user.telegram_id, "phone_number": phone_number},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+    await webhook_db_session.refresh(user)
+    assert response.status_code == 200
+    assert user.phone_number is None
+
+
+async def _telegram_contact_update(
+    client,
+    *,
+    telegram_id: int,
+    update_id: int,
+    message_timestamp: int,
+    phone_number: str,
+):
+    return await client.post(
+        "/api/webhooks/bot",
+        json={
+            "update_id": update_id,
+            "message": {
+                "date": message_timestamp,
+                "from": {"id": telegram_id},
+                "contact": {"user_id": telegram_id, "phone_number": phone_number},
+            },
+        },
+        headers={"x-telegram-bot-api-secret-token": "test-secret"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_orders_replays_and_phone_replacements(
+    client, webhook_db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    user = User(
+        telegram_id=40_000_001,
+        first_name="Test",
+        last_name=None,
+        username="tester",
+    )
+    webhook_db_session.add(user)
+    await webhook_db_session.commit()
+
+    first = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=120,
+        message_timestamp=1_784_833_200,
+        phone_number="+998901234567",
+    )
+    await webhook_db_session.refresh(user)
+    first_receipt_at = user.phone_verified_at
+    replay = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=120,
+        message_timestamp=1_784_833_200,
+        phone_number="+998909999999",
+    )
+    older = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=999,
+        message_timestamp=1_784_833_199,
+        phone_number="+998909999999",
+    )
+    same_second_newer = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=121,
+        message_timestamp=1_784_833_200,
+        phone_number="+998909999999",
+    )
+    later_lower_update = await _telegram_contact_update(
+        client,
+        telegram_id=user.telegram_id,
+        update_id=1,
+        message_timestamp=1_784_833_201,
+        phone_number="+998901112233",
+    )
+
+    await webhook_db_session.refresh(user)
+    assert [response.status_code for response in (first, replay, older, same_second_newer, later_lower_update)] == [200] * 5
+    assert first_receipt_at is not None
+    assert user.phone_number == "+998901112233"
+    assert user.phone_verified_message_at == datetime.datetime(
+        2026, 7, 23, 19, 0, 1, tzinfo=datetime.UTC
+    )
+    assert user.phone_verified_update_id == 1
+    assert user.phone_verified_fingerprint == phone_verification_fingerprint(
+        user.telegram_id, user.phone_number
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_webhook_serializes_concurrent_updates_by_ordering_pair(
+    client, webhook_race_sessions, monkeypatch
+):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "test-secret")
+    sessions, created_user_ids, webhook_session_ids = webhook_race_sessions
+    telegram_id = 50_000_001
+    created_user_ids.append(telegram_id)
+    async with sessions() as seed_db:
+        seed_db.add(
+            User(
+                telegram_id=telegram_id,
+                first_name="Test",
+                last_name=None,
+                username="tester",
+            )
+        )
+        await seed_db.commit()
+
+    newer = asyncio.create_task(
+        _telegram_contact_update(
+            client,
+            telegram_id=telegram_id,
+            update_id=1,
+            message_timestamp=1_784_833_202,
+            phone_number="+998901112233",
+        )
+    )
+    older = asyncio.create_task(
+        _telegram_contact_update(
+            client,
+            telegram_id=telegram_id,
+            update_id=999,
+            message_timestamp=1_784_833_201,
+            phone_number="+998909999999",
+        )
+    )
+    responses = await asyncio.gather(newer, older)
+
+    async with sessions() as observer_db:
+        user = await observer_db.get(User, telegram_id)
+        assert user is not None
+        assert user.phone_number == "+998901112233"
+        assert user.phone_verified_message_at == datetime.datetime(
+            2026, 7, 23, 19, 0, 2, tzinfo=datetime.UTC
+        )
+        assert user.phone_verified_update_id == 1
+        assert user.phone_verified_fingerprint == phone_verification_fingerprint(
+            telegram_id, user.phone_number
+        )
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len(set(webhook_session_ids)) == 2
 
 
 @pytest.mark.asyncio
