@@ -16,11 +16,20 @@ const apiMocks = vi.hoisted(() => ({
   getMe: vi.fn(),
 }));
 
+const phoneVerification = vi.hoisted(() => ({
+  status: 'ready' as const,
+  requestPhone: vi.fn(),
+  checkAgain: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+}));
+
 const authState = vi.hoisted(() => ({
   isAuthenticated: true,
   authenticate: vi.fn(),
+  refreshMe: vi.fn<() => Promise<unknown>>().mockResolvedValue(null),
   user: {
     telegram_id: 7301,
+    phone_number: '+998901112233',
+    phone_verified: true,
     inplace_online_payment_enabled: false,
   },
 }));
@@ -28,6 +37,9 @@ const authState = vi.hoisted(() => ({
 vi.mock('../../services/api', () => apiMocks);
 vi.mock('../../stores/authStore', () => ({
   useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
+}));
+vi.mock('../../hooks/usePhoneVerification', () => ({
+  usePhoneVerification: () => phoneVerification,
 }));
 vi.mock('../../components/artisan/MapPickerOverlay', () => ({ default: () => null }));
 
@@ -53,8 +65,12 @@ describe('ArtisanCheckoutPage table mode', () => {
     vi.clearAllMocks();
     authState.user = {
       telegram_id: 7301,
+      phone_number: '+998901112233',
+      phone_verified: true,
       inplace_online_payment_enabled: false,
     };
+    authState.refreshMe.mockClear();
+    phoneVerification.requestPhone.mockClear();
     apiMocks.getMe.mockResolvedValue({
       data: { data: { phone_number: '+998901112233' } },
     });
@@ -108,12 +124,144 @@ describe('ArtisanCheckoutPage table mode', () => {
       payment_method: 'cash',
     });
     expect(apiMocks.createOrder.mock.calls[0][0]).not.toHaveProperty('delivery_address');
+    expect(apiMocks.createOrder.mock.calls[0][0]).not.toHaveProperty('phone_number');
+  });
+
+  it('shows the masked verified profile phone without an editable phone field', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('+998 90 *** 2233')).toBeVisible();
+    expect(screen.queryByRole('textbox', { name: /telefon|phone/i })).not.toBeInTheDocument();
+    expect(apiMocks.getMe).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /telegram/i }));
+    expect(phoneVerification.requestPhone).toHaveBeenCalledTimes(1);
+  });
+
+  it('limits the exact customer note to 200 characters and sends it unchanged', async () => {
+    const user = userEvent.setup();
+    const note = 'x'.repeat(200);
+    apiMocks.createOrder.mockResolvedValue({
+      data: { data: { id: 'order-note', payment_method: 'cash', multicard_checkout_url: null } },
+    });
+    render(
+      <MemoryRouter>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    const noteInput = await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i);
+    expect(noteInput).toHaveAttribute('maxlength', '200');
+    await user.type(noteInput, `${note}y`);
+    expect(noteInput).toHaveValue(note);
+    expect(screen.getByText(/200 \/ 200/)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(1));
+    expect(apiMocks.createOrder.mock.calls[0][0]).toMatchObject({ comment: note });
+  });
+
+  it('refreshes auth for the phone gate without losing checkout state after the stable 409', async () => {
+    const user = userEvent.setup();
+    apiMocks.createOrder.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          detail: {
+            code: 'phone_verification_required',
+            message: 'Share your phone through Telegram before placing an order.',
+          },
+        },
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <LocationProbe />
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    const placeOrder = await screen.findByRole('button', { name: /place order|buyurtmani qabul qilish/i });
+    await user.click(placeOrder);
+    await waitFor(() => expect(authState.refreshMe).toHaveBeenCalledTimes(1));
+
+    expect(screen.getByTestId('location')).toHaveTextContent('/checkout');
+    expect(useCartStore.getState().items).toEqual([item]);
+    expect(screen.getByText(/share your phone through telegram|telegram orqali.*telefon|поделитесь.*telegram/i)).toBeVisible();
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+
+    await user.click(placeOrder);
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+    const retryPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(retryPayload.client_request_id).toBe(firstPayload.client_request_id);
+    expect(useTableOrderStore.getState().context?.accessToken).toBe('signed-table-token');
+  });
+
+  it('restores the checkout draft and request ID after the phone gate unmounts the route', async () => {
+    const user = userEvent.setup();
+    authState.user = {
+      ...authState.user,
+      inplace_online_payment_enabled: true,
+    };
+    apiMocks.createOrder
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { detail: { code: 'phone_verification_required' } },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: {
+            id: 'order-after-verification',
+            payment_method: 'rahmat',
+            multicard_checkout_url: null,
+          },
+        },
+      });
+    const firstView = render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    const noteInput = await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i);
+    await user.type(noteInput, 'Gate draft note');
+    await user.click(screen.getByRole('button', { name: /karta|online/i }));
+    await user.click(screen.getByRole('button', { name: /pay online|onlayn to'lash/i }));
+    await waitFor(() => expect(authState.refreshMe).toHaveBeenCalledTimes(1));
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+
+    firstView.unmount();
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i)).toHaveValue('Gate draft note');
+    await user.click(screen.getByRole('button', { name: /pay online|onlayn to'lash/i }));
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+    const secondPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(secondPayload).toMatchObject({
+      client_request_id: firstPayload.client_request_id,
+      comment: 'Gate draft note',
+      payment_method: 'rahmat',
+      table_access_token: 'signed-table-token',
+    });
   });
 
   it('uses an immediate pay-online CTA and opens the returned checkout', async () => {
     const user = userEvent.setup();
     authState.user = {
       telegram_id: 7301,
+      phone_number: '+998901112233',
+      phone_verified: true,
       inplace_online_payment_enabled: true,
     };
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
@@ -147,6 +295,8 @@ describe('ArtisanCheckoutPage table mode', () => {
     const user = userEvent.setup();
     authState.user = {
       telegram_id: 7301,
+      phone_number: '+998901112233',
+      phone_verified: true,
       inplace_online_payment_enabled: true,
     };
     apiMocks.createOrder.mockResolvedValue({
@@ -167,6 +317,8 @@ describe('ArtisanCheckoutPage table mode', () => {
     await user.click(await screen.findByRole('button', { name: /karta|online/i }));
     authState.user = {
       telegram_id: 7301,
+      phone_number: '+998901112233',
+      phone_verified: true,
       inplace_online_payment_enabled: false,
     };
     view.rerender(
@@ -372,24 +524,4 @@ describe('ArtisanCheckoutPage table mode', () => {
     expect(apiMocks.createOrder).toHaveBeenCalledTimes(1);
   });
 
-  it('lets a first-time table customer enter a phone number inline', async () => {
-    const user = userEvent.setup();
-    apiMocks.getMe.mockResolvedValue({ data: { data: { phone_number: null } } });
-    apiMocks.createOrder.mockResolvedValue({
-      data: { data: { id: 'order-first-time', payment_method: 'cash', multicard_checkout_url: null } },
-    });
-    render(
-      <MemoryRouter>
-        <ArtisanCheckoutPage />
-      </MemoryRouter>,
-    );
-
-    const phone = await screen.findByRole('textbox', { name: /telefon|phone/i });
-    await user.type(phone, '+998901234567');
-    await user.click(screen.getByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
-
-    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(1));
-    const payload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
-    expect(payload.phone_number).toBe('+998901234567');
-  });
 });

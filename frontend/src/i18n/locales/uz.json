@@ -35,7 +35,9 @@
     "network_error": "Telefoningizni tekshirib bo‘lmadi. Internetni tekshirib, qayta urinib ko‘ring.",
     "share": "Telefonni ulash",
     "share_again": "Telefonni qayta ulash",
-    "check_again": "Qayta tekshirish"
+    "check_again": "Qayta tekshirish",
+    "update": "Telegram orqali yangilash",
+    "unavailable": "Tasdiqlangan telefon mavjud emas"
   },
   "table": {
     "dine_in_prompt": "Stolda buyurtma berasizmi?",
@@ -112,6 +114,8 @@
     "subtotal": "Mahsulotlar",
     "service_charge": "Xizmat haqi",
     "cart_changed": "Menyu o'zgardi. Savatni tekshirib, qayta urinib ko'ring.",
+    "comment_count": "{{count}} / {{max}} belgi",
+    "phone_verification_required": "Buyurtma berishdan oldin telefoningizni Telegram orqali ulashing.",
     "error_phone": "Iltimos, telefon raqamingizni ulashing.",
     "error_address": "Iltimos, yetkazib berish manzilini tanlang yoki qo'shing.",
     "error_general": "Nimadir noto'g'ri ketdi. Iltimos, qayta urinib ko'ring.",

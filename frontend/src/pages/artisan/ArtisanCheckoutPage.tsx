@@ -3,12 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import ArtisanLayout, { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import MapPickerOverlay from '../../components/artisan/MapPickerOverlay';
-import { createAddress, createOrder, getAddresses, getMe } from '../../services/api';
+import { createAddress, createOrder, getAddresses } from '../../services/api';
+import { usePhoneVerification } from '../../hooks/usePhoneVerification';
 import { useAuthStore } from '../../stores/authStore';
 import { useCartStore } from '../../stores/cartStore';
 import { useMenuStore } from '../../stores/menuStore';
 import { useTableOrderStore } from '../../stores/tableOrderStore';
 import { formatPrice } from '../../utils/format';
+import { maskPhoneNumber } from '../../utils/phone';
 import type { Address, CreateOrderPayload } from '../../types/api';
 
 const tg = window.Telegram?.WebApp;
@@ -25,6 +27,15 @@ interface AddressFormState {
   label: string; address: string; entrance: string; apartment: string;
   floor: string; doorCode: string; instructions: string; lat: number | null; lng: number | null;
 }
+
+interface PhoneGateCheckoutDraft {
+  clientRequestId: string;
+  selectedAddressId: string | null;
+  comment: string;
+  paymentMethod: PaymentMethodKey;
+}
+
+let phoneGateCheckoutDraft: PhoneGateCheckoutDraft | null = null;
 
 const EMPTY_FORM: AddressFormState = {
   label: '', address: '', entrance: '', apartment: '',
@@ -78,34 +89,47 @@ export default function ArtisanCheckoutPage() {
   const grandTotal = total + serviceCharge;
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authenticate = useAuthStore((s) => s.authenticate);
-  const inplaceOnlinePaymentEnabled = useAuthStore((s) => s.user?.inplace_online_payment_enabled === true);
+  const authUser = useAuthStore((s) => s.user);
+  const refreshMe = useAuthStore((s) => s.refreshMe);
+  const { requestPhone } = usePhoneVerification({ autoRequest: false });
+  const inplaceOnlinePaymentEnabled = authUser?.inplace_online_payment_enabled === true;
+  const maskedPhone = authUser?.phone_verified && authUser.phone_number
+    ? maskPhoneNumber(authUser.phone_number)
+    : t('phone_verification.unavailable');
   const canPayOnline = !isTableOrder || inplaceOnlinePaymentEnabled;
   const paymentMethods = canPayOnline
     ? PAYMENT_METHODS
     : PAYMENT_METHODS.filter((method) => method.key === 'cash');
   const navigate = useNavigate();
+  const restoredDraft = useRef(phoneGateCheckoutDraft);
+  const preserveDraftOnUnmount = useRef(false);
 
-  const [phone, setPhone] = useState('');
   const [addresses, setAddresses] = useState<Address[]>([]);
-  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
-  const [comment, setComment] = useState('');
+  const [selectedAddressId, setSelectedAddressId] = useState<string | null>(
+    restoredDraft.current?.selectedAddressId ?? null,
+  );
+  const [comment, setComment] = useState(restoredDraft.current?.comment ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showMapPicker, setShowMapPicker] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<AddressFormState>(EMPTY_FORM);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethodKey>(
+    restoredDraft.current?.paymentMethod ?? 'cash',
+  );
   const [toast, setToast] = useState('');
-  const clientRequestId = useRef(createClientRequestId());
+  const clientRequestId = useRef(
+    restoredDraft.current?.clientRequestId ?? createClientRequestId(),
+  );
   const showToast = (msg: string): void => { setToast(msg); haptic?.notificationOccurred('error'); };
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 3000); return () => clearTimeout(t); }, [toast]);
   useEffect(() => {
     if (!canPayOnline && paymentMethod === 'rahmat') setPaymentMethod('cash');
   }, [canPayOnline, paymentMethod]);
 
-  const stateRef = useRef({ phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability });
-  stateRef.current = { phone, selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability };
+  const stateRef = useRef({ selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability, refreshMe });
+  stateRef.current = { selectedAddressId, addresses, comment, items, clearCart, navigate, submitting, paymentMethod, tableContext, refreshMenu, reconcileAvailability, refreshMe };
 
   useEffect(() => {
     const bb = tg?.BackButton;
@@ -117,6 +141,12 @@ export default function ArtisanCheckoutPage() {
 
   useEffect(() => { if (items.length === 0) navigate('/', { replace: true }); }, [items.length, navigate]);
 
+  useEffect(() => () => {
+    if (!preserveDraftOnUnmount.current) {
+      phoneGateCheckoutDraft = null;
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -127,15 +157,23 @@ export default function ArtisanCheckoutPage() {
 
     setLoading(true);
 
-    const addressesRequest = isTableOrder ? Promise.resolve(null) : getAddresses();
-    void Promise.all([getMe(), addressesRequest])
-      .then(([meRes, addrRes]) => {
+    if (isTableOrder) {
+      setAddresses([]);
+      setSelectedAddressId(null);
+      setLoading(false);
+      return;
+    }
+
+    void getAddresses()
+      .then((addrRes) => {
         if (cancelled) return;
-        const p = meRes.data.data?.phone_number;
-        if (p) setPhone(p);
-        const addrs = addrRes?.data.data || [];
+        const addrs = addrRes.data.data || [];
         setAddresses(addrs);
-        if (addrs.length > 0) setSelectedAddressId(addrs[0].id);
+        setSelectedAddressId((current) => (
+          current && addrs.some((address) => address.id === current)
+            ? current
+            : addrs[0]?.id ?? null
+        ));
       })
       .catch(console.error)
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -145,7 +183,6 @@ export default function ArtisanCheckoutPage() {
   const handlePlaceOrder = async () => {
     const s = stateRef.current;
     if (s.submitting) return;
-    if (!s.phone) { showToast(t('checkout.error_phone')); return; }
     const addr = s.tableContext
       ? null
       : s.addresses.find((a) => a.id === s.selectedAddressId);
@@ -162,7 +199,6 @@ export default function ArtisanCheckoutPage() {
           price: i.price,
           modifications: [],
         })),
-        phone_number: s.phone,
         comment: s.comment || undefined,
         payment_method: s.paymentMethod,
         discriminator: s.tableContext ? 'inplace' : 'delivery',
@@ -183,6 +219,8 @@ export default function ArtisanCheckoutPage() {
       ) {
         throw new Error('Order submission failed');
       }
+      phoneGateCheckoutDraft = null;
+      preserveDraftOnUnmount.current = false;
       haptic?.notificationOccurred('success');
 
       if (s.paymentMethod === 'rahmat' && orderData.multicard_checkout_url) {
@@ -198,7 +236,19 @@ export default function ArtisanCheckoutPage() {
     } catch (err) {
       console.error('Order failed:', err);
       const detail = (err as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response;
-      if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
+      if (detail?.status === 409 && detail.data?.detail?.code === 'phone_verification_required') {
+        phoneGateCheckoutDraft = {
+          clientRequestId: clientRequestId.current,
+          selectedAddressId: s.selectedAddressId,
+          comment: s.comment,
+          paymentMethod: s.paymentMethod,
+        };
+        preserveDraftOnUnmount.current = true;
+        showToast(t('checkout.phone_verification_required'));
+        await s.refreshMe();
+      } else if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
+        phoneGateCheckoutDraft = null;
+        preserveDraftOnUnmount.current = false;
         clientRequestId.current = createClientRequestId();
         await s.refreshMenu();
         const refreshed = useMenuStore.getState().menu;
@@ -301,18 +351,16 @@ export default function ArtisanCheckoutPage() {
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%' }}>
                 <Icon name="phone_iphone" style={{ color: COLORS.primaryContainer }} />
-                <input
-                  type="tel"
-                  aria-label={t('checkout.phone_label')}
-                  value={phone}
-                  onChange={(event) => setPhone(event.target.value)}
-                  placeholder={t('checkout.phone_placeholder')}
-                  autoComplete="tel"
-                  style={{
-                    flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent',
-                    fontWeight: 600, color: COLORS.onSurface, fontFamily: FONTS.body, fontSize: 16,
-                  }}
-                />
+                <span style={{ flex: 1, minWidth: 0, fontWeight: 600, color: COLORS.onSurface, fontFamily: FONTS.body, fontSize: 16 }}>
+                  {maskedPhone}
+                </span>
+                <button
+                  type="button"
+                  onClick={requestPhone}
+                  style={{ border: 'none', background: 'transparent', color: COLORS.primary, fontWeight: 700, cursor: 'pointer', fontFamily: FONTS.body }}
+                >
+                  {t('phone_verification.update')}
+                </button>
               </div>
             </div>
           </section>
@@ -595,6 +643,7 @@ export default function ArtisanCheckoutPage() {
               <textarea
                 placeholder={t('checkout.comment_placeholder')}
                 value={comment} onChange={(e) => setComment(e.target.value)}
+                maxLength={200}
                 rows={3}
                 style={{
                   width: '100%', backgroundColor: 'transparent', border: 'none', fontSize: 14, padding: 12,
@@ -602,6 +651,9 @@ export default function ArtisanCheckoutPage() {
                   boxSizing: 'border-box',
                 }}
               />
+              <div style={{ padding: '0 12px 8px', textAlign: 'right', color: COLORS.secondary, fontSize: 12 }}>
+                {t('checkout.comment_count', { count: comment.length, max: 200 })}
+              </div>
             </div>
           </section>
         </div>

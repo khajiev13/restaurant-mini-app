@@ -158,7 +158,6 @@ export interface CreateOrderPayload {
     price: number;
     modifications: unknown[];
   }>;
-  phone_number: string;
   delivery_address?: string;
   latitude?: string | null;
   longitude?: string | null;

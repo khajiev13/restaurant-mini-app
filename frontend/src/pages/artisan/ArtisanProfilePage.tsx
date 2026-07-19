@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../../stores/authStore';
+import { usePhoneVerification } from '../../hooks/usePhoneVerification';
 import ArtisanLayout, { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
-import { deleteAddress, getAddresses, getMe, getOrders, updateMe } from '../../services/api';
+import { deleteAddress, getAddresses, getOrders, updateMe } from '../../services/api';
 import { formatPrice, formatDate } from '../../utils/format';
+import { maskPhoneNumber } from '../../utils/phone';
 import type { Address, Order, User } from '../../types/api';
 
 const tg = window.Telegram?.WebApp;
@@ -28,6 +30,9 @@ function formatAddressDetails(a: Address) {
 function ProfileHeader({ user, onSharePhone }: { user: User; onSharePhone: () => void }) {
   const initial = (user.first_name?.[0] || '?').toUpperCase();
   const { t } = useTranslation();
+  const maskedPhone = user.phone_verified && user.phone_number
+    ? maskPhoneNumber(user.phone_number)
+    : t('phone_verification.unavailable');
   return (
     <section style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: '24px 0', gap: 16 }}>
       <div style={{ position: 'relative' }}>
@@ -62,35 +67,32 @@ function ProfileHeader({ user, onSharePhone }: { user: User; onSharePhone: () =>
           @{user.username || 'N/A'}
         </p>
       </div>
-      {user.phone_number ? (
-        <button
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }}>
+        <div
           style={{
             display: 'flex', alignItems: 'center', gap: 12, padding: '12px 24px',
             backgroundColor: COLORS.surfaceContainerLow, borderRadius: 12,
-            color: COLORS.onSurface, fontWeight: 600, border: 'none', cursor: 'pointer',
+            color: COLORS.onSurface, fontWeight: 600,
             fontFamily: FONTS.body, fontSize: 14,
           }}
         >
           <Icon name="phone_iphone" style={{ color: COLORS.primary }} />
-          <span>{user.phone_number}</span>
-        </button>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center' }}>
-          <p style={{ color: COLORS.error, margin: 0, fontSize: 13, fontWeight: 600 }}>{t('profile.no_phone', 'No phone number')}</p>
-          <button
-            onClick={onSharePhone}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 12, padding: '12px 24px',
-              background: 'linear-gradient(135deg, #a33800 0%, #ff7941 100%)', borderRadius: 12,
-              color: COLORS.onPrimary, fontWeight: 700, border: 'none', cursor: 'pointer',
-              fontFamily: FONTS.body, fontSize: 14, boxShadow: '0 4px 14px rgba(163, 56, 0, 0.3)',
-            }}
-          >
-            <Icon name="person_add" style={{ color: COLORS.onPrimary }} />
-            <span>{t('profile.share_phone', 'Share Phone to Login')}</span>
-          </button>
+          <span>{maskedPhone}</span>
         </div>
-      )}
+        <button
+          type="button"
+          onClick={onSharePhone}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 12, padding: '12px 24px',
+            background: 'linear-gradient(135deg, #a33800 0%, #ff7941 100%)', borderRadius: 12,
+            color: COLORS.onPrimary, fontWeight: 700, border: 'none', cursor: 'pointer',
+            fontFamily: FONTS.body, fontSize: 14,
+          }}
+        >
+          <Icon name="sync" style={{ color: COLORS.onPrimary }} />
+          <span>{t('phone_verification.update')}</span>
+        </button>
+      </div>
     </section>
   );
 }
@@ -172,7 +174,6 @@ function OrderCard({ order, onClick, language }: { order: Order; onClick: () => 
 // --- Main Profile Page ---
 export default function ArtisanProfilePage() {
   const { t, i18n } = useTranslation();
-  const [user, setUser] = useState<User | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [loading, setLoading] = useState(true);
@@ -180,9 +181,10 @@ export default function ArtisanProfilePage() {
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
 
-  const logout = useAuthStore((s) => s.logout);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authenticate = useAuthStore((s) => s.authenticate);
+  const user = useAuthStore((s) => s.user);
+  const { requestPhone } = usePhoneVerification({ autoRequest: false });
 
   useEffect(() => {
     const backButton = tg?.BackButton;
@@ -202,44 +204,15 @@ export default function ArtisanProfilePage() {
     }
 
     setLoading(true);
-    // Use allSettled so that if e.g. getOrders fails, we still get the user profile
-    void Promise.allSettled([getMe(), getOrders(), getAddresses()])
-      .then(([userRes, ordersRes, addressesRes]) => {
+    void Promise.allSettled([getOrders(), getAddresses()])
+      .then(([ordersRes, addressesRes]) => {
         if (cancelled) return;
-        if (userRes.status === 'fulfilled') setUser(userRes.value.data.data);
         if (ordersRes.status === 'fulfilled') setOrders(ordersRes.value.data.data);
         if (addressesRes.status === 'fulfilled') setAddresses(addressesRes.value.data.data || []);
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [isAuthenticated]);
-
-  const handleSharePhone = () => {
-    if (!tg?.requestContact) return;
-
-    const pollForPhone = async (attempts = 10) => {
-      for (let index = 0; index < attempts; index += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
-        try {
-          const res = await getMe();
-          const nextPhone = res.data.data?.phone_number;
-          if (nextPhone) {
-            setUser((current) => (current ? { ...current, phone_number: nextPhone } : current));
-            haptic?.notificationOccurred('success');
-            return;
-          }
-        } catch {
-          // Keep polling
-        }
-      }
-    };
-
-    tg.requestContact((shared) => {
-      if (shared) {
-        void pollForPhone();
-      }
-    });
-  };
 
   const handleDeleteAddress = (id: string) => {
     const remove = async () => {
@@ -328,7 +301,7 @@ export default function ArtisanProfilePage() {
       <main style={{ paddingTop: 80, paddingBottom: 96, paddingLeft: 16, paddingRight: 16, maxWidth: 672, margin: '0 auto' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
           {/* Profile Header */}
-          {user && <ProfileHeader user={user} onSharePhone={handleSharePhone} />}
+          {user && <ProfileHeader user={user} onSharePhone={requestPhone} />}
 
           {/* Saved Addresses */}
           <section style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -427,31 +400,6 @@ export default function ArtisanProfilePage() {
             </div>
           </section>
 
-          {/* Logout Button */}
-          <section style={{ paddingBottom: 24 }}>
-            <button
-              onClick={logout}
-              style={{
-                width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8,
-                padding: 16,
-                backgroundColor: 'rgba(179, 27, 37, 0.1)',
-                color: '#b31b25',
-                border: `1px solid rgba(179, 27, 37, 0.2)`,
-                borderRadius: 16,
-                fontFamily: FONTS.headline,
-                fontWeight: 700,
-                fontSize: 16,
-                cursor: 'pointer',
-              }}
-            >
-              <Icon name="logout" style={{ fontSize: 20 }} />
-              {t('profile.logout', 'Log Out')}
-            </button>
-          </section>
         </div>
       </main>
     </ArtisanLayout>

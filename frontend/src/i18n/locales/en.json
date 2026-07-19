@@ -35,7 +35,9 @@
     "network_error": "We could not check your phone. Check your connection and try again.",
     "share": "Share phone",
     "share_again": "Share phone again",
-    "check_again": "Check again"
+    "check_again": "Check again",
+    "update": "Update through Telegram",
+    "unavailable": "Verified phone unavailable"
   },
   "table": {
     "dine_in_prompt": "Ordering at a table?",
@@ -112,6 +114,8 @@
     "subtotal": "Items",
     "service_charge": "Service charge",
     "cart_changed": "The menu changed. Review your cart and try again.",
+    "comment_count": "{{count}} / {{max}} characters",
+    "phone_verification_required": "Share your phone through Telegram before placing an order.",
     "error_phone": "Please share your phone number.",
     "error_address": "Please select or add a delivery address.",
     "error_general": "Something went wrong. Please try again.",
