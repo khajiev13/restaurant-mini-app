@@ -103,6 +103,7 @@ export default function ArtisanCheckoutPage() {
   const navigate = useNavigate();
   const restoredDraft = useRef(phoneGateCheckoutDraft);
   const preserveDraftOnUnmount = useRef(false);
+  const mounted = useRef(false);
 
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(
@@ -141,10 +142,14 @@ export default function ArtisanCheckoutPage() {
 
   useEffect(() => { if (items.length === 0) navigate('/', { replace: true }); }, [items.length, navigate]);
 
-  useEffect(() => () => {
-    if (!preserveDraftOnUnmount.current) {
-      phoneGateCheckoutDraft = null;
-    }
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (!preserveDraftOnUnmount.current) {
+        phoneGateCheckoutDraft = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -237,15 +242,18 @@ export default function ArtisanCheckoutPage() {
       console.error('Order failed:', err);
       const detail = (err as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response;
       if (detail?.status === 409 && detail.data?.detail?.code === 'phone_verification_required') {
-        phoneGateCheckoutDraft = {
+        const gateDraft = {
           clientRequestId: clientRequestId.current,
           selectedAddressId: s.selectedAddressId,
           comment: s.comment,
           paymentMethod: s.paymentMethod,
         };
-        preserveDraftOnUnmount.current = true;
         showToast(t('checkout.phone_verification_required'));
-        await s.refreshMe();
+        const refreshedProfile = await s.refreshMe();
+        if (mounted.current && refreshedProfile?.phone_verified === false) {
+          phoneGateCheckoutDraft = gateDraft;
+          preserveDraftOnUnmount.current = true;
+        }
       } else if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
         phoneGateCheckoutDraft = null;
         preserveDraftOnUnmount.current = false;

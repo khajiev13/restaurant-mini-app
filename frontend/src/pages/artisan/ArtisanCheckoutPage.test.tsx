@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -57,6 +57,14 @@ const item = {
 
 function LocationProbe() {
   return <div data-testid="location">{useLocation().pathname}</div>;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 describe('ArtisanCheckoutPage table mode', () => {
@@ -224,6 +232,10 @@ describe('ArtisanCheckoutPage table mode', () => {
           },
         },
       });
+    authState.refreshMe.mockResolvedValueOnce({
+      ...authState.user,
+      phone_verified: false,
+    });
     const firstView = render(
       <MemoryRouter initialEntries={['/checkout']}>
         <ArtisanCheckoutPage />
@@ -233,8 +245,10 @@ describe('ArtisanCheckoutPage table mode', () => {
     const noteInput = await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i);
     await user.type(noteInput, 'Gate draft note');
     await user.click(screen.getByRole('button', { name: /karta|online/i }));
-    await user.click(screen.getByRole('button', { name: /pay online|onlayn to'lash/i }));
+    const payOnline = screen.getByRole('button', { name: /pay online|onlayn to'lash/i });
+    await user.click(payOnline);
     await waitFor(() => expect(authState.refreshMe).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(payOnline).toBeEnabled());
     const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
 
     firstView.unmount();
@@ -254,6 +268,111 @@ describe('ArtisanCheckoutPage table mode', () => {
       payment_method: 'rahmat',
       table_access_token: 'signed-table-token',
     });
+  });
+
+  it('does not preserve a draft when checkout unmounts before unverified refresh resolves', async () => {
+    const user = userEvent.setup();
+    const refresh = deferred<unknown>();
+    authState.user = {
+      ...authState.user,
+      inplace_online_payment_enabled: true,
+    };
+    authState.refreshMe.mockReturnValueOnce(refresh.promise);
+    apiMocks.createOrder
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { detail: { code: 'phone_verification_required' } },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: { data: { id: 'new-order', payment_method: 'cash', multicard_checkout_url: null } },
+      });
+    const firstView = render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    await user.type(
+      await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i),
+      'Must not return',
+    );
+    await user.click(screen.getByRole('button', { name: /karta|online/i }));
+    await user.click(screen.getByRole('button', { name: /pay online|onlayn to'lash/i }));
+    await waitFor(() => expect(authState.refreshMe).toHaveBeenCalledTimes(1));
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+
+    firstView.unmount();
+    await act(async () => {
+      refresh.resolve({ ...authState.user, phone_verified: false });
+      await refresh.promise;
+    });
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i)).toHaveValue('');
+    await user.click(screen.getByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+    const secondPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(secondPayload.client_request_id).not.toBe(firstPayload.client_request_id);
+    expect(secondPayload.comment).toBeUndefined();
+    expect(secondPayload.payment_method).toBe('cash');
+  });
+
+  it('does not preserve a draft when refreshed profile is already verified', async () => {
+    const user = userEvent.setup();
+    authState.user = {
+      ...authState.user,
+      inplace_online_payment_enabled: true,
+    };
+    authState.refreshMe.mockResolvedValueOnce({
+      ...authState.user,
+      phone_verified: true,
+    });
+    apiMocks.createOrder
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { detail: { code: 'phone_verification_required' } },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: { data: { id: 'verified-order', payment_method: 'cash', multicard_checkout_url: null } },
+      });
+    const firstView = render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    await user.type(
+      await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i),
+      'Verified draft',
+    );
+    await user.click(screen.getByRole('button', { name: /karta|online/i }));
+    const payOnline = screen.getByRole('button', { name: /pay online|onlayn to'lash/i });
+    await user.click(payOnline);
+    await waitFor(() => expect(payOnline).toBeEnabled());
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+
+    firstView.unmount();
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <ArtisanCheckoutPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i)).toHaveValue('');
+    await user.click(screen.getByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+    const secondPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(secondPayload.client_request_id).not.toBe(firstPayload.client_request_id);
+    expect(secondPayload.comment).toBeUndefined();
+    expect(secondPayload.payment_method).toBe('cash');
   });
 
   it('uses an immediate pay-online CTA and opens the returned checkout', async () => {
