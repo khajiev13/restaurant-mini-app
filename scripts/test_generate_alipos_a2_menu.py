@@ -113,3 +113,57 @@ def test_four_named_color_variants_are_available():
         "black-copper",
         "ivory-green",
     ]
+
+
+def test_panel_default_uses_the_active_palette_color():
+    class RecordingCanvas:
+        def __init__(self):
+            self.fill_colors = []
+
+        def setFillColor(self, color):
+            self.fill_colors.append(color)
+
+        def setStrokeColor(self, _color):
+            pass
+
+        def setLineWidth(self, _width):
+            pass
+
+        def roundRect(self, *_args, **_kwargs):
+            pass
+
+    pdf = RecordingCanvas()
+    renderer._set_palette("ivory-green")
+    try:
+        renderer._draw_panel(pdf, 0, 0, 100, 100)
+    finally:
+        renderer._set_palette("teal-gold")
+
+    assert pdf.fill_colors[0] == renderer.PALETTES["ivory-green"]["panel"]
+
+
+def test_ivory_section_header_uses_light_text_on_green():
+    class RecordingCanvas:
+        def __init__(self):
+            self.fill_colors = []
+
+        def setFillColor(self, color):
+            self.fill_colors.append(color)
+
+        def roundRect(self, *_args, **_kwargs):
+            pass
+
+        def setFont(self, *_args, **_kwargs):
+            pass
+
+        def drawString(self, *_args, **_kwargs):
+            pass
+
+    pdf = RecordingCanvas()
+    renderer._set_palette("ivory-green")
+    try:
+        renderer._draw_section_header(pdf, "OVQATLAR", 0, 100, 200)
+    finally:
+        renderer._set_palette("teal-gold")
+
+    assert pdf.fill_colors[1] == renderer.HexColor("#fff9ed")

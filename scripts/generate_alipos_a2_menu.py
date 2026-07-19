@@ -23,6 +23,7 @@ PALETTES = {
         "panel": HexColor("#0a4143"),
         "panel_dark": HexColor("#07383b"),
         "accent": HexColor("#ef7f2c"),
+        "accent_text": HexColor("#fff6df"),
         "price": HexColor("#f3c65f"),
         "text": HexColor("#fff6df"),
         "muted": HexColor("#b8d3cb"),
@@ -33,6 +34,7 @@ PALETTES = {
         "panel": HexColor("#571827"),
         "panel_dark": HexColor("#2a0911"),
         "accent": HexColor("#b7793d"),
+        "accent_text": HexColor("#fff3de"),
         "price": HexColor("#f2d18b"),
         "text": HexColor("#fff3de"),
         "muted": HexColor("#d9b9a9"),
@@ -43,6 +45,7 @@ PALETTES = {
         "panel": HexColor("#24211f"),
         "panel_dark": HexColor("#0d0d0d"),
         "accent": HexColor("#b56332"),
+        "accent_text": HexColor("#f7efe3"),
         "price": HexColor("#e2b66e"),
         "text": HexColor("#f7efe3"),
         "muted": HexColor("#bdb4a8"),
@@ -53,6 +56,7 @@ PALETTES = {
         "panel": HexColor("#fff9ed"),
         "panel_dark": HexColor("#e8ddc5"),
         "accent": HexColor("#1c5c47"),
+        "accent_text": HexColor("#fff9ed"),
         "price": HexColor("#b86a2e"),
         "text": HexColor("#173d32"),
         "muted": HexColor("#667c70"),
@@ -64,6 +68,7 @@ BACKGROUND = PALETTES["teal-gold"]["background"]
 PANEL = PALETTES["teal-gold"]["panel"]
 PANEL_DARK = PALETTES["teal-gold"]["panel_dark"]
 ORANGE = PALETTES["teal-gold"]["accent"]
+ACCENT_TEXT = PALETTES["teal-gold"]["accent_text"]
 GOLD = PALETTES["teal-gold"]["price"]
 CREAM = PALETTES["teal-gold"]["text"]
 MUTED = PALETTES["teal-gold"]["muted"]
@@ -79,11 +84,12 @@ GENERATED_FOOD_ASSETS = {
 
 def _set_palette(name: str) -> None:
     colors = PALETTES[name]
-    global BACKGROUND, PANEL, PANEL_DARK, ORANGE, GOLD, CREAM, MUTED, LINE
+    global BACKGROUND, PANEL, PANEL_DARK, ORANGE, ACCENT_TEXT, GOLD, CREAM, MUTED, LINE
     BACKGROUND = colors["background"]
     PANEL = colors["panel"]
     PANEL_DARK = colors["panel_dark"]
     ORANGE = colors["accent"]
+    ACCENT_TEXT = colors["accent_text"]
     GOLD = colors["price"]
     CREAM = colors["text"]
     MUTED = colors["muted"]
@@ -137,9 +143,9 @@ def _draw_panel(
     width: float,
     height: float,
     *,
-    fill=PANEL,
+    fill=None,
 ) -> None:
-    pdf.setFillColor(fill)
+    pdf.setFillColor(PANEL if fill is None else fill)
     pdf.setStrokeColor(LINE)
     pdf.setLineWidth(1.4)
     pdf.roundRect(x, y, width, height, 22, stroke=1, fill=1)
@@ -156,7 +162,7 @@ def _draw_section_header(
 ) -> None:
     pdf.setFillColor(ORANGE)
     pdf.roundRect(x, top - 48, width, 48, 15, stroke=0, fill=1)
-    pdf.setFillColor(CREAM)
+    pdf.setFillColor(ACCENT_TEXT)
     pdf.setFont("Helvetica-Bold", font_size)
     pdf.drawString(x + 16, top - 33, title)
 
@@ -363,7 +369,7 @@ def _draw_header(pdf: canvas.Canvas) -> None:
         stroke=0,
         fill=1,
     )
-    pdf.setFillColor(CREAM)
+    pdf.setFillColor(ACCENT_TEXT)
     pdf.setFont("Helvetica-Bold", 16)
     pdf.drawCentredString(title_center, header_y + 135, "NARXLAR SO'MDA")
     pdf.setFillColor(MUTED)
