@@ -202,6 +202,10 @@
     "delivery": "Доставка",
     "inplace": "На месте"
   },
+  "admin_users": {
+    "phone_verified": "Подтверждён",
+    "phone_unverified": "Не подтверждён"
+  },
   "staff_tables": {
     "nav_admin": "Админ",
     "nav_tables": "Столы",

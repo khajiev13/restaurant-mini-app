@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import StaffLayout from '../../components/staff/StaffLayout';
 import { COLORS, FONTS, Icon } from '../../components/artisan/ArtisanLayout';
 import { searchAdminUsers, updateAdminUserRole } from '../../services/adminApi';
@@ -22,6 +23,7 @@ function getApiErrorMessage(error: unknown, fallback: string): string {
 }
 
 export default function AdminUsersPage() {
+  const { t } = useTranslation();
   const currentAuthUser = useAuthStore((state) => state.user);
   const refreshMe = useAuthStore((state) => state.refreshMe);
   const [query, setQuery] = useState('');
@@ -197,7 +199,13 @@ export default function AdminUsersPage() {
                     <p style={{ margin: '6px 0 0', color: COLORS.secondary }}>@{user.username}</p>
                   ) : null}
                   <p style={{ margin: '6px 0 0', color: COLORS.onSurfaceVariant }}>
-                    {user.phone_number ?? 'No phone'} · {user.telegram_id}
+                    {user.phone_number ?? 'No phone'}
+                    {user.phone_number
+                      ? ` (${t(user.phone_verified
+                        ? 'admin_users.phone_verified'
+                        : 'admin_users.phone_unverified')})`
+                      : ''}
+                    {' · '}{user.telegram_id}
                   </p>
                 </div>
 

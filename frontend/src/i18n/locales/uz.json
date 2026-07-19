@@ -202,6 +202,10 @@
     "delivery": "Yetkazib berish",
     "inplace": "O'rinda"
   },
+  "admin_users": {
+    "phone_verified": "Tasdiqlangan",
+    "phone_unverified": "Tasdiqlanmagan"
+  },
   "staff_tables": {
     "nav_admin": "Admin",
     "nav_tables": "Stollar",

@@ -18,7 +18,9 @@ export interface BaseUser {
   role: 'customer' | 'staff' | 'admin';
 }
 
-export type AdminUser = BaseUser;
+export interface AdminUser extends BaseUser {
+  phone_verified: boolean;
+}
 
 export interface User extends BaseUser {
   phone_verified: boolean;

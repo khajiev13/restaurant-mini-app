@@ -9,6 +9,7 @@ const adminUserWithoutSelfCapability = {
   last_name: 'Khajiev',
   username: 'khajiev13',
   phone_number: '8613269797807',
+  phone_verified: false,
   language: 'en',
   role: 'customer' as const,
 } satisfies AdminApiUser;

@@ -21,6 +21,8 @@ const PAYMENT_METHODS = [
   { key: 'rahmat', icon: 'credit_card', color: '#0369a1' },
 ] as const;
 
+const MAX_COMMENT_CODE_POINTS = 200;
+
 type PaymentMethodKey = typeof PAYMENT_METHODS[number]['key'];
 
 interface AddressFormState {
@@ -49,6 +51,10 @@ function createClientRequestId(): string {
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+function truncateCodePoints(value: string, max: number): string {
+  return Array.from(value).slice(0, max).join('');
 }
 
 
@@ -147,9 +153,16 @@ export default function ArtisanCheckoutPage() {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      const authState = useAuthStore.getState();
+      const authRefreshFailed = (
+        authState.user === null
+        && authState.authError !== null
+        && !authState.hasHydratedUser
+        && authState.hasResolvedInitialAuth
+      );
       if (
         pendingGateDraft.current
-        && useAuthStore.getState().user?.phone_verified === false
+        && (authState.user?.phone_verified === false || authRefreshFailed)
       ) {
         phoneGateCheckoutDraft = pendingGateDraft.current;
         preserveDraftOnUnmount.current = true;
@@ -666,8 +679,8 @@ export default function ArtisanCheckoutPage() {
             }}>
               <textarea
                 placeholder={t('checkout.comment_placeholder')}
-                value={comment} onChange={(e) => setComment(e.target.value)}
-                maxLength={200}
+                value={comment}
+                onChange={(e) => setComment(truncateCodePoints(e.target.value, MAX_COMMENT_CODE_POINTS))}
                 rows={3}
                 style={{
                   width: '100%', backgroundColor: 'transparent', border: 'none', fontSize: 14, padding: 12,
@@ -676,7 +689,10 @@ export default function ArtisanCheckoutPage() {
                 }}
               />
               <div style={{ padding: '0 12px 8px', textAlign: 'right', color: COLORS.secondary, fontSize: 12 }}>
-                {t('checkout.comment_count', { count: comment.length, max: 200 })}
+                {t('checkout.comment_count', {
+                  count: Array.from(comment).length,
+                  max: MAX_COMMENT_CODE_POINTS,
+                })}
               </div>
             </div>
           </section>

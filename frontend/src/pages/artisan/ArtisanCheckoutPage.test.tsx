@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -153,9 +153,9 @@ describe('ArtisanCheckoutPage table mode', () => {
     expect(phoneVerification.requestPhone).toHaveBeenCalledTimes(1);
   });
 
-  it('limits the exact customer note to 200 characters and sends it unchanged', async () => {
+  it('limits the exact customer note to 200 Unicode code points and sends it unchanged', async () => {
     const user = userEvent.setup();
-    const note = 'x'.repeat(200);
+    const note = '😀'.repeat(200);
     apiMocks.createOrder.mockResolvedValue({
       data: { data: { id: 'order-note', payment_method: 'cash', multicard_checkout_url: null } },
     });
@@ -166,8 +166,8 @@ describe('ArtisanCheckoutPage table mode', () => {
     );
 
     const noteInput = await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i);
-    expect(noteInput).toHaveAttribute('maxlength', '200');
-    await user.type(noteInput, `${note}y`);
+    expect(noteInput).not.toHaveAttribute('maxlength');
+    fireEvent.change(noteInput, { target: { value: `${note}😎` } });
     expect(noteInput).toHaveValue(note);
     expect(screen.getByText(/200 \/ 200/)).toBeVisible();
 

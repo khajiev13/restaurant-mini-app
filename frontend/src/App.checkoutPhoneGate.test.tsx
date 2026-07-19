@@ -6,7 +6,7 @@ import App from './App';
 import { useAuthStore } from './stores/authStore';
 import { useCartStore } from './stores/cartStore';
 import { useTableOrderStore } from './stores/tableOrderStore';
-import type { CreateOrderPayload, User } from './types/api';
+import type { Address, CreateOrderPayload, User } from './types/api';
 
 const apiMocks = vi.hoisted(() => ({
   authenticateTelegram: vi.fn(),
@@ -56,6 +56,35 @@ const item = {
   availableCount: null,
   quantity: 2,
 };
+
+const addresses: Address[] = [
+  {
+    id: 'address-home',
+    label: 'Home',
+    full_address: '1 Home Street',
+    latitude: null,
+    longitude: null,
+    entrance: null,
+    apartment: null,
+    floor: null,
+    door_code: null,
+    courier_instructions: null,
+    is_default: true,
+  },
+  {
+    id: 'address-work',
+    label: 'Work',
+    full_address: '2 Work Avenue',
+    latitude: null,
+    longitude: null,
+    entrance: null,
+    apartment: null,
+    floor: null,
+    door_code: null,
+    courier_instructions: null,
+    is_default: false,
+  },
+];
 
 describe('App checkout phone-gate transition', () => {
   beforeEach(() => {
@@ -120,6 +149,8 @@ describe('App checkout phone-gate transition', () => {
     expect(await screen.findByRole('heading', { name: /verify your phone|telefoningizni tasdiqlang|подтвердите телефон/i })).toBeVisible();
     expect(apiMocks.getMe).toHaveBeenCalledTimes(1);
     const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+    expect(useCartStore.getState().items).toEqual([item]);
+    expect(useTableOrderStore.getState().context?.accessToken).toBe('signed-table-token');
 
     act(() => {
       useAuthStore.setState({ user: verifiedUser });
@@ -135,5 +166,90 @@ describe('App checkout phone-gate transition', () => {
       payment_method: 'rahmat',
       table_access_token: 'signed-table-token',
     });
+  });
+
+  it('restores the delivery draft after a real refresh failure and auth retry', async () => {
+    const user = userEvent.setup();
+    const exactNote = 'Keep address through auth retry';
+    let completeContactRequest: ((shared: boolean) => void) | undefined;
+    useTableOrderStore.setState({ context: null, isResolving: false, error: null });
+    apiMocks.getAddresses.mockResolvedValue({ data: { data: addresses } });
+    apiMocks.getMe
+      .mockRejectedValueOnce(new Error('network unavailable'))
+      .mockResolvedValueOnce({
+        data: { data: { ...verifiedUser, phone_verified: false } },
+      })
+      .mockResolvedValueOnce({ data: { data: verifiedUser } });
+    apiMocks.authenticateTelegram.mockResolvedValue({
+      data: { data: { access_token: 'recovered-token' } },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByText('Work'));
+    const noteInput = screen.getByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i);
+    await user.type(noteInput, exactNote);
+    await user.click(screen.getByRole('button', { name: /karta|online/i }));
+    await user.click(screen.getByRole('button', { name: /pay online|onlayn to'lash/i }));
+
+    const retry = await screen.findByRole('button', { name: /retry|qayta|повтор/i });
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+    expect(firstPayload).toMatchObject({
+      address_id: 'address-work',
+      comment: exactNote,
+      payment_method: 'rahmat',
+    });
+    expect(useAuthStore.getState()).toMatchObject({
+      user: null,
+      authError: 'auth.retry_message',
+      hasHydratedUser: false,
+      hasResolvedInitialAuth: true,
+    });
+    expect(useCartStore.getState().items).toEqual([item]);
+    expect(useTableOrderStore.getState().context).toBeNull();
+
+    (window as Window & { Telegram?: unknown }).Telegram = {
+      WebApp: {
+        initData: 'retry-init-data',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        setHeaderColor: vi.fn(),
+        setBackgroundColor: vi.fn(),
+        setBottomBarColor: vi.fn(),
+        disableVerticalSwipes: vi.fn(),
+        isVersionAtLeast: vi.fn(() => true),
+        requestContact: vi.fn((callback: (shared: boolean) => void) => {
+          completeContactRequest = callback;
+        }),
+      },
+    } as unknown as typeof window.Telegram;
+    await user.click(retry);
+
+    expect(await screen.findByRole('heading', { name: /verify your phone|telefoningizni tasdiqlang|подтвердите телефон/i })).toBeVisible();
+    const sharePhone = screen.queryByRole('button', { name: /share phone|telefonni ulashish|поделиться телефоном/i });
+    if (sharePhone) {
+      await user.click(sharePhone);
+    }
+    await waitFor(() => expect(completeContactRequest).toBeTypeOf('function'));
+    act(() => {
+      completeContactRequest?.(true);
+    });
+
+    expect(await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i)).toHaveValue(exactNote);
+    await user.click(screen.getByRole('button', { name: /pay online|onlayn to'lash/i }));
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+    const secondPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(secondPayload).toMatchObject({
+      client_request_id: firstPayload.client_request_id,
+      address_id: 'address-work',
+      comment: exactNote,
+      payment_method: 'rahmat',
+    });
+    expect(apiMocks.authenticateTelegram).toHaveBeenCalledWith('retry-init-data');
+    expect(apiMocks.getMe).toHaveBeenCalledTimes(3);
   });
 });
