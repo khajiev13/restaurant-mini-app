@@ -32,10 +32,10 @@ function classifyPhoneVerificationEnvironment(): PhoneVerificationEnvironment {
     return { status: 'outside_telegram' };
   }
 
-  const requestContact = telegram.requestContact;
-  if (typeof requestContact !== 'function' || typeof telegram.isVersionAtLeast !== 'function') {
+  if (typeof telegram.requestContact !== 'function' || typeof telegram.isVersionAtLeast !== 'function') {
     return { status: 'unsupported' };
   }
+  const requestContact = telegram.requestContact.bind(telegram);
 
   try {
     if (telegram.isVersionAtLeast('6.9') !== true) {
@@ -47,7 +47,7 @@ function classifyPhoneVerificationEnvironment(): PhoneVerificationEnvironment {
 
   return {
     status: 'ready',
-    requestContact: (callback) => requestContact.call(telegram, callback),
+    requestContact,
   };
 }
 

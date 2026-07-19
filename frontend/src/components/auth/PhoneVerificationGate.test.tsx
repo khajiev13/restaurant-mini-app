@@ -2,11 +2,10 @@ import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '../../i18n';
-import type { PhoneVerificationStatus } from '../../hooks/usePhoneVerification';
 import PhoneVerificationGate from './PhoneVerificationGate';
 
 const controller = vi.hoisted(() => ({
-  status: 'ready' as PhoneVerificationStatus,
+  status: 'ready',
   requestPhone: vi.fn(),
   checkAgain: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
 }));
