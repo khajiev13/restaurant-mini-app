@@ -52,3 +52,19 @@ def test_build_menu_pdf_is_one_a2_portrait_page(tmp_path: Path):
     assert len(reader.pages) == 1
     assert abs(float(page.mediabox.width) - 1190.55) < 0.6
     assert abs(float(page.mediabox.height) - 1683.78) < 0.6
+
+
+def test_build_menu_pdf_uses_customer_facing_header_copy(tmp_path: Path):
+    menu = {
+        "categories": [{"id": "food", "name": "ovqat"}],
+        "items": [
+            {"id": "1", "categoryId": "food", "name": "Osh", "price": 30000}
+        ],
+    }
+    output = tmp_path / "menu.pdf"
+
+    renderer.build_menu_pdf(menu, output, tmp_path / "images")
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
+    assert "OLOT SOMSA" in text
+    assert "AliPOSdagi" not in text

@@ -298,7 +298,7 @@ def _draw_header(pdf: canvas.Canvas, menu: dict, cache_dir: Path) -> None:
     pdf.drawCentredString(title_x + 127, header_y + 140, "NARXLAR SO'MDA")
     pdf.setFillColor(MUTED)
     pdf.setFont("Helvetica", 13)
-    pdf.drawString(title_x, header_y + 93, "AliPOSdagi joriy taomlar va narxlar")
+    pdf.drawString(title_x, header_y + 93, "OLOT SOMSA")
 
     photo_items = _select_photo_items(menu, ("1 kg Osh", "Mastava", "Fri"))
     photo_size = 132
@@ -334,7 +334,7 @@ def _draw_food_panel(
     inner_gap = 24
     inner_width = (width - 36 - inner_gap) / 2
     start_y = y + height - 101
-    line_height = min(51, (height - 135) / max(split_at, 1))
+    line_height = min(62, (height - 190) / max(split_at - 1, 1))
     for column_index, column_items in enumerate(columns):
         item_x = x + 18 + column_index * (inner_width + inner_gap)
         for row_index, item in enumerate(column_items):
@@ -389,7 +389,7 @@ def _draw_list_panel(
     header_size = 21 if len(title) > 10 else 24
     _draw_section_header(pdf, title, x + 18, y + height - 18, width - 36, font_size=header_size)
     start_y = y + height - 101
-    line_height = min(68, (height - 132) / max(len(items), 1))
+    line_height = min(92, (height - 190) / max(len(items) - 1, 1))
     for row_index, item in enumerate(items):
         _draw_item_row(
             pdf,
