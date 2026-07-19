@@ -18,6 +18,7 @@ from app.services.table_access_service import (
     InvalidTableDirectory,
     InvalidTableEntry,
     TableAccessService,
+    parse_numeric_qr_compat_signatures,
 )
 
 router = APIRouter(prefix="/tables", tags=["tables"])
@@ -26,6 +27,9 @@ table_access = TableAccessService(
     secret=settings.effective_table_access_secret,
     bot_username=settings.telegram_bot_username,
     access_ttl_seconds=settings.table_access_ttl_seconds,
+    numeric_qr_compat_signatures=parse_numeric_qr_compat_signatures(
+        settings.table_qr_compat_signatures
+    ),
 )
 TABLE_DIRECTORY_UNAVAILABLE = "Table directory is temporarily unavailable"
 

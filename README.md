@@ -315,6 +315,8 @@ docker compose exec -T postgres \
 
 Use a separate production `TABLE_ACCESS_SECRET` generated with `openssl rand -hex 32`. Rotating it invalidates printed QR signatures and active table sessions, so regenerate and reprint the manifest after rotation.
 
+If already printed `t2_` stickers must survive an unavoidable secret rotation, `TABLE_QR_COMPAT_SIGNATURES` can temporarily list their exact public `code:signature` pairs separated by commas. Current-secret HMAC verification remains primary, and only an exact configured pair is accepted. Never use a wildcard or replace this setting with an unsigned table-code bypass; remove the compatibility entries after the affected stickers are retired.
+
 ---
 
 ## Troubleshooting
