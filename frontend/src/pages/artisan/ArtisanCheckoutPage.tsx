@@ -103,6 +103,7 @@ export default function ArtisanCheckoutPage() {
   const navigate = useNavigate();
   const restoredDraft = useRef(phoneGateCheckoutDraft);
   const preserveDraftOnUnmount = useRef(false);
+  const pendingGateDraft = useRef<PhoneGateCheckoutDraft | null>(null);
   const mounted = useRef(false);
 
   const [addresses, setAddresses] = useState<Address[]>([]);
@@ -146,6 +147,14 @@ export default function ArtisanCheckoutPage() {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (
+        pendingGateDraft.current
+        && useAuthStore.getState().user?.phone_verified === false
+      ) {
+        phoneGateCheckoutDraft = pendingGateDraft.current;
+        preserveDraftOnUnmount.current = true;
+      }
+      pendingGateDraft.current = null;
       if (!preserveDraftOnUnmount.current) {
         phoneGateCheckoutDraft = null;
       }
@@ -224,6 +233,7 @@ export default function ArtisanCheckoutPage() {
       ) {
         throw new Error('Order submission failed');
       }
+      pendingGateDraft.current = null;
       phoneGateCheckoutDraft = null;
       preserveDraftOnUnmount.current = false;
       haptic?.notificationOccurred('success');
@@ -248,13 +258,19 @@ export default function ArtisanCheckoutPage() {
           comment: s.comment,
           paymentMethod: s.paymentMethod,
         };
+        pendingGateDraft.current = gateDraft;
         showToast(t('checkout.phone_verification_required'));
         const refreshedProfile = await s.refreshMe();
-        if (mounted.current && refreshedProfile?.phone_verified === false) {
+        if (!mounted.current) {
+          return;
+        }
+        pendingGateDraft.current = null;
+        if (refreshedProfile?.phone_verified === false) {
           phoneGateCheckoutDraft = gateDraft;
           preserveDraftOnUnmount.current = true;
         }
       } else if (detail?.status === 409 && detail.data?.detail?.code === 'cart_conflict') {
+        pendingGateDraft.current = null;
         phoneGateCheckoutDraft = null;
         preserveDraftOnUnmount.current = false;
         clientRequestId.current = createClientRequestId();

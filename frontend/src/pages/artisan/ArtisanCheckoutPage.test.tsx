@@ -35,9 +35,11 @@ const authState = vi.hoisted(() => ({
 }));
 
 vi.mock('../../services/api', () => apiMocks);
-vi.mock('../../stores/authStore', () => ({
-  useAuthStore: (selector: (state: typeof authState) => unknown) => selector(authState),
-}));
+vi.mock('../../stores/authStore', () => {
+  const useAuthStore = (selector: (state: typeof authState) => unknown) => selector(authState);
+  useAuthStore.getState = () => authState;
+  return { useAuthStore };
+});
 vi.mock('../../hooks/usePhoneVerification', () => ({
   usePhoneVerification: () => phoneVerification,
 }));
