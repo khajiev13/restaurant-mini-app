@@ -563,27 +563,29 @@ Expected: restart counts remain zero and both public routes still return HTTP
 First run locally:
 
 ```bash
+printf '%s\n' \
+  'test -d /home/khajiev13/apps/restaurant-mini-app && echo reachable' |
 ssh -o BatchMode=yes -o ConnectTimeout=10 restaurant \
-  "wsl.exe -d Ubuntu -- bash -lc 'test -d /home/khajiev13/apps/restaurant-mini-app && echo reachable'"
+  "wsl.exe -d Ubuntu -- bash -s"
 ```
 
 If it prints `reachable`, run:
 
 ```bash
+printf '%s\n' \
+  'set -eu' \
+  'cd /home/khajiev13/apps/restaurant-mini-app' \
+  'cutover_id=20260719-home-migration' \
+  'install -m 600 .env .env.before-$cutover_id' \
+  'if grep -q "^CLOUDFLARE_TUNNEL_TOKEN=" .env; then' \
+  '  sed -i "s/^CLOUDFLARE_TUNNEL_TOKEN=.*/CLOUDFLARE_TUNNEL_TOKEN=disabled-on-restaurant/" .env' \
+  'else' \
+  '  printf "%s\n" "CLOUDFLARE_TUNNEL_TOKEN=disabled-on-restaurant" >> .env' \
+  'fi' \
+  'docker compose down' \
+  'test -z "$(docker ps -q --filter name=restaurant_)"' |
 ssh -o BatchMode=yes -o ConnectTimeout=10 restaurant \
-  "wsl.exe -d Ubuntu -- bash -lc '
-set -eu
-cd /home/khajiev13/apps/restaurant-mini-app
-cutover_id=20260719-home-migration
-install -m 600 .env .env.before-$cutover_id
-if grep -q ^CLOUDFLARE_TUNNEL_TOKEN= .env; then
-  sed -i s/^CLOUDFLARE_TUNNEL_TOKEN=.*/CLOUDFLARE_TUNNEL_TOKEN=disabled-on-restaurant/ .env
-else
-  printf %s\\n CLOUDFLARE_TUNNEL_TOKEN=disabled-on-restaurant >> .env
-fi
-docker compose down
-test -z \"\$(docker ps -q --filter name=restaurant_)\"
-'"
+  "wsl.exe -d Ubuntu -- bash -s"
 ```
 
 Expected: the old restaurant stack is stopped and its active `.env` can no
