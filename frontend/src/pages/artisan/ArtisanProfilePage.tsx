@@ -215,7 +215,7 @@ export default function ArtisanProfilePage() {
   }, [isAuthenticated]);
 
   const handleSharePhone = () => {
-    if (!tg) return;
+    if (!tg?.requestContact) return;
 
     const pollForPhone = async (attempts = 10) => {
       for (let index = 0; index < attempts; index += 1) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import ArtisanMenuPage from './pages/artisan/ArtisanMenuPage';
 import ArtisanCheckoutPage from './pages/artisan/ArtisanCheckoutPage';
@@ -12,6 +13,7 @@ import StaffProfilePage from './pages/staff/StaffProfilePage';
 import StaffTablesPage from './pages/staff/StaffTablesPage';
 import StaffTableDetailPage from './pages/staff/StaffTableDetailPage';
 import AdminUsersPage from './pages/admin/AdminUsersPage';
+import PhoneVerificationGate from './components/auth/PhoneVerificationGate';
 import { useAuthStore } from './stores/authStore';
 import { useTableOrderStore } from './stores/tableOrderStore';
 
@@ -20,12 +22,13 @@ function RoleRouteLoadingShell() {
 }
 
 function AuthRetryShell({
-  message,
+  messageKey,
   onRetry,
 }: {
-  message: string;
+  messageKey: string;
   onRetry: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <main
       style={{
@@ -38,7 +41,7 @@ function AuthRetryShell({
       }}
     >
       <section style={{ maxWidth: 360, textAlign: 'center' }}>
-        <p style={{ margin: 0, fontSize: 16, fontWeight: 700, lineHeight: 1.45 }}>{message}</p>
+        <p style={{ margin: 0, fontSize: 16, fontWeight: 700, lineHeight: 1.45 }}>{t(messageKey)}</p>
         <button
           type="button"
           onClick={onRetry}
@@ -54,7 +57,7 @@ function AuthRetryShell({
             cursor: 'pointer',
           }}
         >
-          Retry
+          {t('common.retry')}
         </button>
       </section>
     </main>
@@ -63,20 +66,20 @@ function AuthRetryShell({
 
 export default function App() {
   const bootstrapAuth = useAuthStore((state) => state.bootstrapAuth);
-  const user = useAuthStore((state) => state.user);
+  const role = useAuthStore((state) => state.user?.role ?? 'customer');
+  const isPhoneVerified = useAuthStore((state) => state.user?.phone_verified === true);
   const isLoading = useAuthStore((state) => state.isLoading);
   const hasHydratedUser = useAuthStore((state) => state.hasHydratedUser);
   const hasResolvedInitialAuth = useAuthStore((state) => state.hasResolvedInitialAuth);
   const authError = useAuthStore((state) => state.authError);
   const resolveTableEntry = useTableOrderStore((state) => state.resolveEntry);
-  const role = user?.role ?? 'customer';
   const navigate = useNavigate();
   const handledStartParam = useRef<string | null>(null);
   const isResolvingRole = isLoading || !hasResolvedInitialAuth || !hasHydratedUser;
 
   const renderResolvedRoute = (element: ReactNode) => {
     if (authError) {
-      return <AuthRetryShell message={authError} onRetry={() => { void bootstrapAuth(); }} />;
+      return <AuthRetryShell messageKey={authError} onRetry={() => { void bootstrapAuth(); }} />;
     }
 
     if (isResolvingRole) {
@@ -99,7 +102,7 @@ export default function App() {
       return renderResolvedRoute(staffElement);
     }
 
-    return renderResolvedRoute(customerElement);
+    return renderResolvedRoute(isPhoneVerified ? customerElement : <PhoneVerificationGate />);
   };
 
   const renderStaffOrAdminRoute = (staffElement: ReactNode) =>

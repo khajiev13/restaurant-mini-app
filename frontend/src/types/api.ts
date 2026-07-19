@@ -21,6 +21,7 @@ export interface BaseUser {
 export type AdminUser = BaseUser;
 
 export interface User extends BaseUser {
+  phone_verified: boolean;
   inplace_online_payment_enabled: boolean;
 }
 

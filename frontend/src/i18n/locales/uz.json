@@ -5,7 +5,8 @@
     "currency_en": "UZS",
     "total": "Jami",
     "loading": "Yuklanmoqda...",
-    "close": "Yopish"
+    "close": "Yopish",
+    "retry": "Qayta urinish"
   },
   "menu": {
     "cart": "Savat",
@@ -18,6 +19,23 @@
     "limit": "Mavjud miqdorning barchasi savatda",
     "empty": "Menyuda hozircha mahsulot yo‘q",
     "retry": "Qayta urinish"
+  },
+  "auth": {
+    "retry_message": "Telegram hisobingizni tasdiqlab bo‘lmadi. Internetni tekshirib, qayta urinib ko‘ring."
+  },
+  "phone_verification": {
+    "title": "Telefoningizni tasdiqlang",
+    "ready": "Davom etish uchun o‘z telefon raqamingizni Telegram orqali ulashing.",
+    "requesting": "Telegram javobi kutilmoqda…",
+    "verifying": "Telefoningiz tekshirilmoqda…",
+    "declined": "Telefonni ulash rad etildi.",
+    "delayed": "Telegram kontaktni oldi, ammo tasdiqlash kutilganidan ko‘proq vaqt olyapti.",
+    "unsupported": "Telegramni yangilang va bu mini ilovani qayta oching.",
+    "outside_telegram": "Davom etish uchun bu mini ilovani Telegram ichida oching.",
+    "network_error": "Telefoningizni tekshirib bo‘lmadi. Internetni tekshirib, qayta urinib ko‘ring.",
+    "share": "Telefonni ulash",
+    "share_again": "Telefonni qayta ulash",
+    "check_again": "Qayta tekshirish"
   },
   "table": {
     "dine_in_prompt": "Stolda buyurtma berasizmi?",

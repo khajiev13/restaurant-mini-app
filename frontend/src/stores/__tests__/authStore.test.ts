@@ -23,6 +23,7 @@ const staffUser: User = {
   last_name: 'Member',
   username: 'staffer',
   phone_number: '+998900000000',
+  phone_verified: true,
   language: 'en',
   role: 'staff',
 };
@@ -101,6 +102,37 @@ describe('authStore', () => {
     });
   });
 
+  it('bootstrap removes a stale manual logout marker and authenticates Telegram initData', async () => {
+    localStorage.setItem('manual_logout', '1');
+    localStorage.setItem('jwt', 'stale-jwt');
+    apiMocks.authenticateTelegram.mockResolvedValue({
+      data: { data: { access_token: 'fresh-jwt' } },
+    });
+    apiMocks.getMe.mockResolvedValue({ data: { data: staffUser } });
+    const useAuthStore = await loadStore();
+
+    await useAuthStore.getState().bootstrapAuth();
+
+    expect(apiMocks.authenticateTelegram).toHaveBeenCalledWith('telegram-init-data');
+    expect(localStorage.getItem('manual_logout')).toBeNull();
+    expect(localStorage.getItem('jwt')).toBe('fresh-jwt');
+    expect(useAuthStore.getState().user).toEqual(staffUser);
+  });
+
+  it('exchanges Telegram initData on launch even when a JWT already exists', async () => {
+    localStorage.setItem('jwt', 'stored-jwt');
+    apiMocks.authenticateTelegram.mockResolvedValue({
+      data: { data: { access_token: 'launch-jwt' } },
+    });
+    apiMocks.getMe.mockResolvedValue({ data: { data: staffUser } });
+    const useAuthStore = await loadStore();
+
+    await useAuthStore.getState().bootstrapAuth();
+
+    expect(apiMocks.authenticateTelegram).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem('jwt')).toBe('launch-jwt');
+  });
+
   it('refreshMe replaces the stored user', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
@@ -142,11 +174,11 @@ describe('authStore', () => {
       isAuthenticated: true,
       hasHydratedUser: false,
       hasResolvedInitialAuth: true,
-      authError: 'Could not verify your role. Check your connection and try again.',
+      authError: 'auth.retry_message',
     });
   });
 
-  it('refreshMe clears auth state when profile refresh is unauthorized', async () => {
+  it('refreshMe keeps routing blocked with a retryable error when profile refresh is unauthorized', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
       token: 'jwt-123',
@@ -166,13 +198,14 @@ describe('authStore', () => {
       token: null,
       user: null,
       isAuthenticated: false,
-      hasHydratedUser: true,
+      hasHydratedUser: false,
       hasResolvedInitialAuth: true,
+      authError: 'auth.retry_message',
     });
     expect(localStorage.getItem('jwt')).toBeNull();
   });
 
-  it('authenticate clears stale auth state when login fails', async () => {
+  it('authenticate blocks customer rendering with a retryable error when login fails', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
       token: 'stale-jwt',
@@ -192,8 +225,9 @@ describe('authStore', () => {
       user: null,
       isAuthenticated: false,
       isLoading: false,
-      hasHydratedUser: true,
+      hasHydratedUser: false,
       hasResolvedInitialAuth: true,
+      authError: 'auth.retry_message',
     });
     expect(localStorage.getItem('jwt')).toBeNull();
   });
@@ -223,12 +257,12 @@ describe('authStore', () => {
       isLoading: false,
       hasHydratedUser: false,
       hasResolvedInitialAuth: true,
-      authError: 'Could not verify your role. Check your connection and try again.',
+      authError: 'auth.retry_message',
     });
     expect(localStorage.getItem('jwt')).toBe('new-jwt');
   });
 
-  it('authenticate clears auth state when profile hydration is unauthorized after login', async () => {
+  it('authenticate keeps routing blocked with a retryable error when profile hydration is unauthorized', async () => {
     const useAuthStore = await loadStore();
     useAuthStore.setState({
       token: 'stale-jwt',
@@ -251,8 +285,9 @@ describe('authStore', () => {
       user: null,
       isAuthenticated: false,
       isLoading: false,
-      hasHydratedUser: true,
+      hasHydratedUser: false,
       hasResolvedInitialAuth: true,
+      authError: 'auth.retry_message',
     });
     expect(localStorage.getItem('jwt')).toBeNull();
   });
@@ -280,6 +315,29 @@ describe('authStore', () => {
       hasResolvedInitialAuth: true,
     });
     expect(localStorage.getItem('jwt')).toBeNull();
-    expect(localStorage.getItem('manual_logout')).toBe('1');
+    expect(localStorage.getItem('manual_logout')).toBeNull();
+  });
+
+  it('accepts a verified profile returned by the shared phone hook', async () => {
+    const useAuthStore = await loadStore();
+    useAuthStore.setState({
+      token: 'jwt-123',
+      user: staffUser,
+      isAuthenticated: true,
+      isLoading: false,
+      hasHydratedUser: true,
+      hasResolvedInitialAuth: true,
+      authError: null,
+    });
+    const verifiedAdmin = { ...adminUser, phone_verified: true };
+
+    useAuthStore.getState().acceptVerifiedProfile(verifiedAdmin);
+
+    expect(useAuthStore.getState()).toMatchObject({
+      user: verifiedAdmin,
+      hasHydratedUser: true,
+      hasResolvedInitialAuth: true,
+      authError: null,
+    });
   });
 });

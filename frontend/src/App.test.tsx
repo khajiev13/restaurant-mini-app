@@ -2,11 +2,12 @@ import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import './i18n';
 import App from './App';
 
 const authState = vi.hoisted(() => ({
   bootstrapAuth: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
-  user: null as { role: string } | null,
+  user: null as { role: string; phone_verified: boolean } | null,
   token: null as string | null,
   isLoading: false,
   hasHydratedUser: true,
@@ -24,6 +25,10 @@ vi.mock('./stores/authStore', () => ({
 
 vi.mock('./stores/tableOrderStore', () => ({
   useTableOrderStore: (selector: (state: typeof tableOrderState) => unknown) => selector(tableOrderState),
+}));
+
+vi.mock('./components/auth/PhoneVerificationGate', () => ({
+  default: () => <main>Phone verification gate</main>,
 }));
 
 vi.mock('./pages/artisan/ArtisanMenuPage', () => ({
@@ -95,7 +100,7 @@ describe('App', () => {
       </MemoryRouter>,
     );
 
-    expect(view.getByText('Artisan profile page')).toBeInTheDocument();
+    expect(view.getByText('Phone verification gate')).toBeInTheDocument();
   });
 
   it('renders without Telegram WebApp globals present', () => {
@@ -105,7 +110,7 @@ describe('App', () => {
       </MemoryRouter>,
     );
 
-    expect(view.getByText('Artisan menu page')).toBeInTheDocument();
+    expect(view.getByText('Phone verification gate')).toBeInTheDocument();
     expect(view.queryByTestId('role-route-loading')).not.toBeInTheDocument();
     expect(authState.bootstrapAuth).toHaveBeenCalledTimes(1);
   });
@@ -159,7 +164,7 @@ describe('App', () => {
     authState.token = 'persisted-jwt';
     authState.hasHydratedUser = false;
     authState.hasResolvedInitialAuth = true;
-    authState.authError = 'Could not verify your role. Check your connection and try again.';
+    authState.authError = 'auth.retry_message';
 
     render(
       <MemoryRouter initialEntries={['/staff/orders']}>
@@ -167,7 +172,7 @@ describe('App', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText('Could not verify your role. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.getByText('Could not verify your Telegram account. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.queryByText('Artisan menu page')).not.toBeInTheDocument();
     expect(screen.queryByText('Staff orders page')).not.toBeInTheDocument();
 
@@ -177,7 +182,7 @@ describe('App', () => {
   });
 
   it('routes admin users from home to admin users page', () => {
-    authState.user = { role: 'admin' };
+    authState.user = { role: 'admin', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/']}>
@@ -190,7 +195,7 @@ describe('App', () => {
   });
 
   it('lets admin users open staff orders', () => {
-    authState.user = { role: 'admin' };
+    authState.user = { role: 'admin', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/staff/orders']}>
@@ -204,7 +209,7 @@ describe('App', () => {
   it('lets staff and admin users open staff tables', () => {
     for (const role of ['staff', 'admin']) {
       cleanup();
-      authState.user = { role };
+      authState.user = { role, phone_verified: false };
 
       render(
         <MemoryRouter initialEntries={['/staff/tables']}>
@@ -217,7 +222,7 @@ describe('App', () => {
   });
 
   it('routes customer users away from staff tables back to home', () => {
-    authState.user = { role: 'customer' };
+    authState.user = { role: 'customer', phone_verified: true };
 
     render(
       <MemoryRouter initialEntries={['/staff/tables']}>
@@ -232,7 +237,7 @@ describe('App', () => {
   it('lets staff and admin open table detail but redirects customers', () => {
     for (const role of ['staff', 'admin']) {
       cleanup();
-      authState.user = { role };
+      authState.user = { role, phone_verified: false };
       render(
         <MemoryRouter initialEntries={['/staff/tables/11111111-1111-4111-8111-111111111111']}>
           <App />
@@ -242,7 +247,7 @@ describe('App', () => {
     }
 
     cleanup();
-    authState.user = { role: 'customer' };
+    authState.user = { role: 'customer', phone_verified: true };
     render(
       <MemoryRouter initialEntries={['/staff/tables/11111111-1111-4111-8111-111111111111']}>
         <App />
@@ -253,7 +258,7 @@ describe('App', () => {
   });
 
   it('renders the staff order detail route for admin users', () => {
-    authState.user = { role: 'admin' };
+    authState.user = { role: 'admin', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/staff/orders/abc-123']}>
@@ -265,7 +270,7 @@ describe('App', () => {
   });
 
   it('routes staff users away from admin routes to staff orders', () => {
-    authState.user = { role: 'staff' };
+    authState.user = { role: 'staff', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/admin']}>
@@ -278,7 +283,7 @@ describe('App', () => {
   });
 
   it('renders the explicit admin users route for admin users', () => {
-    authState.user = { role: 'admin' };
+    authState.user = { role: 'admin', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/admin/users']}>
@@ -291,7 +296,7 @@ describe('App', () => {
   });
 
   it('routes staff users away from explicit admin users route to staff orders', () => {
-    authState.user = { role: 'staff' };
+    authState.user = { role: 'staff', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/admin/users']}>
@@ -304,7 +309,7 @@ describe('App', () => {
   });
 
   it('routes customer users away from admin routes to home', () => {
-    authState.user = { role: 'customer' };
+    authState.user = { role: 'customer', phone_verified: true };
 
     const view = render(
       <MemoryRouter initialEntries={['/admin']}>
@@ -317,7 +322,7 @@ describe('App', () => {
   });
 
   it('routes staff users from home to staff orders', () => {
-    authState.user = { role: 'staff' };
+    authState.user = { role: 'staff', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/']}>
@@ -329,7 +334,7 @@ describe('App', () => {
   });
 
   it('routes customer users away from staff orders back to home', () => {
-    authState.user = { role: 'customer' };
+    authState.user = { role: 'customer', phone_verified: true };
 
     const view = render(
       <MemoryRouter initialEntries={['/staff/orders']}>
@@ -342,7 +347,7 @@ describe('App', () => {
   });
 
   it('routes staff users from profile to the staff profile shell', () => {
-    authState.user = { role: 'staff' };
+    authState.user = { role: 'staff', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/profile']}>
@@ -354,7 +359,7 @@ describe('App', () => {
   });
 
   it('routes staff users away from checkout to staff orders', () => {
-    authState.user = { role: 'staff' };
+    authState.user = { role: 'staff', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/checkout']}>
@@ -366,7 +371,7 @@ describe('App', () => {
   });
 
   it('routes staff users away from customer order detail to staff orders', () => {
-    authState.user = { role: 'staff' };
+    authState.user = { role: 'staff', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/order/abc-123']}>
@@ -378,7 +383,7 @@ describe('App', () => {
   });
 
   it('routes admin users away from customer order detail to admin page', () => {
-    authState.user = { role: 'admin' };
+    authState.user = { role: 'admin', phone_verified: false };
 
     const view = render(
       <MemoryRouter initialEntries={['/order/abc-123']}>
@@ -408,7 +413,7 @@ describe('App', () => {
       </MemoryRouter>,
     );
 
-    expect(view.getByText('Artisan checkout page')).toBeInTheDocument();
+    expect(view.getByText('Phone verification gate')).toBeInTheDocument();
     expect(tg.ready).toHaveBeenCalledTimes(1);
     expect(tg.expand).toHaveBeenCalledTimes(1);
     expect(tg.setHeaderColor).toHaveBeenCalledWith('secondary_bg_color');
@@ -417,7 +422,7 @@ describe('App', () => {
     expect(tg.disableVerticalSwipes).toHaveBeenCalledTimes(1);
   });
 
-  it('resolves a Telegram table start parameter and keeps the customer on the menu', () => {
+  it('resolves a numeric Telegram table start parameter behind the gate and keeps it after unlock', () => {
     const tg = {
       initDataUnsafe: { start_param: 't2_12_q1w2e3r4t5y6' },
       ready: vi.fn(),
@@ -430,6 +435,7 @@ describe('App', () => {
     };
     (window as unknown as { Telegram?: { WebApp: unknown } }).Telegram = { WebApp: tg };
 
+    authState.user = { role: 'customer', phone_verified: false };
     const view = render(
       <MemoryRouter initialEntries={['/checkout']}>
         <App />
@@ -437,10 +443,20 @@ describe('App', () => {
     );
 
     expect(tableOrderState.resolveEntry).toHaveBeenCalledWith('t2_12_q1w2e3r4t5y6');
+    expect(view.getByText('Phone verification gate')).toBeInTheDocument();
+
+    authState.user = { role: 'customer', phone_verified: true };
+    view.rerender(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <App />
+      </MemoryRouter>,
+    );
+
     expect(view.getByText('Artisan menu page')).toBeInTheDocument();
+    expect(tableOrderState.resolveEntry).toHaveBeenCalledTimes(1);
   });
 
-  it('resolves a legacy Telegram table start parameter', () => {
+  it('resolves a legacy Telegram table start parameter behind the gate and keeps it after unlock', () => {
     const tg = {
       initDataUnsafe: { start_param: 't_A7K2P9_q1w2e3r4t5y6' },
       ready: vi.fn(),
@@ -453,13 +469,25 @@ describe('App', () => {
     };
     (window as unknown as { Telegram?: { WebApp: unknown } }).Telegram = { WebApp: tg };
 
-    render(
+    authState.user = { role: 'customer', phone_verified: false };
+    const view = render(
       <MemoryRouter initialEntries={['/checkout']}>
         <App />
       </MemoryRouter>,
     );
 
     expect(tableOrderState.resolveEntry).toHaveBeenCalledWith('t_A7K2P9_q1w2e3r4t5y6');
+    expect(view.getByText('Phone verification gate')).toBeInTheDocument();
+
+    authState.user = { role: 'customer', phone_verified: true };
+    view.rerender(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(view.getByText('Artisan menu page')).toBeInTheDocument();
+    expect(tableOrderState.resolveEntry).toHaveBeenCalledTimes(1);
   });
 
   it('consumes a table start parameter only once so checkout navigation remains usable', async () => {
@@ -475,6 +503,7 @@ describe('App', () => {
       isVersionAtLeast: vi.fn(() => false),
     };
     (window as unknown as { Telegram?: { WebApp: unknown } }).Telegram = { WebApp: tg };
+    authState.user = { role: 'customer', phone_verified: true };
 
     render(
       <MemoryRouter initialEntries={['/']}>

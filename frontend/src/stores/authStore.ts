@@ -14,6 +14,7 @@ interface AuthState {
   bootstrapAuth: () => Promise<void>;
   authenticate: () => Promise<void>;
   refreshMe: () => Promise<User | null>;
+  acceptVerifiedProfile: (profile: User) => void;
   logout: () => void;
 }
 
@@ -21,15 +22,7 @@ function hasTelegramInitData(): boolean {
   return !!window.Telegram?.WebApp?.initData;
 }
 
-function hasManualLogout(): boolean {
-  return localStorage.getItem('manual_logout') === '1';
-}
-
 function shouldResolveInitialAuth(token: string | null): boolean {
-  if (hasManualLogout()) {
-    return false;
-  }
-
   return !!token || hasTelegramInitData();
 }
 
@@ -41,7 +34,7 @@ function isUnauthorizedError(error: unknown): boolean {
   return (error as { response?: { status?: number } }).response?.status === 401;
 }
 
-const AUTH_RETRY_MESSAGE = 'Could not verify your role. Check your connection and try again.';
+const AUTH_RETRY_MESSAGE = 'auth.retry_message';
 
 export const useAuthStore = create<AuthState>((set, get) => {
   const token = localStorage.getItem('jwt');
@@ -57,19 +50,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     authError: null,
 
     bootstrapAuth: async () => {
-      if (hasManualLogout()) {
-        localStorage.removeItem('jwt');
-        set({
-          token: null,
-          user: null,
-          isAuthenticated: false,
-          isLoading: false,
-          hasHydratedUser: true,
-          hasResolvedInitialAuth: true,
-          authError: null,
-        });
-        return;
-      }
+      localStorage.removeItem('manual_logout');
 
       if (hasTelegramInitData()) {
         await get().authenticate();
@@ -137,9 +118,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
               token: null,
               user: null,
               isAuthenticated: false,
-              hasHydratedUser: true,
+              hasHydratedUser: false,
               hasResolvedInitialAuth: true,
-              authError: null,
+              authError: AUTH_RETRY_MESSAGE,
             });
           } else {
             set({
@@ -157,9 +138,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
           token: null,
           user: null,
           isAuthenticated: false,
-          hasHydratedUser: true,
+          hasHydratedUser: false,
           hasResolvedInitialAuth: true,
-          authError: null,
+          authError: AUTH_RETRY_MESSAGE,
         });
       } finally {
         set({ isLoading: false });
@@ -184,9 +165,9 @@ export const useAuthStore = create<AuthState>((set, get) => {
             token: null,
             user: null,
             isAuthenticated: false,
-            hasHydratedUser: true,
+            hasHydratedUser: false,
             hasResolvedInitialAuth: true,
-            authError: null,
+            authError: AUTH_RETRY_MESSAGE,
           });
         } else {
           set({
@@ -200,9 +181,18 @@ export const useAuthStore = create<AuthState>((set, get) => {
       }
     },
 
+    acceptVerifiedProfile: (profile) => {
+      set({
+        user: profile,
+        hasHydratedUser: true,
+        hasResolvedInitialAuth: true,
+        authError: null,
+      });
+    },
+
     logout: () => {
       localStorage.removeItem('jwt');
-      localStorage.setItem('manual_logout', '1');
+      localStorage.removeItem('manual_logout');
       set({
         token: null,
         user: null,
