@@ -83,3 +83,10 @@ def test_order_metadata_declares_staff_table_refresh_fields_and_index():
     assert "discriminator = 'inplace'" in str(
         index.dialect_options["postgresql"]["where"]
     )
+
+
+def test_order_contact_phone_provenance_defaults_to_false():
+    column = Order.__table__.columns["contact_phone_verified"]
+
+    assert column.default.arg is False
+    assert str(column.server_default.arg).lower() == "false"

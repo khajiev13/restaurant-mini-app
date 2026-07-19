@@ -5,6 +5,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Index,
     Numeric,
@@ -28,6 +29,10 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(String(255))
     username: Mapped[str | None] = mapped_column(String(255))
     phone_number: Mapped[str | None] = mapped_column(String(50))
+    phone_verified_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    phone_verified_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    phone_verified_message_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    phone_verified_update_id: Mapped[int | None] = mapped_column(BigInteger)
     language: Mapped[str] = mapped_column(String(5), default="uz")
     role: Mapped[str] = mapped_column(String(32), default="customer")
     created_at: Mapped[datetime.datetime] = mapped_column(
@@ -99,6 +104,11 @@ class Order(Base):
     total_amount: Mapped[float] = mapped_column(Numeric(12, 2))
     delivery_fee: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     comment: Mapped[str | None] = mapped_column(Text)
+    contact_phone_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+    )
     payment_method: Mapped[str] = mapped_column(String(100), default="cash")
     payment_provider: Mapped[str | None] = mapped_column(String(50))
     payment_status: Mapped[str | None] = mapped_column(String(50))
