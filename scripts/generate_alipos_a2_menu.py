@@ -17,17 +17,77 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
 
 PAGE_SIZE = A2
-BACKGROUND = HexColor("#042f33")
-PANEL = HexColor("#0a4143")
-PANEL_DARK = HexColor("#07383b")
-ORANGE = HexColor("#ef7f2c")
-GOLD = HexColor("#f3c65f")
-CREAM = HexColor("#fff6df")
-MUTED = HexColor("#b8d3cb")
-LINE = HexColor("#2d6665")
+PALETTES = {
+    "teal-gold": {
+        "background": HexColor("#042f33"),
+        "panel": HexColor("#0a4143"),
+        "panel_dark": HexColor("#07383b"),
+        "accent": HexColor("#ef7f2c"),
+        "price": HexColor("#f3c65f"),
+        "text": HexColor("#fff6df"),
+        "muted": HexColor("#b8d3cb"),
+        "line": HexColor("#2d6665"),
+    },
+    "burgundy-cream": {
+        "background": HexColor("#3a0f1b"),
+        "panel": HexColor("#571827"),
+        "panel_dark": HexColor("#2a0911"),
+        "accent": HexColor("#b7793d"),
+        "price": HexColor("#f2d18b"),
+        "text": HexColor("#fff3de"),
+        "muted": HexColor("#d9b9a9"),
+        "line": HexColor("#7b3847"),
+    },
+    "black-copper": {
+        "background": HexColor("#151515"),
+        "panel": HexColor("#24211f"),
+        "panel_dark": HexColor("#0d0d0d"),
+        "accent": HexColor("#b56332"),
+        "price": HexColor("#e2b66e"),
+        "text": HexColor("#f7efe3"),
+        "muted": HexColor("#bdb4a8"),
+        "line": HexColor("#5b4a3e"),
+    },
+    "ivory-green": {
+        "background": HexColor("#f2e7d2"),
+        "panel": HexColor("#fff9ed"),
+        "panel_dark": HexColor("#e8ddc5"),
+        "accent": HexColor("#1c5c47"),
+        "price": HexColor("#b86a2e"),
+        "text": HexColor("#173d32"),
+        "muted": HexColor("#667c70"),
+        "line": HexColor("#b9a88a"),
+    },
+}
+
+BACKGROUND = PALETTES["teal-gold"]["background"]
+PANEL = PALETTES["teal-gold"]["panel"]
+PANEL_DARK = PALETTES["teal-gold"]["panel_dark"]
+ORANGE = PALETTES["teal-gold"]["accent"]
+GOLD = PALETTES["teal-gold"]["price"]
+CREAM = PALETTES["teal-gold"]["text"]
+MUTED = PALETTES["teal-gold"]["muted"]
+LINE = PALETTES["teal-gold"]["line"]
 
 ROOT = Path(__file__).resolve().parents[1]
 LOGO_PATH = ROOT / "frontend/src/assets/logo.png"
+GENERATED_FOOD_ASSETS = {
+    "qovirma lagmon": ROOT / "frontend/src/assets/menu/qovurma-lagmon-generated.png",
+    "lag'mon": ROOT / "frontend/src/assets/menu/lagmon-generated.png",
+}
+
+
+def _set_palette(name: str) -> None:
+    colors = PALETTES[name]
+    global BACKGROUND, PANEL, PANEL_DARK, ORANGE, GOLD, CREAM, MUTED, LINE
+    BACKGROUND = colors["background"]
+    PANEL = colors["panel"]
+    PANEL_DARK = colors["panel_dark"]
+    ORANGE = colors["accent"]
+    GOLD = colors["price"]
+    CREAM = colors["text"]
+    MUTED = colors["muted"]
+    LINE = colors["line"]
 
 
 def format_price(value: object) -> str:
@@ -217,8 +277,9 @@ def _draw_photo(
     cache_dir: Path,
     *,
     caption: bool,
+    source_override: Path | None = None,
 ) -> bool:
-    downloaded = _download_image(item, cache_dir)
+    downloaded = source_override or _download_image(item, cache_dir)
     if not downloaded:
         return False
     prepared = _prepare_image(
@@ -249,25 +310,23 @@ def _draw_photo(
     return True
 
 
-def _select_photo_items(menu: dict, names: tuple[str, ...]) -> list[dict]:
-    catalog = {str(item.get("name", "")).casefold(): item for item in menu.get("items", [])}
-    selected: list[dict] = []
-    for name in names:
-        item = catalog.get(name.casefold())
-        if item and _image_url(item):
-            selected.append(item)
-    if len(selected) < len(names):
-        selected_ids = {str(item.get("id")) for item in selected}
-        for item in menu.get("items", []):
-            if _image_url(item) and str(item.get("id")) not in selected_ids:
-                selected.append(item)
-                selected_ids.add(str(item.get("id")))
-            if len(selected) == len(names):
-                break
-    return selected
+def select_featured_food_items(items: list[dict]) -> list[dict]:
+    """Choose only main dishes with real AliPOS images for food photo cards."""
+    catalog = {str(item.get("name", "")).casefold(): item for item in items}
+    return [
+        item
+        for name in ("Qovirma lagmon", "Lag'mon", "1 kg Osh", "Mastava")
+        if (item := catalog.get(name.casefold()))
+        and (_generated_food_asset(item) or _image_url(item))
+    ]
 
 
-def _draw_header(pdf: canvas.Canvas, menu: dict, cache_dir: Path) -> None:
+def _generated_food_asset(item: dict) -> Path | None:
+    asset = GENERATED_FOOD_ASSETS.get(str(item.get("name", "")).casefold())
+    return asset if asset and asset.exists() else None
+
+
+def _draw_header(pdf: canvas.Canvas) -> None:
     page_width, page_height = PAGE_SIZE
     margin = 48
     header_y = page_height - 337
@@ -287,35 +346,29 @@ def _draw_header(pdf: canvas.Canvas, menu: dict, cache_dir: Path) -> None:
             mask="auto",
         )
 
-    title_x = margin + 300
+    title_left = margin + 300
+    title_right = page_width - margin - 18
+    title_center = (title_left + title_right) / 2
     pdf.setFillColor(GOLD)
-    pdf.setFont("Helvetica-Bold", 72)
-    pdf.drawString(title_x, header_y + 174, "MENYU")
+    pdf.setFont("Helvetica-Bold", 96)
+    pdf.drawCentredString(title_center, header_y + 174, "MENYU")
+    badge_width = 350
     pdf.setFillColor(ORANGE)
-    pdf.roundRect(title_x, header_y + 130, 254, 30, 10, stroke=0, fill=1)
+    pdf.roundRect(
+        title_center - badge_width / 2,
+        header_y + 123,
+        badge_width,
+        35,
+        11,
+        stroke=0,
+        fill=1,
+    )
     pdf.setFillColor(CREAM)
-    pdf.setFont("Helvetica-Bold", 14)
-    pdf.drawCentredString(title_x + 127, header_y + 140, "NARXLAR SO'MDA")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawCentredString(title_center, header_y + 135, "NARXLAR SO'MDA")
     pdf.setFillColor(MUTED)
-    pdf.setFont("Helvetica", 13)
-    pdf.drawString(title_x, header_y + 93, "OLOT SOMSA")
-
-    photo_items = _select_photo_items(menu, ("1 kg Osh", "Mastava", "Fri"))
-    photo_size = 132
-    photo_gap = 14
-    photo_x = page_width - margin - (photo_size * 3 + photo_gap * 2) - 18
-    photo_y = header_y + 81
-    for index, item in enumerate(photo_items[:3]):
-        _draw_photo(
-            pdf,
-            item,
-            photo_x + index * (photo_size + photo_gap),
-            photo_y,
-            photo_size,
-            photo_size,
-            cache_dir,
-            caption=True,
-        )
+    pdf.setFont("Helvetica-Bold", 18)
+    pdf.drawCentredString(title_center, header_y + 88, "OLOT SOMSA")
 
 
 def _draw_food_panel(
@@ -325,16 +378,60 @@ def _draw_food_panel(
     y: float,
     width: float,
     height: float,
+    cache_dir: Path,
 ) -> None:
     _draw_panel(pdf, x, y, width, height)
     _draw_section_header(pdf, "OVQATLAR", x + 18, y + height - 18, width - 36)
 
-    split_at = (len(items) + 1) // 2
-    columns = (items[:split_at], items[split_at:])
+    featured = select_featured_food_items(items)
+    drawn_featured_ids: set[str] = set()
+    drawn_featured_rows: set[int] = set()
+    if featured:
+        feature_gap = 18
+        feature_width = (width - 36 - feature_gap) / 2
+        photo_height = 112
+        row_stride = 163
+        photo_top = y + height - 84
+        for index, item in enumerate(featured[:4]):
+            row_index = index // 2
+            column_index = index % 2
+            feature_x = x + 18 + column_index * (feature_width + feature_gap)
+            photo_y = photo_top - photo_height - row_index * row_stride
+            if _draw_photo(
+                pdf,
+                item,
+                feature_x,
+                photo_y,
+                feature_width,
+                photo_height,
+                cache_dir,
+                caption=False,
+                source_override=_generated_food_asset(item),
+            ):
+                _draw_item_row(
+                    pdf,
+                    item,
+                    feature_x + 2,
+                    photo_y - 27,
+                    feature_width - 4,
+                    name_size=15,
+                    price_size=14,
+                )
+                drawn_featured_ids.add(str(item.get("id")))
+                drawn_featured_rows.add(row_index)
+
+    list_items = [
+        item for item in items if str(item.get("id")) not in drawn_featured_ids
+    ]
+    split_at = (len(list_items) + 1) // 2
+    columns = (list_items[:split_at], list_items[split_at:])
     inner_gap = 24
     inner_width = (width - 36 - inner_gap) / 2
-    start_y = y + height - 101
-    line_height = min(62, (height - 190) / max(split_at - 1, 1))
+    featured_row_count = max(drawn_featured_rows, default=-1) + 1
+    start_offset = 126 + featured_row_count * 163 if featured_row_count else 101
+    start_y = y + height - start_offset
+    available_height = start_y - (y + 52)
+    line_height = min(58, available_height / max(split_at - 1, 1))
     for column_index, column_items in enumerate(columns):
         item_x = x + 18 + column_index * (inner_width + inner_gap)
         for row_index, item in enumerate(column_items):
@@ -402,8 +499,15 @@ def _draw_list_panel(
         )
 
 
-def build_menu_pdf(menu: dict, output_path: Path, cache_dir: Path) -> None:
+def build_menu_pdf(
+    menu: dict,
+    output_path: Path,
+    cache_dir: Path,
+    *,
+    palette_name: str = "teal-gold",
+) -> None:
     """Render one A2 portrait page from AliPOS composition data."""
+    _set_palette(palette_name)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
     pdf = canvas.Canvas(str(output_path), pagesize=PAGE_SIZE, pageCompression=1)
@@ -416,7 +520,7 @@ def build_menu_pdf(menu: dict, output_path: Path, cache_dir: Path) -> None:
     pdf.setStrokeColor(LINE)
     pdf.setLineWidth(2)
     pdf.roundRect(24, 24, page_width - 48, page_height - 48, 28, stroke=1, fill=0)
-    _draw_header(pdf, menu, cache_dir)
+    _draw_header(pdf)
 
     grouped = group_items(menu)
     food = _category_items(grouped, "ovqat")
@@ -447,7 +551,15 @@ def build_menu_pdf(menu: dict, output_path: Path, cache_dir: Path) -> None:
     third_x = margin + food_width + gap
     fourth_x = third_x + column_width + gap
 
-    _draw_food_panel(pdf, food, margin, content_y, food_width, content_height)
+    _draw_food_panel(
+        pdf,
+        food,
+        margin,
+        content_y,
+        food_width,
+        content_height,
+        cache_dir,
+    )
     somsa_height = 402
     _draw_somsa_panel(
         pdf,
@@ -496,11 +608,15 @@ async def load_live_menu() -> dict[str, Any]:
 
 
 def main() -> None:
-    output = ROOT / "output/pdf/olot-somsa-menu-a2.pdf"
     cache_dir = ROOT / "tmp/pdfs/olot-somsa-a2/images"
     menu = asyncio.run(load_live_menu())
-    build_menu_pdf(menu, output, cache_dir)
-    print(f"Rendered {len(menu.get('items', []))} items to {output.relative_to(ROOT)}")
+    for palette_name in PALETTES:
+        output = ROOT / f"output/pdf/olot-somsa-menu-a2-{palette_name}.pdf"
+        build_menu_pdf(menu, output, cache_dir, palette_name=palette_name)
+        print(
+            f"Rendered {len(menu.get('items', []))} items to "
+            f"{output.relative_to(ROOT)}"
+        )
 
 
 if __name__ == "__main__":

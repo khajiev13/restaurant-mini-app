@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Generate one accurate, print-ready A2 portrait menu and a full-resolution PNG preview from the current live AliPOS menu.
+**Goal:** Generate four accurate, print-ready A2 portrait color variants and full-resolution PNG previews from the current live AliPOS menu.
 
 **Architecture:** A focused Python renderer reads the existing backend AliPOS client, normalizes display-only capitalization, downloads only the product images explicitly returned by AliPOS, and draws a single A2 page with ReportLab. Tests cover price formatting, lossless category grouping, and A2 page dimensions; Poppler rendering plus image inspection covers visual fidelity.
 
@@ -12,8 +12,8 @@
 
 - Finished size is A2 portrait, 420 x 594 mm.
 - Final rendering is 300 DPI.
-- Deliverables are `output/pdf/olot-somsa-menu-a2.pdf` and `output/pdf/olot-somsa-menu-a2.png`.
-- Use only the live AliPOS composition, availability response, existing OLOT SOMSA logo/category artwork, and product image URLs returned by AliPOS.
+- Deliverables use `output/pdf/olot-somsa-menu-a2-<palette>.pdf` and `.png` for the `teal-gold`, `burgundy-cream`, `black-copper`, and `ivory-green` palettes.
+- Use the live AliPOS composition and availability response, the existing OLOT SOMSA logo, AliPOS photos for 1 kg Osh and Mastava, and the approved generated Qovurma lagmon and Lag'mon assets.
 - Include all 54 live AliPOS items exactly once with unchanged prices.
 - Normalize only capitalization and punctuation; do not invent descriptions, ingredients, serving sizes, or availability.
 - Keep credentials and tokens in process; do not print or embed them.
@@ -26,6 +26,8 @@
 **Files:**
 - Create: `scripts/generate_alipos_a2_menu.py`
 - Create: `scripts/test_generate_alipos_a2_menu.py`
+- Create: `frontend/src/assets/menu/qovurma-lagmon-generated.png`
+- Create: `frontend/src/assets/menu/lagmon-generated.png`
 
 **Interfaces:**
 - Consumes: `alipos_api.get_menu() -> dict`, `alipos_api.get_menu_availability() -> dict`, and `frontend/src/assets/logo.png`.
@@ -174,13 +176,13 @@ git commit -m "feat: generate AliPOS A2 menu"
 ### Task 2: Generate the current A2 menu artifacts
 
 **Files:**
-- Create: `output/pdf/olot-somsa-menu-a2.pdf`
-- Create: `output/pdf/olot-somsa-menu-a2.png`
+- Create: four `output/pdf/olot-somsa-menu-a2-<palette>.pdf` files
+- Create: four `output/pdf/olot-somsa-menu-a2-<palette>.png` files
 - Create temporarily: `tmp/pdfs/olot-somsa-a2/`
 
 **Interfaces:**
 - Consumes: the Task 1 CLI and process-only environment loaded from `.env`.
-- Produces: one A2 PDF and one 300 DPI PNG with identical visible content.
+- Produces: four A2 PDFs and four 300 DPI PNGs with identical menu content and distinct palettes.
 
 - [ ] **Step 1: Generate the PDF from a fresh AliPOS read**
 

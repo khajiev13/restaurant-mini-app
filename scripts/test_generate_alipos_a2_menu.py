@@ -68,3 +68,48 @@ def test_build_menu_pdf_uses_customer_facing_header_copy(tmp_path: Path):
     text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
     assert "OLOT SOMSA" in text
     assert "AliPOSdagi" not in text
+
+
+def test_featured_food_photos_exclude_sauces_and_small_items():
+    items = [
+        {"id": "qovurma", "name": "Qovirma lagmon", "images": []},
+        {"id": "lagmon", "name": "Lag'mon", "images": []},
+        {
+            "id": "osh",
+            "name": "1 kg Osh",
+            "images": [{"url": "https://example.test/osh.jpg"}],
+        },
+        {
+            "id": "mastava",
+            "name": "Mastava",
+            "images": [{"url": "https://example.test/mastava.jpg"}],
+        },
+        {
+            "id": "sous",
+            "name": "Sous",
+            "images": [{"url": "https://example.test/sous.jpg"}],
+        },
+        {
+            "id": "qatiq",
+            "name": "Qatiq kichik",
+            "images": [{"url": "https://example.test/qatiq.jpg"}],
+        },
+    ]
+
+    selected = renderer.select_featured_food_items(items)
+
+    assert [item["id"] for item in selected] == [
+        "qovurma",
+        "lagmon",
+        "osh",
+        "mastava",
+    ]
+
+
+def test_four_named_color_variants_are_available():
+    assert list(renderer.PALETTES) == [
+        "teal-gold",
+        "burgundy-cream",
+        "black-copper",
+        "ivory-green",
+    ]

@@ -2,9 +2,9 @@
 
 ## Goal
 
-Create one print-ready A2 portrait menu for OLOT SOMSA using the current AliPOS
-menu composition. The result must look like a real restaurant menu while keeping
-the source item names and prices accurate.
+Create four print-ready A2 portrait menu color variants for OLOT SOMSA using the
+current AliPOS menu composition. Every variant must keep identical content and
+layout while the source item names and prices remain accurate.
 
 ## Source of truth
 
@@ -12,7 +12,8 @@ the source item names and prices accurate.
 - Availability: live AliPOS `GET /api/Integration/v1/menu/{restaurantId}/availability`
 - Brand artwork: `frontend/src/assets/logo.png`
 - Existing category artwork: `frontend/src/assets/categories/`
-- Product photography: current image URLs returned by AliPOS
+- Product photography: current image URLs returned by AliPOS, plus the approved
+  generated Qovurma lagmon and Lag'mon photographs
 
 The live read on 2026-07-19 returned four categories and 54 items. The
 availability response contained no item or modifier restrictions. Item IDs and
@@ -22,7 +23,7 @@ credentials are not printed or embedded in the deliverable.
 
 - Finished size: A2 portrait, 420 x 594 mm
 - Print rendering: 300 DPI
-- Deliverables: print PDF and full-resolution PNG preview
+- Deliverables: four print PDFs and four full-resolution PNG previews
 - Safe margin: at least 15 mm
 - No bleed-dependent content; the design remains complete if printed without
   full-bleed trimming
@@ -34,10 +35,18 @@ warm orange for accents, and gold for headings and price emphasis. The design
 should feel like a professionally printed Uzbek restaurant menu, not a mobile
 screen or app mockup.
 
-The logo anchors the header. A restrained set of real AliPOS product photos may
-appear in the header or category bands. Do not synthesize or substitute fake
-food photos. Where no product photograph exists, rely on typography, dividers,
-and the existing category artwork.
+The logo anchors the header. Real AliPOS photos for `1 kg Osh` and `Mastava`
+appear inside the Ovqatlar section as featured main-dish cards. The user also
+approved photorealistic generated photographs for `Qovirma lagmon` and
+`Lag'mon`. Choy, kofe, suvlar, souslar, and small side items remain
+typography-only rows.
+
+Produce these four palettes:
+
+1. Deep teal with orange and gold
+2. Burgundy with cream and warm bronze
+3. Black with copper and warm ivory
+4. Light ivory with traditional green and burnt orange
 
 ## Content hierarchy
 
@@ -63,9 +72,10 @@ items. Somsa, Choy va kofe, and Ichimliklar use the remaining columns and lower
 continuations as needed. Section headings, spacing, and thin ornamental rules
 must make the reading order unambiguous.
 
-Images are supporting accents, not repeated cards for every item. This keeps all
-54 entries legible at normal A2 viewing distance and avoids implying that a
-generic image belongs to a specific dish.
+Images are supporting cards for four named main dishes: two with verified
+AliPOS photos and two with approved generated photos. They are not repeated for
+small items. This keeps all 54 entries legible at normal A2 viewing distance
+and avoids implying that a generic image belongs to a specific dish.
 
 ## Accuracy and fallback rules
 
