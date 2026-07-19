@@ -114,6 +114,7 @@
     "payment_changed": "To'lov holati o'zgargan. Sahifani yangilab, qayta tekshiring.",
     "switch_cash_failed": "Onlayn to'lovni xavfsiz bekor qilib bo'lmadi. Naqd pulga o'tkazilmadi.",
     "order_more": "Yana buyurtma berish",
+    "placed_successfully": "Buyurtma muvaffaqiyatli berildi",
     "sync_help": "Buyurtma restoranga yetib borganini avtomatik tasdiqlab bo'lmadi. Iltimos, xodimga ko'rsating.",
     "open_telegram": "Buyurtmani Telegram ichida oching",
     "open_telegram_action": "Telegramda ochish",

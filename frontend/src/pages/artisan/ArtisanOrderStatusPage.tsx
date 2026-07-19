@@ -21,11 +21,12 @@ const DELIVERY_STEPS = [
   { key: 'TAKEN_BY_COURIER', icon: 'moped', labelKey: 'status.on_the_way' },
 ];
 
-const TABLE_STEPS = [
-  { key: 'NEW', icon: 'check', labelKey: 'status.placed' },
-  { key: 'ACCEPTED_BY_RESTAURANT', icon: 'restaurant', labelKey: 'status.preparing' },
-  { key: 'READY', icon: 'local_dining', labelKey: 'status.ready' },
-];
+const TABLE_SUCCESS_STATUSES = new Set([
+  'NEW',
+  'PAID_AWAITING_RESTAURANT',
+  'ACCEPTED_BY_RESTAURANT',
+  'READY',
+]);
 
 const STATUS_STEP: Record<string, number> = {
   NEW: 1,
@@ -246,6 +247,7 @@ export default function ArtisanOrderStatusPage() {
 
   const isTableOrder = order.discriminator === 'inplace';
   const currentStatus = status?.status || order.status;
+  const isSuccessfulTableOrder = isTableOrder && TABLE_SUCCESS_STATUSES.has(currentStatus);
   const paymentStatus = status?.payment_status ?? order.payment_status;
   const tableTitle = status?.table_title || order.table_title;
   const hallTitle = status?.hall_title || order.hall_title;
@@ -255,7 +257,6 @@ export default function ArtisanOrderStatusPage() {
   const isPendingPayment = paymentStatus === 'pending' && currentStatus === 'AWAITING_PAYMENT';
   const isRetryablePayment = paymentStatus === 'failed' || paymentStatus === 'expired';
   const isPaid = paymentStatus === 'paid';
-  const steps = isTableOrder ? TABLE_STEPS : DELIVERY_STEPS;
   const currentStep = STATUS_STEP[currentStatus] || 1;
   const canCancel = isTableOrder && (currentStatus === 'NEW' || currentStatus === 'AWAITING_PAYMENT');
   const canSwitchToCash = isTableOrder
@@ -297,10 +298,10 @@ export default function ArtisanOrderStatusPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
           <section style={{ textAlign: 'center' }}>
             <div style={{ width: 76, height: 76, margin: '0 auto 14px', borderRadius: '50%', backgroundColor: isCancelled ? 'rgba(179,27,37,0.1)' : 'rgba(163,56,0,0.1)', display: 'grid', placeItems: 'center' }}>
-              <Icon name={isCancelled ? 'cancel' : isTableOrder ? 'table_restaurant' : 'receipt_long'} fill size={38} style={{ color: isCancelled ? COLORS.error : COLORS.primary }} />
+              <Icon name={isCancelled ? 'cancel' : isSuccessfulTableOrder ? 'check_circle' : isTableOrder ? 'table_restaurant' : 'receipt_long'} fill size={38} style={{ color: isCancelled ? COLORS.error : COLORS.primary }} />
             </div>
             <h2 style={{ fontFamily: FONTS.headline, fontSize: 28, fontWeight: 800, color: COLORS.onSurface, margin: 0 }}>
-              {statusLabels[currentStatus] || currentStatus}
+              {isSuccessfulTableOrder ? t('order.placed_successfully') : statusLabels[currentStatus] || currentStatus}
             </h2>
             <p style={{ color: COLORS.secondary, fontWeight: 700, margin: '8px 0 0' }}>
               {t('order.order_number')}{status?.order_number || order.order_number || `#${order.id.slice(0, 6)}`}
@@ -352,15 +353,15 @@ export default function ArtisanOrderStatusPage() {
             </div>
           )}
 
-          {!isCancelled && !isPendingPayment && (
+          {!isTableOrder && !isCancelled && !isPendingPayment && (
             <section style={{ backgroundColor: COLORS.surfaceContainerLow, borderRadius: 14, padding: 20 }}>
               <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between' }}>
                 <div style={{ position: 'absolute', top: 16, left: 0, width: '100%', height: 4, backgroundColor: COLORS.surfaceContainerHighest, borderRadius: 99 }} />
-                <div style={{ position: 'absolute', top: 16, left: 0, width: `${((currentStep - 1) / (steps.length - 1)) * 100}%`, height: 4, backgroundColor: COLORS.primary, borderRadius: 99 }} />
-                {steps.map((step, index) => {
+                <div style={{ position: 'absolute', top: 16, left: 0, width: `${((currentStep - 1) / (DELIVERY_STEPS.length - 1)) * 100}%`, height: 4, backgroundColor: COLORS.primary, borderRadius: 99 }} />
+                {DELIVERY_STEPS.map((step, index) => {
                   const reached = currentStep >= index + 1;
                   return (
-                    <div key={step.key} style={{ zIndex: 1, width: `${100 / steps.length}%`, textAlign: 'center' }}>
+                    <div key={step.key} style={{ zIndex: 1, width: `${100 / DELIVERY_STEPS.length}%`, textAlign: 'center' }}>
                       <div style={{ margin: '0 auto 10px', width: 32, height: 32, borderRadius: '50%', display: 'grid', placeItems: 'center', backgroundColor: reached ? COLORS.primary : COLORS.surfaceContainerHighest, color: reached ? '#fff' : COLORS.outline, boxShadow: `0 0 0 4px ${COLORS.surfaceContainerLow}` }}>
                         <Icon name={reached && index < currentStep - 1 ? 'check' : step.icon} size={16} fill={reached} />
                       </div>
@@ -418,7 +419,7 @@ export default function ArtisanOrderStatusPage() {
             </section>
           )}
 
-          {!isCancelled && !isPendingPayment && (
+          {!isTableOrder && !isCancelled && !isPendingPayment && (
             <div style={{ textAlign: 'center', color: COLORS.outline, fontSize: 12 }}>{t('order.updating')}</div>
           )}
         </div>

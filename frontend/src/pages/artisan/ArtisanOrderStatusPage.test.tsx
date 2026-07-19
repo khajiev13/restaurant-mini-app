@@ -94,18 +94,34 @@ describe('ArtisanOrderStatusPage table mode', () => {
     });
   });
 
-  it('shows table tracking without delivery or internal identifiers', async () => {
+  it('shows a successful table-order confirmation without a status tracker', async () => {
     renderPage();
 
+    expect(await screen.findByText(/buyurtma muvaffaqiyatli berildi|order placed successfully|заказ успешно оформлен/i)).toBeVisible();
     expect(await screen.findByText('Stol 12')).toBeVisible();
     expect(screen.getByText('Asosiy zal')).toBeVisible();
-    expect(screen.getByText(/naqd pul|cash/i)).toBeVisible();
-    expect(screen.queryByText(/on the way|yo'lda/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/ichki buyurtma|internal order/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/naqd pul|cash|наличные/i)).toBeVisible();
+    expect(screen.queryByText(/tayyorlanmoqda|being prepared|готовится/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^tayyor$|ready for pickup|^готово$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/har 15 soniyada|updating every 15 seconds|обновление каждые 15 секунд/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/on the way|yo'lda|в пути/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ichki buyurtma|internal order|внутренний заказ/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/alipos/i)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /bekor qilish|cancel order/i })).toBeVisible();
-    expect(screen.getByRole('button', { name: /yana buyurtma|order more/i })).toBeVisible();
+    expect(screen.getByRole('button', { name: /bekor qilish|cancel order|отменить заказ/i })).toBeVisible();
+    expect(screen.getByRole('button', { name: /yana buyurtma|order more|заказать ещё/i })).toBeVisible();
     expect(apiMocks.restoreTable).not.toHaveBeenCalled();
+  });
+
+  it.each(['ACCEPTED_BY_RESTAURANT', 'READY'])('keeps table status %s on the success confirmation', async (orderStatus) => {
+    const progressed = { ...tableOrder, status: orderStatus };
+    apiMocks.getOrder.mockResolvedValue({ data: { data: progressed } });
+    apiMocks.getOrderStatus.mockResolvedValue({ data: { data: { ...progressed } } });
+
+    renderPage();
+
+    expect(await screen.findByText(/buyurtma muvaffaqiyatli berildi|order placed successfully|заказ успешно оформлен/i)).toBeVisible();
+    expect(screen.queryByText(/tayyorlanmoqda|being prepared|готовится/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^tayyor$|ready for pickup|^готово$/i)).not.toBeInTheDocument();
   });
 
   it('cancels a new table order after confirmation', async () => {
@@ -188,6 +204,8 @@ describe('ArtisanOrderStatusPage table mode', () => {
     });
     renderPage();
 
+    expect(await screen.findByText(/to'lov amalga oshmadi|payment failed|оплата не прошла/i)).toBeVisible();
+    expect(screen.queryByText(/buyurtma muvaffaqiyatli berildi|order placed successfully|заказ успешно оформлен/i)).not.toBeInTheDocument();
     await user.click(await screen.findByRole('button', { name: /online.*qayta|retry online/i }));
 
     await waitFor(() => expect(apiMocks.retryOrderPayment).toHaveBeenCalledWith(tableOrder.id));
@@ -210,5 +228,26 @@ describe('ArtisanOrderStatusPage table mode', () => {
     await waitFor(() => expect(apiMocks.restoreTable).toHaveBeenCalledWith(tableOrder.id));
     expect(useTableOrderStore.getState().context).toBeNull();
     expect(screen.getByText('Menu destination')).toBeVisible();
+  });
+
+  it('keeps status tracking for delivery orders', async () => {
+    const deliveryOrder = {
+      ...tableOrder,
+      discriminator: 'delivery',
+      status: 'ACCEPTED_BY_RESTAURANT',
+      table_title: null,
+      hall_title: null,
+      service_percent: 0,
+      delivery_address: 'Test address',
+    } satisfies Order;
+    apiMocks.getOrder.mockResolvedValue({ data: { data: deliveryOrder } });
+    apiMocks.getOrderStatus.mockResolvedValue({ data: { data: { ...deliveryOrder } } });
+
+    renderPage();
+
+    expect((await screen.findAllByText(/tayyorlanmoqda|being prepared|готовится/i)).length).toBeGreaterThan(0);
+    expect(screen.getByText(/on the way|yo'lda|в пути/i)).toBeVisible();
+    expect(screen.getByText(/har 15 soniyada|updating every 15 seconds|обновление каждые 15 секунд/i)).toBeVisible();
+    expect(screen.queryByText(/buyurtma muvaffaqiyatli berildi|order placed successfully|заказ успешно оформлен/i)).not.toBeInTheDocument();
   });
 });

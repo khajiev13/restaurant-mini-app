@@ -114,6 +114,7 @@
     "payment_changed": "The payment state changed. Refresh and check the order again.",
     "switch_cash_failed": "The online payment could not be safely cancelled, so the order was not switched to cash.",
     "order_more": "Order more",
+    "placed_successfully": "Order placed successfully",
     "sync_help": "We could not automatically confirm that the restaurant received this order. Please show it to a staff member.",
     "open_telegram": "Open this order inside Telegram",
     "open_telegram_action": "Open in Telegram",
