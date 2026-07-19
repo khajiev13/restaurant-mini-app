@@ -45,6 +45,13 @@ const verifiedUser: User = {
   inplace_online_payment_enabled: true,
 };
 
+const otherVerifiedUser: User = {
+  ...verifiedUser,
+  telegram_id: 8402,
+  first_name: 'Other',
+  username: 'other_customer',
+};
+
 const item = {
   id: 'item-1',
   categoryId: 'somsa',
@@ -251,5 +258,68 @@ describe('App checkout phone-gate transition', () => {
     });
     expect(apiMocks.authenticateTelegram).toHaveBeenCalledWith('retry-init-data');
     expect(apiMocks.getMe).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not restore another customer\'s draft after auth retry', async () => {
+    const user = userEvent.setup();
+    useTableOrderStore.setState({ context: null, isResolving: false, error: null });
+    apiMocks.getAddresses.mockResolvedValue({ data: { data: addresses } });
+    apiMocks.getMe
+      .mockRejectedValueOnce(new Error('network unavailable'))
+      .mockResolvedValueOnce({ data: { data: otherVerifiedUser } });
+    apiMocks.authenticateTelegram.mockResolvedValue({
+      data: { data: { access_token: 'other-user-token' } },
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/checkout']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByText('Work'));
+    await user.type(
+      screen.getByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i),
+      'Private note for user A',
+    );
+    await user.click(screen.getByRole('button', { name: /karta|online/i }));
+    await user.click(screen.getByRole('button', { name: /pay online|onlayn to'lash/i }));
+
+    const retry = await screen.findByRole('button', { name: /retry|qayta|повтор/i });
+    const firstPayload = apiMocks.createOrder.mock.calls[0][0] as CreateOrderPayload;
+    expect(firstPayload).toMatchObject({
+      address_id: 'address-work',
+      comment: 'Private note for user A',
+      payment_method: 'rahmat',
+    });
+
+    (window as Window & { Telegram?: unknown }).Telegram = {
+      WebApp: {
+        initData: 'other-user-init-data',
+        ready: vi.fn(),
+        expand: vi.fn(),
+        setHeaderColor: vi.fn(),
+        setBackgroundColor: vi.fn(),
+        setBottomBarColor: vi.fn(),
+        disableVerticalSwipes: vi.fn(),
+        isVersionAtLeast: vi.fn(() => true),
+      },
+    } as unknown as typeof window.Telegram;
+    await user.click(retry);
+
+    expect(await screen.findByPlaceholderText(/special instructions|ko'rsatmalar|инструк/i)).toHaveValue('');
+    expect(useCartStore.getState().items).toEqual([item]);
+    expect(useTableOrderStore.getState().context).toBeNull();
+    await user.click(screen.getByRole('button', { name: /place order|buyurtmani qabul qilish/i }));
+
+    await waitFor(() => expect(apiMocks.createOrder).toHaveBeenCalledTimes(2));
+    const secondPayload = apiMocks.createOrder.mock.calls[1][0] as CreateOrderPayload;
+    expect(secondPayload).toMatchObject({
+      address_id: 'address-home',
+      payment_method: 'cash',
+    });
+    expect(secondPayload.client_request_id).not.toBe(firstPayload.client_request_id);
+    expect(secondPayload.comment).toBeUndefined();
+    expect(apiMocks.authenticateTelegram).toHaveBeenCalledWith('other-user-init-data');
   });
 });

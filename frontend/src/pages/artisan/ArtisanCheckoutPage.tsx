@@ -31,6 +31,7 @@ interface AddressFormState {
 }
 
 interface PhoneGateCheckoutDraft {
+  ownerTelegramId: number;
   clientRequestId: string;
   selectedAddressId: string | null;
   comment: string;
@@ -107,7 +108,14 @@ export default function ArtisanCheckoutPage() {
     ? PAYMENT_METHODS
     : PAYMENT_METHODS.filter((method) => method.key === 'cash');
   const navigate = useNavigate();
-  const restoredDraft = useRef(phoneGateCheckoutDraft);
+  const checkoutOwnerTelegramId = useRef(
+    authUser?.phone_verified ? authUser.telegram_id : null,
+  );
+  const restoredDraft = useRef(
+    phoneGateCheckoutDraft?.ownerTelegramId === checkoutOwnerTelegramId.current
+      ? phoneGateCheckoutDraft
+      : null,
+  );
   const preserveDraftOnUnmount = useRef(false);
   const pendingGateDraft = useRef<PhoneGateCheckoutDraft | null>(null);
   const mounted = useRef(false);
@@ -151,6 +159,12 @@ export default function ArtisanCheckoutPage() {
 
   useEffect(() => {
     mounted.current = true;
+    if (
+      phoneGateCheckoutDraft
+      && phoneGateCheckoutDraft.ownerTelegramId !== checkoutOwnerTelegramId.current
+    ) {
+      phoneGateCheckoutDraft = null;
+    }
     return () => {
       mounted.current = false;
       const authState = useAuthStore.getState();
@@ -265,7 +279,15 @@ export default function ArtisanCheckoutPage() {
       console.error('Order failed:', err);
       const detail = (err as { response?: { status?: number; data?: { detail?: { code?: string } } } }).response;
       if (detail?.status === 409 && detail.data?.detail?.code === 'phone_verification_required') {
+        if (checkoutOwnerTelegramId.current === null) {
+          pendingGateDraft.current = null;
+          phoneGateCheckoutDraft = null;
+          preserveDraftOnUnmount.current = false;
+          showToast(t('checkout.phone_verification_required'));
+          return;
+        }
         const gateDraft = {
+          ownerTelegramId: checkoutOwnerTelegramId.current,
           clientRequestId: clientRequestId.current,
           selectedAddressId: s.selectedAddressId,
           comment: s.comment,
